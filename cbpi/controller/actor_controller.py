@@ -1,6 +1,6 @@
 import logging
 
-from cbpi.api.dataclasses import Actor
+from cbpi.api.dataclasses import Actor, Props
 from cbpi.controller.basic_controller2 import BasicController
 from tabulate import tabulate
 
@@ -11,6 +11,27 @@ class ActorController(BasicController):
         super(ActorController, self).__init__(cbpi, Actor, "actor.json")
         self.update_key = "actorupdate"
         self.sorting = True
+
+    def create(self, data):
+        # The base implementation only restores id/name/type/props, so everything
+        # actor.json persists beyond that was silently reset to the dataclass
+        # defaults on every start - a heater configured to run at 70% came back at
+        # 100%. to_dict() writes these fields, so read them back.
+        #
+        # 'state' is deliberately NOT restored. It is written so the UI can show
+        # what an actor was doing, but restoring it would switch a heater or pump
+        # back on by itself after a restart or a power cut. Actors always come up
+        # off, and something has to ask for them explicitly.
+        return Actor(
+            data.get("id"),
+            data.get("name"),
+            type=data.get("type"),
+            props=Props(data.get("props", {})),
+            power=data.get("power", 100),
+            maxoutput=data.get("maxoutput", 100),
+            output=data.get("output", data.get("maxoutput", 100)),
+            timer=data.get("timer", 0),
+        )
 
     async def on(self, id, power=None, output=None):
         try:
