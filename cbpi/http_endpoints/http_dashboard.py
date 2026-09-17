@@ -114,6 +114,82 @@ class DashBoardHttpEndpoints:
             await self.cbpi.dashboard.get_custom_widgets(), dumps=json_dumps
         )
 
+    @request_mapping(path="/templates", method="GET", auth_required=False)
+    async def get_templates(self, request):
+        """
+        ---
+        description: Get available dashboard starter layouts
+        tags:
+        - Dashboard
+        responses:
+            "200":
+                description: successful operation
+        """
+        return web.json_response(
+            await self.cbpi.dashboard.get_template_list(), dumps=json_dumps
+        )
+
+    @request_mapping(path="/templates/{name}", method="GET", auth_required=False)
+    async def get_template(self, request):
+        """
+        ---
+        description: Get a dashboard starter layout with bindings resolved
+        tags:
+        - Dashboard
+        parameters:
+        - name: "name"
+          in: "path"
+          description: "Template name"
+          required: true
+          type: "string"
+        responses:
+            "200":
+                description: successful operation
+        """
+        name = request.match_info["name"]
+        return web.json_response(
+            await self.cbpi.dashboard.get_template(name), dumps=json_dumps
+        )
+
+    @request_mapping(path=r"/{id:\d+}/template/{name}", method="POST", auth_required=False)
+    async def apply_template(self, request):
+        """
+        ---
+        description: Apply a starter layout to a dashboard (overwrites its content)
+        tags:
+        - Dashboard
+        parameters:
+        - name: "id"
+          in: "path"
+          description: "Dashboard ID"
+          required: true
+          type: "integer"
+          format: "int64"
+        - name: "name"
+          in: "path"
+          description: "Template name"
+          required: true
+          type: "string"
+        responses:
+            "200":
+                description: successful operation
+            "400":
+                description: unknown template
+        """
+        dashboard_id = int(request.match_info["id"])
+        name = request.match_info["name"]
+        try:
+            result = await self.cbpi.dashboard.apply_template(dashboard_id, name)
+        except FileNotFoundError:
+            # Not 404: cbpi's error_middleware rewrites every 404 into a 500, so a
+            # "not found" status would be reported to the caller as a server error.
+            return web.json_response(
+                {"status": "error", "message": "Unknown dashboard template '{}'".format(name)},
+                status=400,
+                dumps=json_dumps,
+            )
+        return web.json_response(result, dumps=json_dumps)
+
     @request_mapping(path="/numbers", method="GET", auth_required=False)
     async def get_dashboard_numbers(self, request):
         """
