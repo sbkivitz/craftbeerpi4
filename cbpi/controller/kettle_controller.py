@@ -21,6 +21,7 @@ class KettleController(BasicController):
             sensor=data.get("sensor"),
             heater=data.get("heater"),
             agitator=data.get("agitator"),
+            target_temp=data.get("target_temp", 0),
         )
 
     async def toggle(self, id):
