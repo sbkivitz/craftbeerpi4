@@ -173,7 +173,7 @@ class DashBoardHttpEndpoints:
         responses:
             "200":
                 description: successful operation
-            "400":
+            "404":
                 description: unknown template
         """
         dashboard_id = int(request.match_info["id"])
@@ -181,11 +181,9 @@ class DashBoardHttpEndpoints:
         try:
             result = await self.cbpi.dashboard.apply_template(dashboard_id, name)
         except FileNotFoundError:
-            # Not 404: cbpi's error_middleware rewrites every 404 into a 500, so a
-            # "not found" status would be reported to the caller as a server error.
             return web.json_response(
                 {"status": "error", "message": "Unknown dashboard template '{}'".format(name)},
-                status=400,
+                status=404,
                 dumps=json_dumps,
             )
         return web.json_response(result, dumps=json_dumps)
