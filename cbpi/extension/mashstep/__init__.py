@@ -110,7 +110,7 @@ class MashInStep(CBPiStep):
             self.name,
             self.props.get(
                 "Notification",
-                "Target Temp reached. Please add malt and klick next to move on.",
+                "Target Temp reached. Please add malt and click next to move on.",
             ),
             action=[NotificationAction("Next Step", self.NextStep)],
         )
