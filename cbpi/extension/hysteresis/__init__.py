@@ -3,6 +3,7 @@ import logging
 from asyncio import tasks
 
 from cbpi.api import *
+from cbpi.api.dataclasses import NotificationType
 
 
 @parameters(
@@ -21,6 +22,23 @@ from cbpi.api import *
 )
 class Hysteresis(CBPiKettleLogic):
 
+    # Consecutive unreadable samples tolerated before the user is told. At one
+    # sample per second this rides out a brief 1-wire glitch without nagging.
+    MAX_SENSOR_FAILURES = 5
+
+    def _read_temp(self, sensor_id):
+        """Current temperature, or None if it cannot be read.
+
+        get_sensor_value() returns None for a missing or failing sensor, so the
+        previous `.get("value")` raised AttributeError and killed the control
+        task for the rest of the brew.
+        """
+        try:
+            value = self.get_sensor_value(sensor_id).get("value")
+            return float(value)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
     async def run(self):
         try:
             self.offset_on = float(self.props.get("OffsetOn", 0))
@@ -36,14 +54,44 @@ class Hysteresis(CBPiKettleLogic):
 
             # self.get_actor_state()
 
+            sensor_failures = 0
+            fault_notified = False
+
             while self.running == True:
 
-                sensor_value = self.get_sensor_value(self.kettle.sensor).get("value")
+                sensor_value = self._read_temp(self.kettle.sensor)
                 target_temp = self.get_kettle_target_temp(self.id)
                 try:
                     heater_state = heater.instance.state
                 except:
                     heater_state = False
+
+                if sensor_value is None or target_temp is None:
+                    # Cannot know the temperature, so do not heat - but stay alive.
+                    # Exiting here used to end temperature control for the rest of
+                    # the brew after a single bad read, silently.
+                    sensor_failures += 1
+                    if self.heater and (heater_state == True):
+                        await self.actor_off(self.heater)
+                    if sensor_failures >= self.MAX_SENSOR_FAILURES and not fault_notified:
+                        fault_notified = True
+                        self.cbpi.notify(
+                            "{} sensor".format(getattr(self.kettle, "name", "Kettle")),
+                            "No temperature reading - heating suspended until it returns",
+                            NotificationType.ERROR,
+                        )
+                    await asyncio.sleep(1)
+                    continue
+
+                if fault_notified:
+                    self.cbpi.notify(
+                        "{} sensor".format(getattr(self.kettle, "name", "Kettle")),
+                        "Temperature reading restored - heating resumed",
+                        NotificationType.INFO,
+                    )
+                sensor_failures = 0
+                fault_notified = False
+
                 if sensor_value < target_temp - self.offset_on:
                     if self.heater and (heater_state == False):
                         await self.actor_on(self.heater)
