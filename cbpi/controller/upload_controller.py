@@ -37,15 +37,18 @@ class UploadController:
         try:
             path = self.cbpi.config_folder.get_upload_file("kbh.db")
             conn = sqlite3.connect(path)
-            c = conn.cursor()
-            c.execute("SELECT ID, Sudname, Status FROM Sud")
-            data = c.fetchall()
-            result = []
-            for row in data:
-                element = {"value": str(row[0]), "label": str(row[1])}
-                result.append(element)
-            return result
-        except:
+            try:
+                c = conn.cursor()
+                c.execute("SELECT ID, Sudname, Status FROM Sud")
+                data = c.fetchall()
+                result = []
+                for row in data:
+                    element = {"value": str(row[0]), "label": str(row[1])}
+                    result.append(element)
+                return result
+            finally:
+                conn.close()
+        except Exception:
             return []
 
     async def get_xml_recipes(self):
@@ -59,17 +62,18 @@ class UploadController:
                 result.append(element)
                 counter += 1
             return result
-        except:
+        except Exception:
             return []
 
     async def get_json_recipes(self):
         try:
             path = self.cbpi.config_folder.get_upload_file("mmum.json")
-            e = json.load(open(path))
+            with open(path) as f:
+                e = json.load(f)
             result = []
             result.append({"value": str(1), "label": e["Name"]})
             return result
-        except:
+        except Exception:
             return []
 
     async def get_brewfather_recipes(self, offset=0):
@@ -181,9 +185,8 @@ class UploadController:
                 if recipe_file and self.allowed_file(filename, "xml"):
                     self.path = self.cbpi.config_folder.get_upload_file("beer.xml")
 
-                    f = open(self.path, "w")
-                    f.write(beer_xml)
-                    f.close()
+                    with open(self.path, "w") as f:
+                        f.write(beer_xml)
                     self.cbpi.notify(
                         "Success",
                         "XML Recipe {} has been uploaded".format(filename),
@@ -203,9 +206,8 @@ class UploadController:
                 if recipe_file and self.allowed_file(filename, "json"):
                     self.path = self.cbpi.config_folder.get_upload_file("mmum.json")
 
-                    f = open(self.path, "w")
-                    f.write(mmum_json)
-                    f.close()
+                    with open(self.path, "w") as f:
+                        f.write(mmum_json)
                     self.cbpi.notify(
                         "Success",
                         "JSON Recipe {} has been uploaded".format(filename),
@@ -213,7 +215,7 @@ class UploadController:
                     )
             except Exception as e:
                 self.cbpi.notify(
-                    "Error" "JSON Recipe upload failed: {}".format(e),
+                    "Error", "JSON Recipe upload failed: {}".format(e),
                     NotificationType.ERROR,
                 )
                 pass
@@ -224,9 +226,8 @@ class UploadController:
                 if recipe_file and self.allowed_file(filename, "sqlite"):
                     self.path = self.cbpi.config_folder.get_upload_file("kbh.db")
 
-                    f = open(self.path, "wb")
-                    f.write(content)
-                    f.close()
+                    with open(self.path, "wb") as f:
+                        f.write(content)
                     self.cbpi.notify(
                         "Success",
                         "Kleiner Brauhelfer database has been uploaded",
@@ -258,6 +259,7 @@ class UploadController:
                     NotificationType.ERROR,
                 )
 
+            conn = None
             try:
                 # Get Recipe Nmae
                 conn = sqlite3.connect(self.path)
@@ -520,6 +522,9 @@ class UploadController:
                     NotificationType.ERROR,
                 )
                 pass
+            finally:
+                if conn is not None:
+                    conn.close()
         else:
             self.cbpi.notify(
                 "Recipe Upload",
@@ -529,7 +534,8 @@ class UploadController:
 
     def getJsonMashin(self, id):
         self.path = self.cbpi.config_folder.get_upload_file("mmum.json")
-        e = json.load(open(self.path))
+        with open(self.path) as f:
+            e = json.load(f)
         return float(e["Einmaischtemperatur"])
 
     # function to create a recipe from a MUMM json recipe file
@@ -546,7 +552,8 @@ class UploadController:
                         NotificationType.ERROR,
                     )
 
-                e = json.load(open(self.path))
+                with open(self.path) as f:
+                    e = json.load(f)
                 logging.info(json.dumps(e, indent=4))
                 name = e["Name"]
                 boil_time = float(e["Kochzeit_Wuerze"])
@@ -1120,7 +1127,8 @@ class UploadController:
                 )
         elif recipe_type == "json":
             self.path = self.cbpi.config_folder.get_upload_file("mmum.json")
-            e = json.load(open(self.path))
+            with open(self.path) as f:
+                e = json.load(f)
             Rasten= e["Rasten"]
             idx = 1
             for Rast in Rasten:
