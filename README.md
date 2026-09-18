@@ -18,6 +18,11 @@ fermentation of beer :beer:.
 Instructions on how to install CraftBeerPi and use its plugins is described
 in the documentation, that can be found here: [gitbook.io](https://openbrewing.gitbook.io/craftbeerpi4_support/).
 
+### Recipes
+[Writing, importing and running a recipe](./docs/RECIPES.md) — which BeerXML
+elements are read, the settings import depends on, and the places where
+CraftBeerPi uses a value from settings instead of your file.
+
 ## 📚 Changelog
 Changelog can be found [here](./CHANGELOG.md)
 
