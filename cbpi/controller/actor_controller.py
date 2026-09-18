@@ -41,7 +41,7 @@ class ActorController(BasicController):
         awaits (gpioactor run()); cancelling it mid-cycle leaves the pin HIGH.
         Nothing calls GPIO.cleanup() either, and RPi.GPIO does not reset pins when
         the process exits - so stopping the service with a heater on left a
-        kilowatt element energised indefinitely with nothing supervising it.
+        kilowatt element energized indefinitely with nothing supervising it.
 
         Actors are switched off first, so the duty loop sees state False and stops
         driving the pin, and again after the tasks are cancelled, so a loop that
@@ -58,7 +58,7 @@ class ActorController(BasicController):
             await super().shutdown(app)
         finally:
             # Always re-confirm, even if task cancellation raised: leaving an
-            # element energised is worse than a noisy shutdown.
+            # element energized is worse than a noisy shutdown.
             for item in self.data:
                 try:
                     if item.instance is not None:
