@@ -342,7 +342,7 @@ the book thereafter.
 | `GET /upload/xml` returns `[]` after a successful upload | Content type was not `text/xml`. Re-upload with `;type=text/xml`. |
 | Import appears to do nothing | `MASH_TUN` not set. Check notifications. |
 | Boil runs at the wrong temperature | It comes from `steps_boil_temp`, not the recipe. |
-| A hop addition is missing | More than five boil additions; only `Hop_1`–`Hop_5` exist. |
+| A hop addition is missing | More than six boil additions — hops and miscs share six slots. On an unpatched 4.7.7 the sixth is also never announced. |
 | Whirlpool runs 15 min instead of what I wrote | Aroma `TIME` is ignored; the wait is hardcoded. |
 | Mash temperatures lost their decimals | Step temperatures are truncated to integers on import. |
 | Steps point at the wrong kettle | Kettles are resolved at import time. Re-import after changing them. |
