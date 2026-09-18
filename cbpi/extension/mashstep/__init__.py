@@ -608,7 +608,9 @@ class BoilStep(CBPiStep):
 
     async def next_hop_timer(self):
         hop_timers = []
-        for x in range(1, 6):
+        # Hop_1..Hop_6 are declared as properties and hops_added is sized for six,
+        # so the range must reach 7 or the sixth addition is never counted.
+        for x in range(1, 7):
             try:
                 hop = int(self.props.get("Hop_%s" % x, None)) * 60
             except:
@@ -746,7 +748,7 @@ class BoilStep(CBPiStep):
                         )
                     except:
                         self.summary2 = None
-                for x in range(1, 6):
+                for x in range(1, 7):
                     await self.check_hop_timer(
                         x,
                         self.props.get("Hop_%s" % x, None),
