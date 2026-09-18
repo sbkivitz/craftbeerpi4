@@ -181,7 +181,7 @@ Hop `TEMP` (used for the whirlpool) is handled the same way.
 in at the start of a 60-minute boil.
 
 Hops and miscs are merged into one list, sorted by descending time, and assigned to
-slots `Hop_1`…`Hop_5`. A misc can therefore land in a slot named "Hop" — that is
+slots `Hop_1`…`Hop_6`. A misc can therefore land in a slot named "Hop" — that is
 normal. This:
 
 ```xml
@@ -200,8 +200,13 @@ Hop_3 = 10  Whirlfloc     <- the misc
 Hop_4 = 5   Cascade
 ```
 
-> **Five boil additions maximum.** Slots run `Hop_1` to `Hop_5`. A sixth is silently
-> dropped. There is a `Hop_6` property on the boil step, but nothing populates it.
+> **Six boil additions maximum.** Slots run `Hop_1` to `Hop_6`, filled from the
+> sorted list. A seventh addition is silently dropped.
+>
+> Up to and including 4.7.7 the sixth slot was populated on import and shown in the
+> UI but never announced, because the boil step read only `Hop_1`–`Hop_5`. If you
+> are on an unpatched build, keep your boil additions to five or verify the last
+> one fires.
 
 ### Whirlpool / hopstand
 
