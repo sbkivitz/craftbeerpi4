@@ -30,26 +30,51 @@ Import reads your settings to decide which kettles and step types to use.
 **If `MASH_TUN` is not set the import fails** — with a notification that is easy to
 miss if you are watching the upload instead.
 
-| Setting | Purpose | If unset |
+| Setting | Purpose | Default |
 |---|---|---|
-| `MASH_TUN` | kettle for all mash steps | **import fails** |
+| `MASH_TUN` | kettle for all mash steps | none — **import fails** |
 | `BoilKettle` | kettle for the boil | falls back to `MASH_TUN` |
 | `TEMP_UNIT` | `C` or `F` | `C` |
-| `steps_boil_temp` | boil target — **not** taken from the recipe | `98` |
+| `steps_boil_temp` | boil target — **not** taken from the recipe | `99` °C / `212` °F |
+| `steps_cooldown_temp` | temperature the cooldown step alerts at | `20` °C / `68` °F |
 | `AddMashInStep` | insert a mash-in step if the recipe has none | `Yes` |
 | `AutoMode` | start/stop kettle logic automatically per step | `Yes` |
-| `steps_cooldown_temp` | temperature the cooldown step alerts at | `25` |
 | `steps_mashin`, `steps_mash`, `steps_boil`, `steps_cooldown` | override step types | built-in types |
 
-Set them under **Settings** in the UI, or over the API:
+Temperature defaults are seeded on first start and depend on `TEMP_UNIT`, so set
+your unit before anything else — changing it later does **not** convert values that
+are already stored.
+
+Set them under **Settings** in the UI, or over the API. A complete first-time setup:
 
 ```bash
+PI=http://<pi>:8000
+
+# 1. Find your kettle IDs
+curl -s $PI/kettle/ | python -m json.tool
+# {"data": [
+#   {"id": "aCCVgZ2Ht...", "name": "HLT",         ...},
+#   {"id": "oQhZqfBjS...", "name": "Mash Tun",    ...},
+#   {"id": "b7qhSvKJ2...", "name": "Boil Kettle", ...}
+# ], ...}
+
+# 2. Point the importer at them
 curl -X PUT -H "Content-Type: application/json" \
-     -d '{"name":"MASH_TUN","value":"<kettle-id>"}' \
-     http://<pi>:8000/config/MASH_TUN/
+     -d '{"name":"MASH_TUN","value":"oQhZqfBjS..."}' \
+     $PI/config/MASH_TUN/
+
+curl -X PUT -H "Content-Type: application/json" \
+     -d '{"name":"BoilKettle","value":"b7qhSvKJ2..."}' \
+     $PI/config/BoilKettle/
+
+# 3. Confirm it took
+curl -s $PI/config/ | python -c \
+  "import json,sys; c=json.load(sys.stdin); print('MASH_TUN =', c['MASH_TUN']['value'])"
 ```
 
-Kettle IDs come from `GET /kettle/`.
+Note the trailing slash on `/config/MASH_TUN/`. Without it you get a `308
+Permanent Redirect`, which curl does not follow unless you add `-L` — so the
+request silently does nothing.
 
 ---
 
@@ -95,6 +120,60 @@ first step's temperature.
 
 > **Step temperatures are truncated to whole numbers on import.** `67.5` becomes
 > `67`. If you mash at half degrees, edit the step after importing.
+
+#### Example: a step mash
+
+Each rest is its own `MASH_STEP`, in order. `STEP_TIME` is time *at* that
+temperature; the ramp between rests is not timed.
+
+```xml
+<MASH_STEPS>
+  <MASH_STEP>                       <!-- mash-in: waits for you -->
+    <NAME>Dough In</NAME>
+    <STEP_TEMP>52.0</STEP_TEMP>
+    <STEP_TIME>0.0</STEP_TIME>
+  </MASH_STEP>
+  <MASH_STEP>                       <!-- protein rest -->
+    <NAME>Protein Rest</NAME>
+    <STEP_TEMP>52.0</STEP_TEMP>
+    <STEP_TIME>20.0</STEP_TIME>
+  </MASH_STEP>
+  <MASH_STEP>                       <!-- beta -->
+    <NAME>Beta Amylase</NAME>
+    <STEP_TEMP>63.0</STEP_TEMP>
+    <STEP_TIME>45.0</STEP_TIME>
+  </MASH_STEP>
+  <MASH_STEP>                       <!-- alpha -->
+    <NAME>Alpha Amylase</NAME>
+    <STEP_TEMP>72.0</STEP_TEMP>
+    <STEP_TIME>20.0</STEP_TIME>
+  </MASH_STEP>
+  <MASH_STEP>                       <!-- mash out -->
+    <NAME>Mash Out</NAME>
+    <STEP_TEMP>76.0</STEP_TEMP>
+    <STEP_TIME>10.0</STEP_TIME>
+  </MASH_STEP>
+</MASH_STEPS>
+```
+
+#### Temperature units
+
+**`STEP_TEMP` is always Celsius**, which is what the BeerXML specification says. If
+`TEMP_UNIT` is `F`, CraftBeerPi converts on import; if it is `C`, the value is used
+as-is.
+
+```xml
+<STEP_TEMP>67.0</STEP_TEMP>
+```
+
+- server set to `C` → step is **67 °C**
+- server set to `F` → step is **152.6 °F**, then truncated to **152**
+
+So write Celsius in the file regardless of your server's unit. Do **not** write
+`152.0` because you brew in Fahrenheit — that would be read as 152 °C and converted
+to 305 °F.
+
+Hop `TEMP` (used for the whirlpool) is handled the same way.
 
 ### Hop and misc timings
 
