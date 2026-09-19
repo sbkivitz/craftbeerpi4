@@ -31,6 +31,12 @@ class ReadThread(threading.Thread):
         self.value = 0
         self.sensor_name = sensor_name
         self.runnig = True
+        # When the probe last produced a reading that passed its CRC check. None
+        # until the first one. Distinct from "when we last published a number":
+        # this loop keeps its previous value when a read fails, so without this
+        # there is nothing to tell a live probe from a disconnected one.
+        self.last_success = None
+        self.failing = False
 
     def shutdown(self):
         pass
@@ -51,10 +57,40 @@ class ReadThread(threading.Thread):
                     if content.split("\n")[0].split(" ")[11] == "YES":
                         temp = float(content.split("=")[-1]) / 1000  # temp in Celcius
                         self.value = temp
-            except:
-                pass
+                        self.last_success = time.time()
+                        if self.failing:
+                            self.failing = False
+                            logging.info(
+                                "OneWire %s: reads recovered", self.sensor_name
+                            )
+                    else:
+                        # CRC failed. Keeping the previous value is fine for a single
+                        # bad sample, but last_success is deliberately not advanced,
+                        # so a probe that only ever returns bad CRCs stops looking
+                        # healthy instead of reporting its last good reading forever.
+                        self._note_failure("CRC check failed")
+            except Exception as e:
+                # Was a bare `except: pass`. The failure itself is expected during a
+                # brief bus glitch, but swallowing it silently meant a permanently
+                # disconnected probe was indistinguishable from a working one.
+                self._note_failure(e)
 
             time.sleep(1)
+
+    def _note_failure(self, reason):
+        """Log the first failure in a run of them, then stay quiet.
+
+        A disconnected probe fails every second; logging each one would bury the
+        rest of the log on a long brew.
+        """
+        if not self.failing:
+            self.failing = True
+            logging.warning(
+                "OneWire %s: read failed (%s). Further failures will not be logged "
+                "until it recovers.",
+                self.sensor_name,
+                reason,
+            )
 
 
 @parameters(
@@ -150,6 +186,43 @@ class OneWire(CBPiSensor):
     async def Confirm(self, **kwargs):
         pass
 
+    # A probe is polled once a second by the reader thread. Allowing several
+    # missed reads rides out a bus glitch without declaring a healthy sensor dead.
+    MAX_READ_AGE = 15
+
+    def _reads_are_current(self):
+        """True when the probe has recently produced a CRC-valid reading.
+
+        Falls back to True when the reader thread predates this check or exposes
+        no last_success, so a subclass or older thread keeps publishing rather
+        than going silent - failing towards the previous behaviour, not towards
+        a sensor that never reports.
+        """
+        last_success = getattr(self.t, "last_success", "missing")
+        if last_success == "missing":
+            return True
+        if last_success is None:
+            # Thread started but has never managed a good read.
+            return False
+        age = time.time() - last_success
+        if age > max(self.MAX_READ_AGE, self.interval * 3):
+            if not getattr(self, "_stale_logged", False):
+                self._stale_logged = True
+                logging.warning(
+                    "OneWire %s: no valid reading for %.0fs - no longer publishing, "
+                    "so consumers can see it go stale",
+                    self.sensor.name if self.sensor else self.id,
+                    age,
+                )
+            return False
+        if getattr(self, "_stale_logged", False):
+            self._stale_logged = False
+            logging.info(
+                "OneWire %s: publishing again",
+                self.sensor.name if self.sensor else self.id,
+            )
+        return True
+
     async def stop(self):
         try:
             self.t.stop()
@@ -176,13 +249,29 @@ class OneWire(CBPiSensor):
                 self.value = round((self.t.value + self.offset), 2)
             else:  # Report temp in F if unit selected in settings
                 self.value = round((9.0 / 5.0 * self.t.value + 32 + self.offset), 2)
-            self.push_update(self.value)
-            if self.reducedlogging:
-                await self.logvalue()
-            else:
-                logging.info("OneWire {} regular logging".format(self.sensor.name))
-                self.log_data(self.value)
-                self.lastlog = time.time()
+
+            # Only publish a reading the probe actually produced. The reader thread
+            # keeps its previous value when a read fails, so publishing
+            # unconditionally meant a disconnected probe reported a plausible
+            # temperature forever - and kept refreshing its own freshness while
+            # doing it, defeating any staleness check downstream.
+            #
+            # Staying quiet is what makes the reading age, which is what lets
+            # kettle logic notice and switch the heater off. Logging is skipped for
+            # the same reason: charting a value the probe never produced turns a
+            # dead sensor into a convincing flat line, where a gap is honest.
+            if self._reads_are_current():
+                self.push_update(self.value)
+
+                if self.reducedlogging:
+                    await self.logvalue()
+                else:
+                    logging.info(
+                        "OneWire {} regular logging".format(self.sensor.name)
+                    )
+                    self.log_data(self.value)
+                    self.lastlog = time.time()
+
             await asyncio.sleep(self.interval)
 
     async def logvalue(self):
