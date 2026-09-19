@@ -26,18 +26,41 @@ class Hysteresis(CBPiKettleLogic):
     # sample per second this rides out a brief 1-wire glitch without nagging.
     MAX_SENSOR_FAILURES = 5
 
+    # A reading older than this is treated as no reading at all. Sensors publish
+    # about once a second, so half a minute is many missed cycles rather than a
+    # blip - long enough not to trip on a slow bus, short enough that a heater is
+    # not driven against a stale number for any meaningful part of a rest.
+    MAX_SENSOR_AGE = 30
+
     def _read_temp(self, sensor_id):
-        """Current temperature, or None if it cannot be read.
+        """Current temperature, or None if it cannot be trusted.
 
         get_sensor_value() returns None for a missing or failing sensor, so the
         previous `.get("value")` raised AttributeError and killed the control
         task for the rest of the brew.
+
+        A value alone is not enough. Several sensor implementations - the bundled
+        OneWire one among them - catch a read error and keep publishing their last
+        reading, so an unplugged probe reports a plausible temperature forever. A
+        reading that has stopped being updated is therefore rejected here, which
+        the None check on its own could never catch.
         """
         try:
-            value = self.get_sensor_value(sensor_id).get("value")
-            return float(value)
+            state = self.get_sensor_value(sensor_id)
+            value = float(state.get("value"))
         except (AttributeError, TypeError, ValueError):
             return None
+
+        age = state.get("age")
+        if age is not None and age > self.MAX_SENSOR_AGE:
+            logging.warning(
+                "Hysteresis: ignoring sensor %s, last updated %.0fs ago",
+                sensor_id,
+                age,
+            )
+            return None
+
+        return value
 
     async def run(self):
         try:

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from abc import ABCMeta, abstractmethod
 
 from cbpi.api.base import CBPiBase
@@ -22,6 +23,12 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
         self.temprange = 0
         self.kettle = None
         self.fermenter = None
+        # When this sensor last produced a reading. None until the first one.
+        # Without it a reading is just a number, and nothing downstream can tell a
+        # fresh measurement from one frozen ten minutes ago - which matters because
+        # several sensor implementations swallow a read error and keep republishing
+        # their last value, so a disconnected probe still looks healthy.
+        self.last_update = None
 
     def init(self):
         pass
@@ -57,6 +64,9 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
             return True
 
     def push_update(self, value, mqtt=True):
+        # Stamped before the send so a failure to reach clients does not make an
+        # otherwise good reading look stale.
+        self.last_update = time.time()
         if self.temprange != 0:
             self.inrange = self.checkrange(value)
         else:
@@ -69,6 +79,7 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
                     value=value,
                     datatype=self.datatype.value,
                     inrange=self.inrange,
+                    timestamp=self.last_update,
                 )
             )
             if mqtt:
@@ -79,6 +90,7 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
                         value=value,
                         datatype=self.datatype.value,
                         inrange=self.inrange,
+                        timestamp=self.last_update,
                     ),
                     retain=True,
                 )
