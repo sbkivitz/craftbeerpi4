@@ -68,7 +68,15 @@ class StepController:
             # Start step after start up
             self.profile = list(map(lambda item: self.create(item), self.profile))
             if startActive is True:
-                active_step = self.find_by_status("A")
+                # StepState is a plain Enum, so StepState.ACTIVE == "A" is False
+                # and this lookup silently found nothing. The consequence: a profile
+                # interrupted by a restart - a power cut mid-mash, or a service
+                # restart during an upgrade - came back up with its step still
+                # marked ACTIVE but no task behind it. Nothing could then move it:
+                # next() raised on task.cancel() against None, start() refused with
+                # "Steps already running", and the only way out was to hand-edit
+                # step_data.json.
+                active_step = self.find_by_status(StepState.ACTIVE)
                 if active_step is not None:
                     asyncio.create_task(self.start_step(active_step))
 
@@ -88,7 +96,7 @@ class StepController:
             # Start step after start up
             self.profile = list(map(lambda item: self.create(item), self.profile))
             if startActive is True:
-                active_step = self.find_by_status("A")
+                active_step = self.find_by_status(StepState.ACTIVE)
                 if active_step is not None:
                     asyncio.create_task(self.start_step(active_step))
 
@@ -200,10 +208,14 @@ class StepController:
             logging.info("No Step is running")
 
     async def resume(self):
-        step = self.find_by_status("P")
+        # Two bugs here, one masking the other. find_by_status("P") never matched:
+        # StepState is a plain Enum so the comparison against a raw string is always
+        # False, and there is no PAUSE member anyway - STOP is the state a stopped
+        # step actually gets. Had it matched, the next line would have raised, since
+        # Step is a dataclass with no .get(). So resume() has always been dead code.
+        step = self.find_by_status(StepState.STOP)
         if step is not None:
-            instance = step.get("instance")
-            if instance is not None:
+            if step.instance is not None:
                 await self.start_step(step)
         else:
             logging.info("Nothing to resume")
