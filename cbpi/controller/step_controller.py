@@ -365,6 +365,30 @@ class StepController:
         self.push_udpate()
 
     def done(self, step, result):
+        if result == StepResult.ERROR:
+            # A failed step must stop the profile visibly rather than sit there
+            # looking active. StepState.ERROR already existed and was never used
+            # anywhere; this is the case it was meant for.
+            step_current = self.find_by_id(step.id)
+            step_current.status = StepState.ERROR
+
+            async def report():
+                await self.save()
+                try:
+                    self.cbpi.notify(
+                        "Mash Profile",
+                        "Step '{}' failed and the profile has stopped. Check the "
+                        "log, then start to retry it or next to skip it.".format(
+                            step.name
+                        ),
+                        NotificationType.ERROR,
+                    )
+                except Exception as e:
+                    logging.warning("Could not notify about the failed step: %s", e)
+
+            asyncio.create_task(report())
+            return
+
         if result == StepResult.NEXT:
             step_current = self.find_by_id(step.id)
             step_current.status = StepState.DONE

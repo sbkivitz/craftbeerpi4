@@ -53,12 +53,27 @@ class CBPiStep(CBPiBase):
         self.logger = logging.getLogger(__name__)
 
     def _done(self, task):
-        if self._done_callback is not None:
-            try:
-                result = task.result()
-                self._done_callback(self, result)
-            except Exception as e:
-                self.logger.error(e)
+        if self._done_callback is None:
+            return
+        try:
+            result = task.result()
+        except asyncio.CancelledError:
+            # Stopped deliberately. StepController.stop() owns that transition, so
+            # reporting it here as well would fight with it.
+            return
+        except Exception as e:
+            # Previously this only logged, so the controller was never told and the
+            # step stayed ACTIVE with a completed, failed task behind it - the same
+            # dead end an interrupted restart used to leave. Next then re-awaited
+            # the failed task and raised the same exception again.
+            self.logger.error(
+                "Step %s failed: %s", self.name, e, exc_info=True
+            )
+            result = StepResult.ERROR
+        try:
+            self._done_callback(self, result)
+        except Exception as e:
+            self.logger.error(e)
 
     async def start(self):
         self.logger.info("Start {}".format(self.name))
