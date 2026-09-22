@@ -145,6 +145,8 @@ class MashInStep(CBPiStep):
             sensor_value = self.get_sensor_value(self.props.get("Sensor", None)).get(
                 "value"
             )
+            if self.timer.is_running is not True:
+                self.note_heat_progress(sensor_value, self.props.get("Temp", 0))
             if (
                 sensor_value >= int(self.props.get("Temp", 0))
                 and self.timer.is_running is not True
@@ -275,6 +277,8 @@ class MashStep(CBPiStep):
             sensor_value = self.get_sensor_value(self.props.get("Sensor", None)).get(
                 "value"
             )
+            if self.timer.is_running is not True:
+                self.note_heat_progress(sensor_value, self.props.get("Temp", 0))
             if (
                 sensor_value >= int(self.props.get("Temp", 0))
                 and self.timer.is_running is not True
@@ -726,6 +730,9 @@ class BoilStep(CBPiStep):
             if self.lid_actor is not None and sensor_value >= self.lid_temp and self.lid_actor_flag:
                 if self.get_actor_state(self.lid_actor) is False:
                     await self.actor_on(self.lid_actor)
+
+            if self.timer.is_running is not True:
+                self.note_heat_progress(sensor_value, self.props.get("Temp", 0))
 
             if (
                 sensor_value >= float(self.props.get("Temp", 0))
