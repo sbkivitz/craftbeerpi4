@@ -32,6 +32,83 @@ class StepController:
         logging.info("INIT STEP Controller")
         self.load(startActive=True)
 
+    def _recover_interrupted_step(self):
+        """Offer to resume a profile interrupted by a restart, rather than guessing.
+
+        A step persisted as ACTIVE has no task behind it after a reload, because a
+        task cannot be serialised. Left alone that state is unrecoverable from the
+        UI: next() raised on task.cancel() against None and returned HTTP 500,
+        start() refused with "Steps already running", and reset_all() declines to
+        reset while a step is ACTIVE.
+
+        The lookup that was meant to handle this passed the raw string "A". Since
+        StepState is a plain Enum, StepState.ACTIVE == "A" is False, so it never
+        matched and the intent never took effect.
+
+        Restarting the step automatically would be the wrong repair. A fresh
+        instance re-runs on_start(), which may re-enable AutoMode and switch a
+        heater on with nobody present - which also contradicts the deliberate
+        choice in ActorController.create() not to restore actor state. And the
+        brewer, not the software, is the one who knows whether the mash is still
+        worth continuing after however long the power was out.
+
+        So the step is demoted to STOP and the brewer is asked. STOP is a state the
+        existing machinery already understands: start() resumes from it and next()
+        skips past it. Elapsed time is recorded by CBPiStep during the run, so
+        resuming continues from where it stopped instead of restarting a sixty
+        minute rest from zero.
+        """
+        interrupted = self.find_by_status(StepState.ACTIVE)
+        if interrupted is None:
+            return
+
+        elapsed = 0
+        try:
+            elapsed = int(float(interrupted.props.get("_elapsed_seconds", 0) or 0))
+        except (TypeError, ValueError):
+            elapsed = 0
+
+        logging.warning(
+            "Step '%s' was active when the server stopped. Marking it stopped; "
+            "%ss of it had run.",
+            interrupted.name,
+            elapsed,
+        )
+        interrupted.status = StepState.STOP
+
+        if elapsed > 0:
+            detail = (
+                "About {} of it had already run, and that is remembered - resuming "
+                "continues from there rather than starting the step again.".format(
+                    self._format_duration(elapsed)
+                )
+            )
+        else:
+            detail = "It had not started timing yet, so resuming runs it in full."
+
+        try:
+            self.cbpi.notify(
+                "Resume brew?",
+                "'{}' was interrupted when the server stopped. {} Check your kettle "
+                "first, then choose.".format(interrupted.name, detail),
+                NotificationType.WARNING,
+                action=[
+                    NotificationAction("Resume", self.resume),
+                    NotificationAction("Skip this step", self.next),
+                ],
+            )
+        except Exception as e:
+            logging.warning("Could not ask about the interrupted step: %s", e)
+
+    @staticmethod
+    def _format_duration(seconds):
+        minutes, secs = divmod(int(seconds), 60)
+        if minutes and secs:
+            return "{}m {}s".format(minutes, secs)
+        if minutes:
+            return "{} minutes".format(minutes)
+        return "{} seconds".format(secs)
+
     def create(self, data):
 
         id = data.get("id")
@@ -68,9 +145,7 @@ class StepController:
             # Start step after start up
             self.profile = list(map(lambda item: self.create(item), self.profile))
             if startActive is True:
-                active_step = self.find_by_status("A")
-                if active_step is not None:
-                    asyncio.create_task(self.start_step(active_step))
+                self._recover_interrupted_step()
 
         except:
             logging.warning("Invalid step_data.json file - Creating empty file")
@@ -88,9 +163,10 @@ class StepController:
             # Start step after start up
             self.profile = list(map(lambda item: self.create(item), self.profile))
             if startActive is True:
-                active_step = self.find_by_status("A")
-                if active_step is not None:
-                    asyncio.create_task(self.start_step(active_step))
+                # Unreachable in practice: this branch has just deleted the file and
+                # recreated it with steps=[], so there is nothing to recover. Kept
+                # consistent with the path above rather than left to rot.
+                self._recover_interrupted_step()
 
     async def add(self, item: Step):
         logging.debug("Add step")
@@ -182,13 +258,27 @@ class StepController:
 
     async def next(self):
         logging.info("Trigger Next")
-        # print("\n\n\n\n")
-        # print(self.profile)
-        # print("\n\n\n\n")
+        logging.debug("Current profile: %s", self.profile)
         step = self.find_by_status(StepState.ACTIVE)
         if step is not None:
-            if step.instance is not None:
+            if step.instance is not None and getattr(step.instance, "task", None):
                 await step.instance.next()
+            else:
+                # An ACTIVE step with no task behind it is a violated invariant,
+                # normally left by a restart. Returning success here without
+                # changing anything would be worse than the old crash: the brewer
+                # sees the button work while the profile stays stuck, and start()
+                # and reset() both remain blocked by the ACTIVE status.
+                #
+                # Demoting to STOP is a real transition the rest of the machinery
+                # understands, and the STOP branch below then advances normally.
+                logging.warning(
+                    "Step '%s' is active with no running task - recovering it to "
+                    "stopped so the profile can move on.",
+                    step.name,
+                )
+                step.status = StepState.STOP
+                await self.save()
 
         step = self.find_by_status(StepState.STOP)
         if step is not None:
@@ -200,13 +290,15 @@ class StepController:
             logging.info("No Step is running")
 
     async def resume(self):
-        step = self.find_by_status("P")
-        if step is not None:
-            instance = step.get("instance")
-            if instance is not None:
-                await self.start_step(step)
-        else:
-            logging.info("Nothing to resume")
+        # Dead twice over before: find_by_status("P") never matched - StepState is a
+        # plain Enum so the string comparison fails, and there is no PAUSE member
+        # anyway - and had it matched, step.get("instance") would have raised, since
+        # Step is a dataclass with no .get().
+        #
+        # Delegating to start() rather than calling start_step() directly keeps one
+        # guarded path: start() refuses while another step is ACTIVE, notifies, and
+        # persists the new status. Doing it here as well would duplicate that badly.
+        await self.start()
 
     async def stop(self):
         step = self.find_by_status(StepState.ACTIVE)
@@ -304,6 +396,30 @@ class StepController:
         self.push_udpate()
 
     def done(self, step, result):
+        if result == StepResult.ERROR:
+            # A failed step must stop the profile visibly rather than sit there
+            # looking active. StepState.ERROR already existed and was never used
+            # anywhere; this is the case it was meant for.
+            step_current = self.find_by_id(step.id)
+            step_current.status = StepState.ERROR
+
+            async def report():
+                await self.save()
+                try:
+                    self.cbpi.notify(
+                        "Mash Profile",
+                        "Step '{}' failed and the profile has stopped. Check the "
+                        "log, then start to retry it or next to skip it.".format(
+                            step.name
+                        ),
+                        NotificationType.ERROR,
+                    )
+                except Exception as e:
+                    logging.warning("Could not notify about the failed step: %s", e)
+
+            asyncio.create_task(report())
+            return
+
         if result == StepResult.NEXT:
             step_current = self.find_by_id(step.id)
             step_current.status = StepState.DONE
