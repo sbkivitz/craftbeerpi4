@@ -51,6 +51,17 @@ class CBPiStep(CBPiBase):
     # measured in tens of minutes.
     ELAPSED_SAVE_INTERVAL = 30
 
+    # A heat-up that makes no measurable progress for this long is not heating.
+    # Ten minutes is comfortably longer than any real element needs to move a
+    # vessel a fraction of a degree, so a working rig never trips it, while a
+    # dead element or a probe lying on the bench is caught within one window.
+    HEAT_STALL_WINDOW = 600
+
+    # What counts as progress. This is deliberately tiny and unit-agnostic: the
+    # question is whether the temperature is moving at all, not how fast. A
+    # working element clears this in seconds.
+    HEAT_STALL_MIN_RISE = 0.5
+
     def __init__(self, cbpi, id, name, props, on_done) -> None:
         self.name = name
         self.cbpi = cbpi
@@ -65,6 +76,9 @@ class CBPiStep(CBPiBase):
         self.running: bool = False
         self.logger = logging.getLogger(__name__)
         self._elapsed_saved_at = 0.0
+        self._stall_anchor_value = None
+        self._stall_anchor_at = 0.0
+        self._stall_reported = False
 
     def _elapsed_seconds(self):
         """Seconds of this step already run, as recorded by a previous run."""
@@ -119,11 +133,92 @@ class CBPiStep(CBPiBase):
     def clear_progress(self):
         """Forget recorded progress, so the step starts fresh next time."""
         self._elapsed_saved_at = 0.0
+        self.reset_heat_watch()
         if self.ELAPSED_PROP in self.props:
             try:
                 del self.props[self.ELAPSED_PROP]
             except Exception:
                 self.props[self.ELAPSED_PROP] = 0
+
+    def reset_heat_watch(self):
+        """Forget what the stall watch has seen so far."""
+        self._stall_anchor_value = None
+        self._stall_anchor_at = 0.0
+        self._stall_reported = False
+
+    def note_heat_progress(self, sensor_value, target=None):
+        """Warn if a heat-up has stopped making progress.
+
+        Steps that wait for a target temperature loop with no upper bound, so a
+        failed element, a dead SSR or a probe that has fallen out of its
+        thermowell leaves the rig commanding heat indefinitely with nobody told.
+
+        The window restarts whenever the temperature actually rises, so this
+        measures time since the last progress rather than time in the step - a
+        legitimately slow heat-up on a cold day keeps re-anchoring and never
+        trips. Reports once per stall, not once per second.
+
+        Returns True if a stall was reported on this call.
+        """
+        try:
+            value = float(sensor_value)
+        except (TypeError, ValueError):
+            # No usable reading. Sensor freshness is a separate concern; leave
+            # the anchor alone so a brief dropout does not look like progress.
+            return False
+
+        now = time.time()
+
+        if self._stall_anchor_value is None:
+            self._stall_anchor_value = value
+            self._stall_anchor_at = now
+            return False
+
+        if value >= self._stall_anchor_value + self.HEAT_STALL_MIN_RISE:
+            self._stall_anchor_value = value
+            self._stall_anchor_at = now
+            self._stall_reported = False
+            return False
+
+        if self._stall_reported:
+            return False
+
+        if now - self._stall_anchor_at < self.HEAT_STALL_WINDOW:
+            return False
+
+        self._stall_reported = True
+        minutes = int(self.HEAT_STALL_WINDOW // 60)
+        if target is not None:
+            detail = "still {:.1f} below the {:.1f} target".format(
+                float(target) - value, float(target)
+            )
+        else:
+            detail = "sitting at {:.1f}".format(value)
+        message = (
+            "'{}' has not warmed measurably in {} minutes - {}. Check the element, "
+            "the SSR and that the probe is actually in the liquid.".format(
+                self.name, minutes, detail
+            )
+        )
+        self.logger.warning(message)
+        try:
+            # Imported here, not at module scope: cbpi.api.dataclasses imports
+            # StepState from this module, so a top-level import is a cycle that
+            # breaks startup outright.
+            from cbpi.api.dataclasses import NotificationAction, NotificationType
+
+            self.cbpi.notify(
+                "Heating is not working",
+                message,
+                NotificationType.WARNING,
+                action=[
+                    NotificationAction("Keep waiting"),
+                    NotificationAction("Stop the profile", self.cbpi.step.stop),
+                ],
+            )
+        except Exception as e:
+            self.logger.warning("Could not raise the stalled-heating alert: %s", e)
+        return True
 
     def _done(self, task):
         if self._done_callback is None:
