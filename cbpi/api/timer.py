@@ -16,6 +16,14 @@ class Timer(object):
         self.end_time = None
 
     def done(self, task):
+        # A cancelled timer has not finished, it was stopped. Firing the completion
+        # callback either way made a deliberate stop indistinguishable from expiry,
+        # and on_timer_done() is where steps act on "the rest is over" - switching
+        # AutoMode off, notifying the brewer, and in NotificationStep with
+        # AutoNext=Yes, calling next(). That could walk a profile forward while the
+        # server was shutting down.
+        if task.cancelled():
+            return
         if self._callback is not None:
             asyncio.create_task(self._callback(self))
 
@@ -33,6 +41,11 @@ class Timer(object):
             end = int(time.time())
             duration = end - self.start_time
             self._timemout = self._timemout - duration
+            # Re-raised so the task is actually marked cancelled. Swallowing it
+            # left the task "completed", which is what made done() treat a stop as
+            # an expiry. The remaining time above is still recorded first, so
+            # resuming the timer picks up where it left off.
+            raise
 
     async def add(self, seconds):
         self.end_time = self.end_time + seconds
@@ -44,7 +57,15 @@ class Timer(object):
     async def stop(self):
         if self._task and self._task.done() is False:
             self._task.cancel()
-            await self._task
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                # Expected - this is the cancellation we just asked for. Swallowed
+                # here, at the point where it was requested, so callers can stop a
+                # timer without handling it. _job() still re-raises, which is what
+                # marks the task cancelled and lets done() tell a stop from an
+                # expiry.
+                pass
 
     def reset(self):
         if self.is_running is True:
