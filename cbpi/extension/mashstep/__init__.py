@@ -641,15 +641,26 @@ class BoilStep(CBPiStep):
                 int(value) * 60 + 1
             ):
                 self.hops_added[number - 1] = True
+                # An acknowledge action is what makes this stick. The UI arms a
+                # five second auto-dismiss only when the action list is empty
+                # (AlertProvider: `if (action?.length <= 0)`), and renders a
+                # notification that has actions as a dialog that waits. Hands in
+                # grain, or ten feet away with a pump running, a five second
+                # toast for a 60/20/10/5/0 schedule is simply missed - and a
+                # missed hop cannot be added late.
                 if text is not None and text != "":
                     self.cbpi.notify(
                         "Hop Alert",
                         "Please add %s (%s)" % (text, number),
-                        NotificationType.INFO,
+                        NotificationType.WARNING,
+                        action=[NotificationAction("Added")],
                     )
                 else:
                     self.cbpi.notify(
-                        "Hop Alert", "Please add Hop %s" % number, NotificationType.INFO
+                        "Hop Alert",
+                        "Please add Hop %s" % number,
+                        NotificationType.WARNING,
+                        action=[NotificationAction("Added")],
                     )
 
     async def on_stop(self):
@@ -720,10 +731,14 @@ class BoilStep(CBPiStep):
                     "Current: " + str(sensor_value) + " | Dev: " + str(deviation)
                 )
             if self.lid_flag == True and sensor_value >= self.lid_temp:
+                # Sticky for the same reason as the hop alert: this one is the
+                # difference between lifting the lid and mopping a boilover off
+                # the floor, and it fires exactly once.
                 self.cbpi.notify(
                     "Please remove lid!",
                     "Reached temp close to boiling",
-                    NotificationType.INFO,
+                    NotificationType.WARNING,
+                    action=[NotificationAction("Lid removed")],
                 )
                 self.lid_flag = False
 
