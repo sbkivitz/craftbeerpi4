@@ -33,7 +33,7 @@ class StepController:
         self.load(startActive=True)
 
     def _recover_interrupted_step(self):
-        """Make a profile interrupted by a restart recoverable, without resuming it.
+        """Offer to resume a profile interrupted by a restart, rather than guessing.
 
         A step persisted as ACTIVE has no task behind it after a reload, because a
         task cannot be serialised. Left alone that state is unrecoverable from the
@@ -45,38 +45,69 @@ class StepController:
         StepState is a plain Enum, StepState.ACTIVE == "A" is False, so it never
         matched and the intent never took effect.
 
-        Restarting the step automatically would be worse than the bug. Only status
-        and props are persisted - not elapsed time - so a fresh instance re-runs
-        on_start(), which rebuilds a full-duration timer and may re-enable AutoMode.
-        A sixty minute rest interrupted at minute fifty-five would silently begin
-        again from sixty, and a heater could come back on with nobody present. That
-        also contradicts the deliberate choice in ActorController.create() not to
-        restore actor state for exactly this reason.
+        Restarting the step automatically would be the wrong repair. A fresh
+        instance re-runs on_start(), which may re-enable AutoMode and switch a
+        heater on with nobody present - which also contradicts the deliberate
+        choice in ActorController.create() not to restore actor state. And the
+        brewer, not the software, is the one who knows whether the mash is still
+        worth continuing after however long the power was out.
 
-        So the step is demoted to STOP and the operator is told. STOP is a state the
+        So the step is demoted to STOP and the brewer is asked. STOP is a state the
         existing machinery already understands: start() resumes from it and next()
-        skips past it, both through their normal guarded paths.
+        skips past it. Elapsed time is recorded by CBPiStep during the run, so
+        resuming continues from where it stopped instead of restarting a sixty
+        minute rest from zero.
         """
         interrupted = self.find_by_status(StepState.ACTIVE)
         if interrupted is None:
             return
 
+        elapsed = 0
+        try:
+            elapsed = int(float(interrupted.props.get("_elapsed_seconds", 0) or 0))
+        except (TypeError, ValueError):
+            elapsed = 0
+
         logging.warning(
-            "Step '%s' was active when the server stopped. Marking it stopped - "
-            "elapsed time is not persisted, so it will not resume on its own.",
+            "Step '%s' was active when the server stopped. Marking it stopped; "
+            "%ss of it had run.",
             interrupted.name,
+            elapsed,
         )
         interrupted.status = StepState.STOP
+
+        if elapsed > 0:
+            detail = (
+                "About {} of it had already run, and that is remembered - resuming "
+                "continues from there rather than starting the step again.".format(
+                    self._format_duration(elapsed)
+                )
+            )
+        else:
+            detail = "It had not started timing yet, so resuming runs it in full."
+
         try:
             self.cbpi.notify(
-                "Mash Profile",
-                "'{}' was interrupted by a restart. Its elapsed time is not known, "
-                "so it has been paused. Check your kettle and press start to "
-                "continue, or next to skip it.".format(interrupted.name),
+                "Resume brew?",
+                "'{}' was interrupted when the server stopped. {} Check your kettle "
+                "first, then choose.".format(interrupted.name, detail),
                 NotificationType.WARNING,
+                action=[
+                    NotificationAction("Resume", self.resume),
+                    NotificationAction("Skip this step", self.next),
+                ],
             )
         except Exception as e:
-            logging.warning("Could not notify about the interrupted step: %s", e)
+            logging.warning("Could not ask about the interrupted step: %s", e)
+
+    @staticmethod
+    def _format_duration(seconds):
+        minutes, secs = divmod(int(seconds), 60)
+        if minutes and secs:
+            return "{}m {}s".format(minutes, secs)
+        if minutes:
+            return "{} minutes".format(minutes)
+        return "{} seconds".format(secs)
 
     def create(self, data):
 
