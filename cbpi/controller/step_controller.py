@@ -32,6 +32,52 @@ class StepController:
         logging.info("INIT STEP Controller")
         self.load(startActive=True)
 
+    def _recover_interrupted_step(self):
+        """Make a profile interrupted by a restart recoverable, without resuming it.
+
+        A step persisted as ACTIVE has no task behind it after a reload, because a
+        task cannot be serialised. Left alone that state is unrecoverable from the
+        UI: next() raised on task.cancel() against None and returned HTTP 500,
+        start() refused with "Steps already running", and reset_all() declines to
+        reset while a step is ACTIVE.
+
+        The lookup that was meant to handle this passed the raw string "A". Since
+        StepState is a plain Enum, StepState.ACTIVE == "A" is False, so it never
+        matched and the intent never took effect.
+
+        Restarting the step automatically would be worse than the bug. Only status
+        and props are persisted - not elapsed time - so a fresh instance re-runs
+        on_start(), which rebuilds a full-duration timer and may re-enable AutoMode.
+        A sixty minute rest interrupted at minute fifty-five would silently begin
+        again from sixty, and a heater could come back on with nobody present. That
+        also contradicts the deliberate choice in ActorController.create() not to
+        restore actor state for exactly this reason.
+
+        So the step is demoted to STOP and the operator is told. STOP is a state the
+        existing machinery already understands: start() resumes from it and next()
+        skips past it, both through their normal guarded paths.
+        """
+        interrupted = self.find_by_status(StepState.ACTIVE)
+        if interrupted is None:
+            return
+
+        logging.warning(
+            "Step '%s' was active when the server stopped. Marking it stopped - "
+            "elapsed time is not persisted, so it will not resume on its own.",
+            interrupted.name,
+        )
+        interrupted.status = StepState.STOP
+        try:
+            self.cbpi.notify(
+                "Mash Profile",
+                "'{}' was interrupted by a restart. Its elapsed time is not known, "
+                "so it has been paused. Check your kettle and press start to "
+                "continue, or next to skip it.".format(interrupted.name),
+                NotificationType.WARNING,
+            )
+        except Exception as e:
+            logging.warning("Could not notify about the interrupted step: %s", e)
+
     def create(self, data):
 
         id = data.get("id")
@@ -68,17 +114,7 @@ class StepController:
             # Start step after start up
             self.profile = list(map(lambda item: self.create(item), self.profile))
             if startActive is True:
-                # StepState is a plain Enum, so StepState.ACTIVE == "A" is False
-                # and this lookup silently found nothing. The consequence: a profile
-                # interrupted by a restart - a power cut mid-mash, or a service
-                # restart during an upgrade - came back up with its step still
-                # marked ACTIVE but no task behind it. Nothing could then move it:
-                # next() raised on task.cancel() against None, start() refused with
-                # "Steps already running", and the only way out was to hand-edit
-                # step_data.json.
-                active_step = self.find_by_status(StepState.ACTIVE)
-                if active_step is not None:
-                    asyncio.create_task(self.start_step(active_step))
+                self._recover_interrupted_step()
 
         except:
             logging.warning("Invalid step_data.json file - Creating empty file")
@@ -96,9 +132,10 @@ class StepController:
             # Start step after start up
             self.profile = list(map(lambda item: self.create(item), self.profile))
             if startActive is True:
-                active_step = self.find_by_status(StepState.ACTIVE)
-                if active_step is not None:
-                    asyncio.create_task(self.start_step(active_step))
+                # Unreachable in practice: this branch has just deleted the file and
+                # recreated it with steps=[], so there is nothing to recover. Kept
+                # consistent with the path above rather than left to rot.
+                self._recover_interrupted_step()
 
     async def add(self, item: Step):
         logging.debug("Add step")
@@ -190,13 +227,27 @@ class StepController:
 
     async def next(self):
         logging.info("Trigger Next")
-        # print("\n\n\n\n")
-        # print(self.profile)
-        # print("\n\n\n\n")
+        logging.debug("Current profile: %s", self.profile)
         step = self.find_by_status(StepState.ACTIVE)
         if step is not None:
-            if step.instance is not None:
+            if step.instance is not None and getattr(step.instance, "task", None):
                 await step.instance.next()
+            else:
+                # An ACTIVE step with no task behind it is a violated invariant,
+                # normally left by a restart. Returning success here without
+                # changing anything would be worse than the old crash: the brewer
+                # sees the button work while the profile stays stuck, and start()
+                # and reset() both remain blocked by the ACTIVE status.
+                #
+                # Demoting to STOP is a real transition the rest of the machinery
+                # understands, and the STOP branch below then advances normally.
+                logging.warning(
+                    "Step '%s' is active with no running task - recovering it to "
+                    "stopped so the profile can move on.",
+                    step.name,
+                )
+                step.status = StepState.STOP
+                await self.save()
 
         step = self.find_by_status(StepState.STOP)
         if step is not None:
@@ -208,17 +259,15 @@ class StepController:
             logging.info("No Step is running")
 
     async def resume(self):
-        # Two bugs here, one masking the other. find_by_status("P") never matched:
-        # StepState is a plain Enum so the comparison against a raw string is always
-        # False, and there is no PAUSE member anyway - STOP is the state a stopped
-        # step actually gets. Had it matched, the next line would have raised, since
-        # Step is a dataclass with no .get(). So resume() has always been dead code.
-        step = self.find_by_status(StepState.STOP)
-        if step is not None:
-            if step.instance is not None:
-                await self.start_step(step)
-        else:
-            logging.info("Nothing to resume")
+        # Dead twice over before: find_by_status("P") never matched - StepState is a
+        # plain Enum so the string comparison fails, and there is no PAUSE member
+        # anyway - and had it matched, step.get("instance") would have raised, since
+        # Step is a dataclass with no .get().
+        #
+        # Delegating to start() rather than calling start_step() directly keeps one
+        # guarded path: start() refuses while another step is ACTIVE, notifies, and
+        # persists the new status. Doing it here as well would duplicate that badly.
+        await self.start()
 
     async def stop(self):
         step = self.find_by_status(StepState.ACTIVE)
