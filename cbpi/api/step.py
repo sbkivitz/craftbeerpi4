@@ -69,6 +69,15 @@ class CBPiStep(CBPiBase):
     async def next(self):
         self.running = False
         self.cancel_reason = StepResult.NEXT
+        # A step can be ACTIVE with no task behind it - that is what a profile
+        # restored from disk after a restart looks like. Cancelling None raised
+        # AttributeError, which surfaced as an HTTP 500 from the Next button and
+        # left the profile stuck with no way forward short of editing JSON.
+        if self.task is None:
+            self.logger.warning(
+                "Step %s was asked to advance but has no running task", self.name
+            )
+            return
         self.task.cancel()
         await self.task
 
