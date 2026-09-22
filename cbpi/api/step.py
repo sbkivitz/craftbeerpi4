@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from abc import abstractmethod
 
 import cbpi
@@ -38,6 +39,18 @@ class StepMove(Enum):
 
 class CBPiStep(CBPiBase):
 
+    # Props key holding how many seconds of this step have already run. Written
+    # periodically so a restart can pick up where the step left off rather than
+    # beginning a sixty minute rest again from zero. Underscored because it is
+    # runtime bookkeeping, not something a user configures.
+    ELAPSED_PROP = "_elapsed_seconds"
+
+    # How often that value is written to disk. Every second would mean a JSON
+    # write per second for the length of a brew; thirty seconds bounds what a
+    # power cut can lose to half a minute, which is immaterial against a rest
+    # measured in tens of minutes.
+    ELAPSED_SAVE_INTERVAL = 30
+
     def __init__(self, cbpi, id, name, props, on_done) -> None:
         self.name = name
         self.cbpi = cbpi
@@ -51,6 +64,66 @@ class CBPiStep(CBPiBase):
         self.task = None
         self.running: bool = False
         self.logger = logging.getLogger(__name__)
+        self._elapsed_saved_at = 0.0
+
+    def _elapsed_seconds(self):
+        """Seconds of this step already run, as recorded by a previous run."""
+        try:
+            return max(0.0, float(self.props.get(self.ELAPSED_PROP, 0) or 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def remaining_for(self, total_seconds):
+        """Timer duration for this step, honouring any elapsed time on record.
+
+        Without this a step interrupted near its end restarts from full duration -
+        a mash rest broken at minute fifty-five would run another sixty. Never
+        returns less than one second, so a step that was almost over still gets a
+        tick in which to finish properly rather than being skipped.
+        """
+        total = max(0.0, float(total_seconds))
+        elapsed = self._elapsed_seconds()
+        if elapsed <= 0:
+            return total
+        remaining = total - elapsed
+        if remaining < 1:
+            remaining = 1
+        self.logger.info(
+            "Step %s resuming with %.0fs of %.0fs remaining", self.name, remaining, total
+        )
+        return remaining
+
+    async def note_progress(self, remaining_seconds, total_seconds):
+        """Record progress so an interrupted step can resume where it stopped.
+
+        Called from the per-second timer update each step already has. Throttled,
+        because the point is to survive a power cut, not to write the file
+        continuously.
+        """
+        try:
+            elapsed = max(0.0, float(total_seconds) - float(remaining_seconds))
+        except (TypeError, ValueError):
+            return
+        now = time.time()
+        if now - self._elapsed_saved_at < self.ELAPSED_SAVE_INTERVAL:
+            return
+        self._elapsed_saved_at = now
+        self.props[self.ELAPSED_PROP] = round(elapsed)
+        try:
+            # save() is a coroutine; calling it without awaiting silently does
+            # nothing, which would have made this whole feature a no-op.
+            await self.cbpi.step.save()
+        except Exception as e:
+            self.logger.warning("Could not record step progress: %s", e)
+
+    def clear_progress(self):
+        """Forget recorded progress, so the step starts fresh next time."""
+        self._elapsed_saved_at = 0.0
+        if self.ELAPSED_PROP in self.props:
+            try:
+                del self.props[self.ELAPSED_PROP]
+            except Exception:
+                self.props[self.ELAPSED_PROP] = 0
 
     def _done(self, task):
         if self._done_callback is None:
