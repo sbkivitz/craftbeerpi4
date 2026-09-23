@@ -87,6 +87,17 @@ class ActorController(BasicController):
                     await item.instance.on(power, output)
                 except:
                     await item.instance.on(power)
+                # Record what was actually commanded.
+                #
+                # to_dict() reports state from the live instance but power from
+                # this dataclass, and nothing here ever wrote to it - so the
+                # power shown in the interface, and read back by any logic that
+                # inspects the actor, was whatever the actor happened to be
+                # created with. A boil kettle driven at 100% then 85% reported
+                # 70% throughout, and `on(id, power=None)` resumed at that stale
+                # figure rather than the last one asked for.
+                item.power = self._clamp_power(power)
+                item.output = output
                 # await self.push_udpate()
                 self.cbpi.ws.send(
                     dict(
@@ -141,11 +152,24 @@ class ActorController(BasicController):
         except Exception as e:
             logging.error("Failed to toggle Actor {} {}".format(id, e))
 
+    @staticmethod
+    def _clamp_power(power):
+        """A percentage, and nothing else. Out of range means the caller is
+        confused, and driving an element from a confused number is worse than
+        driving it from a sane one."""
+        try:
+            power = int(round(float(power)))
+        except (TypeError, ValueError):
+            return 100
+        return max(0, min(100, power))
+
     async def set_power(self, id, power):
         try:
             item = self.find_by_id(id)
             await item.instance.set_power(power)
-            output = round(item.maxoutput * power / 100)
+            # See on(): this is the field the interface and other logics read.
+            item.power = self._clamp_power(power)
+            output = round(item.maxoutput * item.power / 100)
             if item.output != output:
                 item.output = output
 
@@ -160,7 +184,8 @@ class ActorController(BasicController):
                 item.output = output
                 power = round(output / item.maxoutput * 100)
                 if item.power != power:
-                    await item.instance.set_power(power)
+                    item.power = self._clamp_power(power)
+                    await item.instance.set_power(item.power)
         except Exception as e:
             logging.error("Failed to set output {} {}".format(id, e))
 

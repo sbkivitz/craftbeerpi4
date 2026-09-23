@@ -19,6 +19,14 @@ So everything that asks the time, or waits, comes through here:
     now()             simulated wall-clock seconds, like time.time()
     monotonic()       simulated monotonic seconds, for measuring intervals
     await sleep(n)    wait n SIMULATED seconds
+    await sleep_until(t)  wait until simulated time reaches t
+
+Prefer `sleep_until` whenever the thing being waited for is an instant rather
+than a duration - the end of a mash rest, the next hop addition. Repeatedly
+sleeping a fixed step and re-checking looks equivalent and is not: the last step
+always lands somewhere past the deadline, and under a scaled clock that
+overshoot is multiplied by the scale. A deadline is also the only form a virtual
+clock can honour exactly, because it says where to jump to.
 
 On real hardware the default source is real time, `now()` is `time.time()` and
 `sleep()` is `asyncio.sleep()`. Nothing changes, and no caller needs to know
@@ -32,22 +40,27 @@ The source is pluggable. Implement `TimeSource` and install it:
 
 Two are provided. `RealTimeSource` is the default. `ScaledTimeSource` runs a fixed
 number of simulated seconds per real second, which is what the SimVessel testbench
-uses. A future source could advance virtually - stepping straight to the next
-scheduled wake rather than sleeping at all - which would run a brew day in seconds
-rather than minutes. Nothing outside this module would need to change.
+uses. `VirtualTimeSource` does not wait at all: it steps straight to the next
+scheduled wake, so a sixty minute rest costs microseconds and lands exactly on
+its deadline instead of within a scheduler quantum of it. That makes it the right
+clock for tests about *durations*; the scaled source remains the one for tests
+about a running server.
 """
 
 import abc
 import asyncio
+import heapq
 import time
 
 __all__ = [
     "TimeSource",
     "RealTimeSource",
     "ScaledTimeSource",
+    "VirtualTimeSource",
     "now",
     "monotonic",
     "sleep",
+    "sleep_until",
     "scale",
     "set_scale",
     "is_scaled",
@@ -74,6 +87,16 @@ class TimeSource(abc.ABC):
     @abc.abstractmethod
     async def sleep(self, seconds: float) -> None:
         """Wait `seconds` of simulated time."""
+
+    async def sleep_until(self, deadline: float) -> None:
+        """Wait until simulated time reaches `deadline`.
+
+        The default derives the remaining duration from the absolute deadline on
+        every call, so waking late does not shorten the next wait or push the
+        target out. Sources that can do better - a virtual clock, which simply
+        moves to the deadline - override this.
+        """
+        await self.sleep(max(0.0, deadline - self.now()))
 
 
 class RealTimeSource(TimeSource):
@@ -157,6 +180,111 @@ class ScaledTimeSource(TimeSource):
         await asyncio.sleep(max(self.MIN_SLEEP, real))
 
 
+class VirtualTimeSource(TimeSource):
+    """Time that only moves when nothing else can run.
+
+    Nothing ever really waits. Every sleeper registers the instant it wants to
+    wake at; when the event loop has no more work, the clock jumps to the
+    earliest of those instants and wakes whatever is due. A sixty minute rest
+    costs microseconds, and - because the jump lands exactly on the deadline - it
+    measures exactly sixty minutes rather than sixty minutes plus however long
+    the operating system took to notice.
+
+    That exactness is the point. A test of "does a sixty minute rest last sixty
+    minutes" run against a scaled real clock can only ever assert a tolerance,
+    and that tolerance has to be widened until it passes on a loaded machine, at
+    which point it no longer tests much. Here the answer is exact and does not
+    depend on what else the machine is doing.
+
+    Deadlines are honoured in order, so tasks stay in the right sequence relative
+    to one another. What it does not model is work that takes real time: a
+    computation between two sleeps appears instantaneous. For control loops
+    reacting to a simulated plant that is fine, because the plant is advanced by
+    the same clock.
+
+    Drive it with `run()`:
+
+        virtual = VirtualTimeSource()
+        clock.set_source(virtual)
+        task = asyncio.create_task(something_that_sleeps())
+        await virtual.run()
+    """
+
+    rate = 1.0
+
+    def __init__(self, start: float = 1_000_000.0):
+        self._now = float(start)
+        self._waiters = []
+        self._seq = 0
+
+    def now(self) -> float:
+        return self._now
+
+    def monotonic(self) -> float:
+        return self._now
+
+    async def sleep(self, seconds: float) -> None:
+        try:
+            seconds = max(0.0, float(seconds))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        await self.sleep_until(self._now + seconds)
+
+    async def sleep_until(self, deadline: float) -> None:
+        if deadline <= self._now:
+            # Still yield: a caller looping on an elapsed deadline must not be
+            # able to starve the event loop.
+            await asyncio.sleep(0)
+            return
+        future = asyncio.get_running_loop().create_future()
+        self._seq += 1
+        heapq.heappush(self._waiters, (deadline, self._seq, future))
+        try:
+            await future
+        except asyncio.CancelledError:
+            # Drop the registration so a cancelled sleeper cannot hold time back.
+            self._waiters = [w for w in self._waiters if w[2] is not future]
+            heapq.heapify(self._waiters)
+            raise
+
+    @property
+    def pending(self) -> int:
+        """How many sleepers are waiting."""
+        return len(self._waiters)
+
+    def _advance(self) -> bool:
+        """Jump to the earliest deadline and wake everything due there."""
+        if not self._waiters:
+            return False
+        self._now = max(self._now, self._waiters[0][0])
+        while self._waiters and self._waiters[0][0] <= self._now:
+            _, _, future = heapq.heappop(self._waiters)
+            if not future.done():
+                future.set_result(None)
+        return True
+
+    async def run(self, until: float = None, max_steps: int = 1_000_000) -> None:
+        """Let simulated time run until nothing is waiting, or until `until`.
+
+        `max_steps` bounds a run that would otherwise never settle - a control
+        loop sleeping forever is normal, and without a bound the test would hang
+        rather than fail.
+        """
+        steps = 0
+        while steps < max_steps:
+            # Let anything just woken get as far as its next wait before
+            # deciding where time goes next.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            if not self._waiters:
+                return
+            if until is not None and self._waiters[0][0] > until:
+                self._now = until
+                return
+            self._advance()
+            steps += 1
+
+
 _source: TimeSource = RealTimeSource()
 
 
@@ -184,6 +312,15 @@ def monotonic() -> float:
 
 async def sleep(seconds: float) -> None:
     await _source.sleep(seconds)
+
+
+async def sleep_until(deadline: float) -> None:
+    """Wait until simulated time reaches `deadline`.
+
+    Use this instead of sleeping a fixed step and re-checking whenever what is
+    being waited for is an instant. See the module docstring.
+    """
+    await _source.sleep_until(deadline)
 
 
 def scale() -> float:

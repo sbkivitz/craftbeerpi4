@@ -9,6 +9,7 @@ from typing import KeysView
 import numpy as np
 from cbpi.api import *
 from cbpi.api import Property, action, parameters
+from cbpi.api import clock
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import Kettle, NotificationAction, NotificationType, Props
@@ -707,10 +708,11 @@ class BoilStep(CBPiStep):
         self.hops_added = ["", "", "", "", "", ""]
         self.remaining_seconds = None
         self.temparray = np.array([])
+        self.temptimes = np.array([])
         # self.dwelltime=int(self.props.get("DwellTime", 0))*60
         self.dwelltime = (
             5 * 60
-        )  # tested with 5 minutes -> not exactly 5 min due to accuracy of asyncio.sleep
+        )  # seconds of steady temperature before the boil timer may auto-start
         self.deviationlimit = 0.3  # derived from a test
         # logging.warning(self.AutoTimer)
         self.summary2 = None
@@ -827,13 +829,37 @@ class BoilStep(CBPiStep):
                 )
 
         while self.running == True:
-            await asyncio.sleep(1)
+            # Brewing time, because this loop measures with its own cadence: the
+            # dwell window below is built from these samples, so sampling on
+            # wall time while the window is held in brewing time would make the
+            # two disagree by exactly the time scale. Identical to
+            # asyncio.sleep(1) on a real rig, where the two clocks are one.
+            await clock.sleep(1)
             sensor_value = self.get_sensor_value(self.props.get("Sensor", None)).get(
                 "value"
             )
             self.temparray = np.append(self.temparray, sensor_value)
-            if self.temparray.size > self.dwelltime:
-                self.temparray = np.delete(self.temparray, 0)
+            self.temptimes = np.append(self.temptimes, clock.now())
+
+            # Keep the last dwelltime SECONDS, not the last dwelltime samples.
+            #
+            # This counted array entries and called them seconds, on the
+            # assumption that the loop ticks once a second. It does not
+            # reliably: the original comment here conceded "not exactly 5 min
+            # due to accuracy of asyncio.sleep", and under a scaled clock the
+            # gap is not small - a hundredth of the intended window, or a
+            # hundred times it, depending on which way the scale runs. Holding
+            # the window in time says what was meant and is right at any rate.
+            window_start = clock.now() - self.dwelltime
+            keep = self.temptimes >= window_start
+            self.temparray = self.temparray[keep]
+            self.temptimes = self.temptimes[keep]
+
+            have_full_window = (
+                self.temptimes.size > 1
+                and (self.temptimes[-1] - self.temptimes[0]) >= self.dwelltime - 1
+            )
+            if have_full_window:
                 deviation = np.std(self.temparray)
                 if (
                     (sensor_value >= self.lid_temp)
