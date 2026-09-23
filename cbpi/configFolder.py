@@ -70,70 +70,72 @@ class ConfigFolder:
                 "config.yaml",
             ]
             zip = zipfile.ZipFile(backupfile)
-            zip_content_list = zip.namelist()
-            zip_content = True
-            missing_content = []
-            print("Checking content of zip file")
+            try:
+                zip_content_list = zip.namelist()
+                zip_content = True
+                missing_content = []
+                print("Checking content of zip file")
 
-            for content in required_content:
-                try:
-                    check = zip_content_list.index(content)
-                except:
-                    zip_content = False
-                    missing_content.append(content)
+                for content in required_content:
+                    try:
+                        check = zip_content_list.index(content)
+                    except ValueError:
+                        zip_content = False
+                        missing_content.append(content)
 
-            if zip_content == True:
-                print("Found correct content. Starting Restore process")
-                output_path = pathlib.Path(self.configFolderPath)
-                system = platform.system()
-                print(system)
-                if system != "Windows":
-                    owner = output_path.owner()
-                    group = output_path.group()
-                print("Removing old config folder")
-                shutil.rmtree(output_path, ignore_errors=True)
-                print("Extracting zip file to config folder")
-                zip.extractall(output_path)
-                zip.close()
-                if system != "Windows":
-                    print(
-                        f"Changing owner and group of config folder recursively to {owner}:{group}"
+                if zip_content == True:
+                    print("Found correct content. Starting Restore process")
+                    output_path = pathlib.Path(self.configFolderPath)
+                    system = platform.system()
+                    print(system)
+                    if system != "Windows":
+                        owner = output_path.owner()
+                        group = output_path.group()
+                    print("Removing old config folder")
+                    shutil.rmtree(output_path, ignore_errors=True)
+                    print("Extracting zip file to config folder")
+                    zip.extractall(output_path)
+                    zip.close()
+                    if system != "Windows":
+                        print(
+                            f"Changing owner and group of config folder recursively to {owner}:{group}"
+                        )
+                        self.recursive_chown(output_path, owner, group)
+                    print("Removing backup file")
+                    try:
+                        os.remove(backupfile)
+                    except Exception:
+                        pass
+                    Line1 = "Contents of restored_config.zip file have been restored."
+                    Line2 = "In case of a partial backup you will still be prompted to run 'cbpi setup'."
+                    print(Line1)
+                    print(Line2)
+                else:
+                    zip.close()
+                    Line1 = "Wrong Content in zip file. No restore possible"
+                    Line2 = f"These files are missing {missing_content}"
+                    print(Line1)
+                    print(Line2)
+                    restorelogfile = os.path.join(
+                        self.configFolderPath, "restore_error.log"
                     )
-                    self.recursive_chown(output_path, owner, group)
-                print("Removing backup file")
-                try:
-                    os.remove(backupfile)
-                except:
-                    pass
-                Line1 = "Contents of restored_config.zip file have been restored."
-                Line2 = "In case of a partial backup you will still be prompted to run 'cbpi setup'."
-                print(Line1)
-                print(Line2)
-            else:
-                zip.close()
-                Line1 = "Wrong Content in zip file. No restore possible"
-                Line2 = f"These files are missing {missing_content}"
-                print(Line1)
-                print(Line2)
-                restorelogfile = os.path.join(
-                    self.configFolderPath, "restore_error.log"
-                )
-                f = open(restorelogfile, "w")
-                f.write(Line1 + "\n")
-                f.write(Line2 + "\n")
-                f.close()
+                    with open(restorelogfile, "w") as f:
+                        f.write(Line1 + "\n")
+                        f.write(Line2 + "\n")
 
-                print("renaming zip file so it will be ignored on the next start")
-                try:
-                    os.rename(
-                        backupfile,
-                        os.path.join(
-                            self.configFolderPath, "UNRESTORABLE_restored_config.zip"
-                        ),
-                    )
-                except:
-                    print("renamed file does exist - deleting instead")
-                    os.remove(backupfile)
+                    print("renaming zip file so it will be ignored on the next start")
+                    try:
+                        os.rename(
+                            backupfile,
+                            os.path.join(
+                                self.configFolderPath, "UNRESTORABLE_restored_config.zip"
+                            ),
+                        )
+                    except Exception:
+                        print("renamed file does exist - deleting instead")
+                        os.remove(backupfile)
+            finally:
+                zip.close()
             print("***************************************************")
         # possible restored_config.zip has been handeled now lets check if files and folders exist
         required_config_content = [
@@ -178,7 +180,7 @@ class ConfigFolder:
                         print("of course you can also place your config files manually")
                         print("***************************************************")
                     return False
-                except:
+                except Exception:
                     print("***************************************************")
                     print("Cannot find config folder!")
                     print("Please navigate to path where you did run 'cbpi setup'.")
@@ -217,7 +219,7 @@ class ConfigFolder:
                 return True
             else:
                 return False
-        except:  # file missing or bad json format
+        except Exception:  # file missing or bad json format
             return True
 
     def inform_missing_content(self, whatsmissing: str):
@@ -229,7 +231,7 @@ class ConfigFolder:
             try:
                 self.copyDefaultFileIfNotExists("craftbeerpi.template")
                 return False
-            except:
+            except Exception:
                 pass
         print("***************************************************")
         print(f"CraftBeerPi config content not found: {whatsmissing}")
@@ -302,7 +304,7 @@ class ConfigFolder:
                 shutil.chown(dirpath, owner, group)
                 for filename in filenames:
                     shutil.chown(os.path.join(dirpath, filename), owner, group)
-        except:
+        except Exception:
             print("problems assigning file or folder permissions")
             print("if this happened on windows its fine")
             print(

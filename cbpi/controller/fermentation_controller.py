@@ -47,7 +47,8 @@ class FermentationController:
             logging.warning("Missing fermenter_data.json file. INIT empty file")
             data = {"data": []}
             destfile = self.cbpi.config_folder.get_file_path("fermenter_data.json")
-            json.dump(data, open(destfile, "w"), indent=4, sort_keys=True)
+            with open(destfile, "w") as f:
+                json.dump(data, f, indent=4, sort_keys=True)
 
         pathlib.Path(self.cbpi.config_folder.get_file_path("fermenterrecipes")).mkdir(
             parents=True, exist_ok=True
@@ -83,12 +84,13 @@ class FermentationController:
 
                 for i in data["data"]:
                     self.data.append(self._create(i))
-        except:
+        except Exception:
             logging.warning("Invalid fermenter_data.json file - Creating empty file")
             os.remove(self.path)
             data = {"data": []}
             destfile = self.cbpi.config_folder.get_file_path("fermenter_data.json")
-            json.dump(data, open(destfile, "w"), indent=4, sort_keys=True)
+            with open(destfile, "w") as f:
+                json.dump(data, f, indent=4, sort_keys=True)
             for i in data["data"]:
                 self.data.append(self._create(i))
 
@@ -98,7 +100,7 @@ class FermentationController:
         props = Props(item.get("props"))
         try:
             endtime = int(item.get("endtime", 0))
-        except:
+        except (TypeError, ValueError):
             endtime = 0
 
         status = StepState(item.get("status", "I"))
@@ -171,7 +173,7 @@ class FermentationController:
             )
             self.push_update()
             return fermenter
-        except:
+        except Exception:
             return
 
     def _find_by_id(self, id):
