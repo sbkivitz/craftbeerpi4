@@ -144,17 +144,14 @@ class SystemController:
 
         try:
             actors = self.cbpi.actor.get_state()
-            json.dump(
-                actors["data"], open(fullactorname, "w"), indent=4, sort_keys=True
-            )
+            with open(fullactorname, "w") as f:
+                json.dump(actors["data"], f, indent=4, sort_keys=True)
             sensors = self.cbpi.sensor.get_state()
-            json.dump(
-                sensors["data"], open(fullsensorname, "w"), indent=4, sort_keys=True
-            )
+            with open(fullsensorname, "w") as f:
+                json.dump(sensors["data"], f, indent=4, sort_keys=True)
             kettles = self.cbpi.kettle.get_state()
-            json.dump(
-                kettles["data"], open(fullkettlename, "w"), indent=4, sort_keys=True
-            )
+            with open(fullkettlename, "w") as f:
+                json.dump(kettles["data"], f, indent=4, sort_keys=True)
         except Exception as e:
             logging.info(e)
             self.cbpi.notify(
@@ -164,13 +161,12 @@ class SystemController:
             )
 
         try:
-            zipObj = zipfile.ZipFile(output_filename, "w", zipfile.ZIP_DEFLATED)
-            zipObj.write(fullname)
-            zipObj.write(fullpluginname)
-            zipObj.write(fullactorname)
-            zipObj.write(fullsensorname)
-            zipObj.write(fullkettlename)
-            zipObj.close()
+            with zipfile.ZipFile(output_filename, "w", zipfile.ZIP_DEFLATED) as zipObj:
+                zipObj.write(fullname)
+                zipObj.write(fullpluginname)
+                zipObj.write(fullactorname)
+                zipObj.write(fullsensorname)
+                zipObj.write(fullkettlename)
         except Exception as e:
             logging.info(e)
             self.cbpi.notify(
@@ -221,16 +217,15 @@ class SystemController:
                         self.cbpi.config_folder.configFolderPath, "restored_config.zip"
                     )
 
-                    f = open(self.path, "wb")
-                    f.write(content)
-                    f.close()
-                    zip = zipfile.ZipFile(self.path)
-                    zip_content_list = zip.namelist()
+                    with open(self.path, "wb") as f:
+                        f.write(content)
+                    with zipfile.ZipFile(self.path) as zip:
+                        zip_content_list = zip.namelist()
                     zip_content = True
                     for content in required_content:
                         try:
                             check = zip_content_list.index(content)
-                        except:
+                        except ValueError:
                             zip_content = False
                     if zip_content == True:
                         self.cbpi.notify(
@@ -250,7 +245,7 @@ class SystemController:
                             NotificationType.ERROR,
                         )
                         os.remove(self.path)
-            except:
+            except Exception:
                 self.cbpi.notify(
                     "Error", "Config backup upload failed", NotificationType.ERROR
                 )
@@ -279,15 +274,14 @@ class SystemController:
                     )
                     logging.info(self.path)
 
-                    f = open(self.path, "w")
-                    f.write(content)
-                    f.close()
+                    with open(self.path, "w") as f:
+                        f.write(content)
                     self.cbpi.notify(
                         "Success",
                         "SVG file ({}) has been uploaded.".format(filename),
                         NotificationType.SUCCESS,
                     )
-            except:
+            except Exception:
                 self.cbpi.notify("Error", "SVG upload failed", NotificationType.ERROR)
                 pass
         else:
