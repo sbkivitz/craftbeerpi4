@@ -2,6 +2,8 @@ import asyncio
 import math
 import time
 
+from cbpi.api import clock
+
 
 class Timer(object):
 
@@ -28,17 +30,23 @@ class Timer(object):
             asyncio.create_task(self._callback(self))
 
     async def _job(self):
-        self.start_time = int(time.time())
+        # Simulated time throughout. A mash rest is a duration in brewing time, not
+        # in wall clock: on a real rig the two are the same thing, and on a
+        # simulated one a sixty minute rest should take sixty simulated minutes
+        # however fast the model is being run. Measuring this in wall clock is what
+        # made a condensed brew day impossible - the physics compressed, the rests
+        # did not, and a "fast" run still took its full number of hours.
+        self.start_time = int(clock.now())
         self.end_time = self.start_time + int(round(self._timemout, 0))
         self.count = self.end_time - self.start_time
         try:
             while self.count > 0:
-                self.count = self.end_time - int(time.time())
+                self.count = self.end_time - int(clock.now())
                 if self._update is not None:
                     await self._update(self, self.count)
-                await asyncio.sleep(1)
+                await clock.sleep(1)
         except asyncio.CancelledError:
-            end = int(time.time())
+            end = int(clock.now())
             duration = end - self.start_time
             self._timemout = self._timemout - duration
             # Re-raised so the task is actually marked cancelled. Swallowing it

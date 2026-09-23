@@ -14,7 +14,7 @@ from cbpi.api.dataclasses import (NotificationAction, NotificationType, Props,
                                   Step)
 from tabulate import tabulate
 
-from ..api.step import StepMove, StepResult, StepState
+from ..api.step import CBPiStep, StepMove, StepResult, StepState
 
 
 class StepController:
@@ -324,8 +324,21 @@ class StepController:
         for item in self.profile:
             logging.info("Reset %s" % item)
             item.status = StepState.INITIAL
+            # Recorded progress is only meaningful for a step that was interrupted
+            # mid-run. Reset means starting over, so leaving it behind would build
+            # the next timer from what remained: a sixty minute rest interrupted at
+            # minute forty-five would come back as a fifteen minute rest, silently.
+            # Cleared on the persisted record as well as the instance, because a
+            # step whose instance failed to construct still has props on disk.
+            try:
+                if item.props is not None and CBPiStep.ELAPSED_PROP in item.props:
+                    del item.props[CBPiStep.ELAPSED_PROP]
+            except Exception as e:
+                logging.warning("Could not clear progress for %s: %s", item.id, e)
             try:
                 await item.instance.reset()
+                if hasattr(item.instance, "clear_progress"):
+                    item.instance.clear_progress()
                 self.cbpi.push_update(
                     topic="cbpi/notification",
                     data=dict(type="info", title="Stop", message="Calling stop step"),

@@ -92,12 +92,31 @@ class CBPiActor(metaclass=ABCMeta):
 
     async def set_power(self, power):
         """
-        Code to set power for actor
+        Set this actor's power level, as a percentage.
+
+        The base implementation records the value so anything reading back
+        `instance.power` - a PWM loop, a simulated vessel, the UI - sees what was
+        actually asked for. It previously returned the *existing* power without
+        assigning anything, with unreachable code after the return, so an actor
+        that did not override this silently ignored every power command: a heater
+        told to run at 30% stayed at whatever it was, usually 100.
+
+        Hardware actors still override this to drive the output. Clamped to the
+        actor's own ceiling, because a caller asking for more than maxoutput is
+        asking for something the device cannot do.
 
         :return: dict power
         """
+        try:
+            value = float(power)
+        except (TypeError, ValueError):
+            self.logger.warning(
+                "Actor %s ignoring non-numeric power %r", self.id, power
+            )
+            return dict(power=self.power)
+        ceiling = self.maxoutput if self.maxoutput is not None else 100
+        self.power = max(0, min(value, ceiling))
         return dict(power=self.power)
-        pass
 
     async def set_output(self, output):
         """

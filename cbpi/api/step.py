@@ -4,6 +4,7 @@ import time
 from abc import abstractmethod
 
 import cbpi
+from cbpi.api import clock
 from cbpi.api.base import CBPiBase
 
 __all__ = ["StepResult", "StepState", "StepMove", "CBPiStep", "CBPiFermentationStep"]
@@ -45,16 +46,26 @@ class CBPiStep(CBPiBase):
     # runtime bookkeeping, not something a user configures.
     ELAPSED_PROP = "_elapsed_seconds"
 
-    # How often that value is written to disk. Every second would mean a JSON
-    # write per second for the length of a brew; thirty seconds bounds what a
-    # power cut can lose to half a minute, which is immaterial against a rest
-    # measured in tens of minutes.
+    # How often elapsed time is written, in BREWING seconds. Every second would
+    # mean a JSON write per second for the length of a brew, which is needless SD
+    # card wear; thirty bounds what a power cut can lose to half a minute against
+    # a rest measured in tens of minutes.
     ELAPSED_SAVE_INTERVAL = 30
 
+    # ...but never more often than this in REAL seconds. The two exist because the
+    # interval above is a brewing quantity and card wear is a wall-clock one. On a
+    # real rig they are identical. On an accelerated simulation thirty brewing
+    # seconds can be half a real second, and writing that fast would be pointless
+    # thrash; conversely, without the brewing-time interval a fast run would never
+    # write at all, and nothing could be resumed.
+    ELAPSED_SAVE_MIN_REAL_INTERVAL = 0.5
+
     # A heat-up that makes no measurable progress for this long is not heating.
-    # Ten minutes is comfortably longer than any real element needs to move a
-    # vessel a fraction of a degree, so a working rig never trips it, while a
-    # dead element or a probe lying on the bench is caught within one window.
+    # Ten minutes of BREWING time is comfortably longer than any real element
+    # needs to move a vessel a fraction of a degree, so a working rig never trips
+    # it, while a dead element or a probe lying on the bench is caught within one
+    # window. Brewing time rather than wall clock so an accelerated simulation
+    # reports the stall at the same point in the brew that a real rig would.
     HEAT_STALL_WINDOW = 600
 
     # What counts as progress. This is deliberately tiny and unit-agnostic: the
@@ -76,6 +87,7 @@ class CBPiStep(CBPiBase):
         self.running: bool = False
         self.logger = logging.getLogger(__name__)
         self._elapsed_saved_at = 0.0
+        self._elapsed_saved_real_at = 0.0
         self._stall_anchor_value = None
         self._stall_anchor_at = 0.0
         self._stall_reported = False
@@ -110,18 +122,23 @@ class CBPiStep(CBPiBase):
     async def note_progress(self, remaining_seconds, total_seconds):
         """Record progress so an interrupted step can resume where it stopped.
 
-        Called from the per-second timer update each step already has. Throttled,
-        because the point is to survive a power cut, not to write the file
-        continuously.
+        Called from the per-second timer update each step already has. Throttled
+        on two clocks at once - see ELAPSED_SAVE_INTERVAL - because the point is
+        to survive a power cut without writing the file continuously, and those
+        are a brewing-time concern and a wall-clock concern respectively.
         """
         try:
             elapsed = max(0.0, float(total_seconds) - float(remaining_seconds))
         except (TypeError, ValueError):
             return
-        now = time.time()
-        if now - self._elapsed_saved_at < self.ELAPSED_SAVE_INTERVAL:
+        brewing_now = clock.now()
+        real_now = time.time()
+        if brewing_now - self._elapsed_saved_at < self.ELAPSED_SAVE_INTERVAL:
             return
-        self._elapsed_saved_at = now
+        if real_now - self._elapsed_saved_real_at < self.ELAPSED_SAVE_MIN_REAL_INTERVAL:
+            return
+        self._elapsed_saved_at = brewing_now
+        self._elapsed_saved_real_at = real_now
         self.props[self.ELAPSED_PROP] = round(elapsed)
         try:
             # save() is a coroutine; calling it without awaiting silently does
@@ -133,6 +150,7 @@ class CBPiStep(CBPiBase):
     def clear_progress(self):
         """Forget recorded progress, so the step starts fresh next time."""
         self._elapsed_saved_at = 0.0
+        self._elapsed_saved_real_at = 0.0
         self.reset_heat_watch()
         if self.ELAPSED_PROP in self.props:
             try:
@@ -167,7 +185,7 @@ class CBPiStep(CBPiBase):
             # the anchor alone so a brief dropout does not look like progress.
             return False
 
-        now = time.time()
+        now = clock.now()
 
         if self._stall_anchor_value is None:
             self._stall_anchor_value = value
