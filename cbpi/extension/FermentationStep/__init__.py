@@ -120,7 +120,7 @@ class FermenterTargetTempStep(CBPiFermentationStep):
             self.name,
             self.props.get(
                 "Notification",
-                "Target Temp reached. Please add malt and klick next to move on.",
+                "Target Temp reached. Please add malt and click next to move on.",
             ),
         )
         if self.shutdown == False:
@@ -475,7 +475,7 @@ class FermenterRampTempStep(CBPiFermentationStep):
             self.name,
             self.props.get(
                 "Notification",
-                "Target Temp reached. Please add malt and klick next to move on.",
+                "Target Temp reached. Please add malt and click next to move on.",
             ),
         )
         await self.next(self.fermenter.id)
