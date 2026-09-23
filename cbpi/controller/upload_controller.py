@@ -888,6 +888,7 @@ class UploadController:
                 boil_time = float(
                     e.find("./RECIPE[%s]/BOIL_TIME" % (str(Recipe_ID))).text
                 )
+                grain_kg = self.getGrainMass(recipe)
                 FirstWort = self.getFirstWort(hops, "xml")
 
                 await self.create_recipe(name)
@@ -929,6 +930,13 @@ class UploadController:
                                     "Temp": step_temp,
                                     "Timer": 0,
                                     "Notification": Notification,
+                                    # Carried from the recipe so the step can
+                                    # work out a strike temperature. It still
+                                    # needs an ambient sensor and a mash water
+                                    # volume, which are rig properties rather
+                                    # than recipe ones, and without those it
+                                    # heats to Temp exactly as before.
+                                    "Grain_Kg": grain_kg,
                                 },
                                 "status_text": "",
                                 "status": "I",
@@ -1537,6 +1545,42 @@ class UploadController:
             whirlpool_temp = []
         logging.info("Whirlpool Temp: {}".format(whirlpool_temp))
         return hop_alerts, whirlpool_temp
+
+    def getGrainMass(self, recipe):
+        """Total grain bill in kg, from a BeerXML recipe element.
+
+        The importer has always read hops, miscs and mash steps but never the
+        fermentables, so the grain mass - which the recipe carries and which is
+        exactly what a strike-temperature calculation needs - was discarded at
+        import. Without it, MashIn heats to the rest temperature and the mash
+        drops several degrees the moment the grain goes in.
+
+        BeerXML AMOUNT is in kilograms. Only mashed fermentables are counted:
+        sugars and liquid extracts dissolve rather than acting as a thermal mass
+        in the tun, and including them would overstate the strike temperature.
+
+        Returns 0 when there is nothing usable, which the step treats as "no
+        strike calculation" rather than as a grain bill of zero.
+        """
+        total = 0.0
+        mashed = ("grain", "adjunct", "dry extract")
+        try:
+            for f in recipe.findall("./FERMENTABLES/FERMENTABLE"):
+                ftype = f.find("TYPE")
+                if ftype is not None and ftype.text:
+                    if ftype.text.strip().lower() not in mashed:
+                        continue
+                amount = f.find("AMOUNT")
+                if amount is None or not amount.text:
+                    continue
+                try:
+                    total += float(amount.text)
+                except (TypeError, ValueError):
+                    continue
+        except Exception as e:
+            logging.warning("Could not read fermentables for grain mass: %s", e)
+            return 0.0
+        return round(total, 3)
 
     def getFirstWort(self, hops, recipe_type):
         alert = "No"

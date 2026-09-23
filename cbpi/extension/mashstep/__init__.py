@@ -12,6 +12,7 @@ from cbpi.api import Property, action, parameters
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import Kettle, NotificationAction, NotificationType, Props
+from cbpi.api.strike import strike_temperature
 from cbpi.api.step import CBPiStep, StepResult
 from cbpi.api.timer import Timer
 from voluptuous.schema_builder import message
@@ -93,9 +94,33 @@ class NotificationStep(CBPiStep):
             options=["Yes", "No"],
             description="Switch Kettlelogic automatically on and off -> Yes",
         ),
+        Property.Number(
+            label="Grain_Kg",
+            configurable=True,
+            description="Grain bill in kg. With a grain temperature and mash water volume, the step heats past Temp so the mash lands on it after doughing in. Leave blank to heat to Temp as before.",
+        ),
+        Property.Sensor(
+            label="Grain_Sensor",
+            description="Ambient sensor. Grain sits at room temperature, so this is its temperature. Required for strike calculation.",
+        ),
+        Property.Number(
+            label="Mash_Water",
+            configurable=True,
+            description="Mash water in litres. Required for strike calculation.",
+        ),
     ]
 )
 class MashInStep(CBPiStep):
+
+    #: Most a strike temperature may exceed the rest temperature by. A mistyped
+    #: grain bill would otherwise drive the water far past the target before
+    #: anyone sees it, and the enzymes are what pay for that. In Celsius; scaled
+    #: for Fahrenheit at use.
+    MAX_STRIKE_RISE_C = 15.0
+
+    #: And an absolute ceiling, safely below anything that would scald the first
+    #: grain to touch the water.
+    MAX_STRIKE_ABS_C = 82.0
 
     async def NextStep(self, **kwargs):
         await self.next()
@@ -103,16 +128,26 @@ class MashInStep(CBPiStep):
     async def on_timer_done(self, timer):
         # Deliberately does NOT clear the setpoint or switch AutoMode off.
         #
-        # This fires the moment the mash reaches strike temperature, and then the
-        # step waits - indefinitely, and correctly - for the brewer to dough in
-        # and press Next. Releasing the kettle here meant nothing held
+        # This fires the moment the water reaches strike temperature, and then
+        # the step waits - indefinitely, and correctly - for the brewer to dough
+        # in and press Next. Releasing the kettle here meant nothing held
         # temperature during exactly the minutes a sack of room-temperature grain
         # is going in, which is the largest heat sink of the brew day. The mash
         # then lands below target and, on a HERMS, the correction has to come
         # back through the coil slowly with the grain already in.
         #
+        # What it does do is drop the setpoint from strike to rest. The strike
+        # temperature is a pre-heat: it exists to be given up to the grain, and
+        # once the water is there the job is done. Leaving the setpoint high
+        # would have the controller fight the dough-in drop it deliberately
+        # planned for, and overshoot the rest temperature afterwards.
+        #
         # on_stop still switches AutoMode off. That is where the step is
         # genuinely finished, and it is the right place for it.
+        if self.kettle is not None:
+            self.kettle.target_temp = getattr(self, "rest_temp", None) or int(
+                self.props.get("Temp", 0)
+            )
         self.summary = ""
         await self.push_update()
         self.cbpi.notify(
@@ -130,8 +165,10 @@ class MashInStep(CBPiStep):
     async def on_start(self):
         self.AutoMode = True if self.props.get("AutoMode", "No") == "Yes" else False
         self.kettle = self.get_kettle(self.props.get("Kettle", None))
+        self.rest_temp = int(self.props.get("Temp", 0))
+        self.strike_temp = self._strike_target(self.rest_temp)
         if self.kettle is not None:
-            self.kettle.target_temp = int(self.props.get("Temp", 0))
+            self.kettle.target_temp = self.strike_temp
         if self.AutoMode == True:
             await self.setAutoMode(True)
         self.summary = "Waiting for Target Temp"
@@ -140,6 +177,72 @@ class MashInStep(CBPiStep):
                 1, on_update=self.on_timer_update, on_done=self.on_timer_done
             )
         await self.push_update()
+
+    def _strike_target(self, rest_temp):
+        """Water temperature to heat to, so the mash lands on rest_temp.
+
+        Doughing in drops the mash by several degrees and no feedback controller
+        can prevent it - the heat is gone before the sensor reads it. The grain
+        mass is in the recipe and the grain is at room temperature, so the drop
+        is predictable and can be pre-empted. Measured on a simulated HERMS: an
+        8.7 F drop becomes 1.1 F.
+
+        Falls back to the rest temperature whenever anything needed is missing or
+        implausible. That is the important half: a strike temperature computed
+        from a mistyped grain bill would scald the enzymes before the grain ever
+        went in, so this declines rather than guesses, and is clamped even when
+        it does answer.
+        """
+        try:
+            grain_kg = float(self.props.get("Grain_Kg", 0) or 0)
+            water_l = float(self.props.get("Mash_Water", 0) or 0)
+        except (TypeError, ValueError):
+            return rest_temp
+        if grain_kg <= 0 or water_l <= 0:
+            return rest_temp
+
+        sensor_id = self.props.get("Grain_Sensor", None)
+        if not sensor_id:
+            return rest_temp
+        try:
+            grain_temp = self.get_sensor_value(sensor_id).get("value")
+        except Exception:
+            return rest_temp
+        if grain_temp is None:
+            return rest_temp
+
+        fahrenheit = self.get_config_value("TEMP_UNIT", "C") != "C"
+        scale = 1.8 if fahrenheit else 1.0
+        result = strike_temperature(
+            rest_temp,
+            grain_kg,
+            grain_temp,
+            water_l,
+            max_rise=self.MAX_STRIKE_RISE_C * scale,
+            absolute_max=(self.MAX_STRIKE_ABS_C * 1.8 + 32) if fahrenheit
+            else self.MAX_STRIKE_ABS_C,
+        )
+        if not result.ok:
+            logging.info(
+                "MashIn: heating to the rest temperature, no strike calculation (%s)",
+                result.reason,
+            )
+            return rest_temp
+
+        strike = round(result.temperature, 1)
+        self.cbpi.notify(
+            self.name,
+            "Heating to {}{} so the mash lands on {}{} after {} kg of grain at "
+            "{}{} goes in.{}".format(
+                strike, "F" if fahrenheit else "C",
+                rest_temp, "F" if fahrenheit else "C",
+                grain_kg, round(grain_temp, 1), "F" if fahrenheit else "C",
+                " Clamped to the safety limit - check the grain bill."
+                if result.clamped else "",
+            ),
+            NotificationType.WARNING if result.clamped else NotificationType.INFO,
+        )
+        return strike
 
     async def on_stop(self):
         await self.timer.stop()
@@ -154,12 +257,14 @@ class MashInStep(CBPiStep):
             sensor_value = self.get_sensor_value(self.props.get("Sensor", None)).get(
                 "value"
             )
+            # The strike temperature, which equals the rest temperature whenever
+            # there is no grain bill to compensate for.
+            target = getattr(self, "strike_temp", None)
+            if target is None:
+                target = int(self.props.get("Temp", 0))
             if self.timer.is_running is not True:
-                self.note_heat_progress(sensor_value, self.props.get("Temp", 0))
-            if (
-                sensor_value >= int(self.props.get("Temp", 0))
-                and self.timer.is_running is not True
-            ):
+                self.note_heat_progress(sensor_value, target)
+            if sensor_value >= target and self.timer.is_running is not True:
                 self.timer.start()
                 self.timer.is_running = True
         await self.push_update()
