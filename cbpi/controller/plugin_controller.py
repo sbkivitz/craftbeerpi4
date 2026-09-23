@@ -56,6 +56,8 @@ class PluginController:
             if name.startswith("cbpi") and len(name) > 4
         }
 
+        self._warn_about_undiscoverable_plugins(discovered_plugins)
+
         for key, value in discovered_plugins.items():
             from importlib.metadata import version
 
@@ -66,6 +68,46 @@ class PluginController:
             except Exception as e:
                 logger.error("FAILED to load plugin {} ".format(key))
                 logger.error(e)
+
+    def _warn_about_undiscoverable_plugins(self, discovered_plugins):
+        """Report cbpi plugins that pip has installed but pkgutil cannot see.
+
+        Plugin discovery walks pkgutil.iter_modules(), which does not pick up
+        editable installs (pip install -e). Such a plugin is installed, shows up in
+        pip list, and is simply never loaded - with nothing in the log to say so.
+        Name them instead, along with the fix.
+        """
+        try:
+            from importlib.metadata import distributions
+
+            # The server itself ships as the 'cbpi4' distribution but imports as the
+            # 'cbpi' module, so it never appears in discovery and must not be
+            # reported as a missing plugin.
+            core_distributions = {"cbpi4"}
+
+            installed = set()
+            for dist in distributions():
+                name = (dist.metadata["Name"] or "").strip()
+                if (
+                    name.lower().startswith("cbpi")
+                    and len(name) > 4
+                    and name.lower() not in core_distributions
+                ):
+                    installed.add(name)
+        except Exception as e:
+            logger.debug("Could not enumerate installed distributions: {}".format(e))
+            return
+
+        missing = sorted(installed - set(discovered_plugins))
+        for name in missing:
+            logger.warning(
+                "Plugin '%s' is installed but was not discovered, so it will not be "
+                "loaded. This usually means it was installed with 'pip install -e' - "
+                "reinstall it normally ('pip install %s') to make it discoverable.",
+                name,
+                name,
+            )
+
 
     def register(self, name, clazz) -> None:
         """
