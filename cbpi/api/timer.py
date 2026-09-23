@@ -7,6 +7,14 @@ from cbpi.api import clock
 
 class Timer(object):
 
+    #: How often to report the countdown, in simulated seconds. This is a
+    #: display cadence and nothing more - it must never decide when the timer
+    #: finishes, which is what `end_time` is for. Fusing the two is what made a
+    #: twelve second timer measure fifteen: the loop slept a fixed step and
+    #: checked afterwards, so it always ran on past its deadline by whatever the
+    #: last step overshot by, multiplied by the time scale.
+    UPDATE_INTERVAL = 1.0
+
     def __init__(self, timeout, on_done=None, on_update=None) -> None:
         super().__init__()
         self.timeout = timeout
@@ -36,19 +44,39 @@ class Timer(object):
         # however fast the model is being run. Measuring this in wall clock is what
         # made a condensed brew day impossible - the physics compressed, the rests
         # did not, and a "fast" run still took its full number of hours.
-        self.start_time = int(clock.now())
-        self.end_time = self.start_time + int(round(self._timemout, 0))
-        self.count = self.end_time - self.start_time
+        #
+        # The rest is expressed as a deadline rather than as a series of one
+        # second sleeps. Those are not equivalent: sleeping a fixed step and
+        # checking afterwards always finishes somewhere past the end, by however
+        # much the final step overshot, and a scaled clock multiplies that by the
+        # scale. Waiting for an instant instead lets the clock decide how to get
+        # there - which for a virtual clock is to jump exactly onto it.
+        start = clock.now()
+        self.start_time = int(start)
+        duration = max(0.0, float(self._timemout))
+        deadline = start + duration
+        self.end_time = int(round(deadline, 0))
+        self.count = int(round(duration, 0))
         try:
-            while self.count > 0:
-                self.count = self.end_time - int(clock.now())
+            while True:
+                remaining = deadline - clock.now()
+                self.count = max(0, int(round(remaining, 0)))
                 if self._update is not None:
                     await self._update(self, self.count)
-                await clock.sleep(1)
+                if remaining <= 0:
+                    return
+                # Whichever comes first: the next time the display should tick,
+                # or the end. The end always wins, so a coarse refresh rate
+                # cannot make the timer run long.
+                await clock.sleep_until(
+                    min(clock.now() + self.UPDATE_INTERVAL, deadline)
+                )
         except asyncio.CancelledError:
-            end = int(clock.now())
-            duration = end - self.start_time
-            self._timemout = self._timemout - duration
+            self._timemout = max(0.0, deadline - clock.now())
+            # Re-raised so the task is actually marked cancelled. Swallowing it
+            # left the task "completed", which is what made done() treat a stop as
+            # an expiry. The remaining time above is still recorded first, so
+            # resuming the timer picks up where it left off.
             # Re-raised so the task is actually marked cancelled. Swallowing it
             # left the task "completed", which is what made done() treat a stop as
             # an expiry. The remaining time above is still recorded first, so

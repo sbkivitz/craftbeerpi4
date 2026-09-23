@@ -197,7 +197,12 @@ class KettleHttpEndpoints:
                 description: invalid HTTP Met
         """
         id = request.match_info["id"]
-        await self.controller.off(id)
+        # stop(), not off(). KettleController has start, stop and toggle - there
+        # is no off, so this route answered every request with a 500 and the
+        # text "'KettleController' object has no attribute 'off'". The interface
+        # uses /toggle, which is why it survived; anything driving the API
+        # directly did not.
+        await self.controller.stop(id)
         return web.Response(status=204)
 
     @request_mapping(path="/{id}/toggle", method="POST", auth_required=False)

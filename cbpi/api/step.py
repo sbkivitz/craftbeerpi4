@@ -175,6 +175,33 @@ class CBPiStep(CBPiBase):
         self._stall_anchor_at = 0.0
         self._stall_reported = False
 
+    def _heat_is_available(self):
+        """Can the vessel's heat source actually deliver right now?
+
+        Only the kettle logic knows. A HERMS mash tun has no element: it is
+        heated through a coil in the HLT, so when the HLT is at or below the mash
+        no heat can flow however hard the element is driven. A directly heated
+        vessel has no such state, and its logic simply does not answer - which is
+        read as "yes", leaving those rigs exactly as they were.
+
+        Deliberately forgiving. Anything unexpected here means the watch stays
+        quiet, because a missed alarm costs a brew and a false one costs the
+        brewer's trust in every alarm afterwards.
+        """
+        kettle = getattr(self, "kettle", None)
+        if kettle is None:
+            return True
+        instance = getattr(kettle, "instance", None)
+        if instance is None:
+            return True
+        available = getattr(instance, "heat_available", None)
+        if available is None:
+            return True
+        try:
+            return bool(available)
+        except Exception:  # noqa: BLE001
+            return True
+
     def note_heat_progress(self, sensor_value, target=None):
         """Warn if a heat-up has stopped making progress.
 
@@ -197,6 +224,28 @@ class CBPiStep(CBPiBase):
             return False
 
         now = clock.now()
+
+        # Nothing can warm from something colder than itself.
+        #
+        # On a HERMS the mash tun has no element: it is heated through a coil in
+        # the HLT, and at every step change the target jumps while the HLT is
+        # still where the last rest left it. The mash then drifts DOWN for a
+        # while, flattens, and only starts to climb once the HLT has rebuilt the
+        # gradient. That turning point is exactly where this watch used to fire -
+        # at the moment the system is working hardest and is about to succeed.
+        #
+        # Observed on a running rig: the alarm was raised 21.5 F short of a
+        # 168.8 F target, and the step reached target thirty-two brewing minutes
+        # later, having climbed all the way. Nothing was wrong with it.
+        #
+        # Only the kettle logic knows whether it can deliver heat right now, so
+        # it is asked. A logic that does not answer is assumed able, which keeps
+        # every directly-heated vessel behaving exactly as before.
+        if not self._heat_is_available():
+            self._stall_anchor_value = value
+            self._stall_anchor_at = now
+            self._stall_reported = False
+            return False
 
         # Already there. A controller holding a vessel on setpoint produces no
         # rise at all, which is exactly what a dead element looks like to this
