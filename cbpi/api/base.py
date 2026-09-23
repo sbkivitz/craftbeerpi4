@@ -72,22 +72,25 @@ class CBPiBase(metaclass=ABCMeta):
         try:
             await self.cbpi.actor.on(id, power, output)
         except Exception as e:
-            pass
+            # Never silent: this is how every kettle logic and step drives hardware,
+            # so a swallowed failure just looks like "the element didn't come on".
+            logging.error("Failed to switch on actor %s: %s", id, e)
 
     async def actor_off(self, id):
         try:
             await self.cbpi.actor.off(id)
         except Exception as e:
-            pass
+            # Worst case here: a heater that should be off stays on. Say so.
+            logging.error("Failed to switch OFF actor %s: %s", id, e)
 
     async def actor_set_power(self, id, power):
         try:
             await self.cbpi.actor.set_power(id, power)
         except Exception as e:
-            pass
+            logging.error("Failed to set power on actor %s: %s", id, e)
 
     async def actor_set_output(self, id, output):
         try:
             await self.cbpi.actor.set_output(id, output)
         except Exception as e:
-            pass
+            logging.error("Failed to set output on actor %s: %s", id, e)
