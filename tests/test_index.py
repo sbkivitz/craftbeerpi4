@@ -12,9 +12,9 @@ class IndexTestCase(CraftBeerPiTestCase):
         assert resp.status == 200
 
     async def test_404(self):
-        # Test Index Page
+        # A path that does not exist must report not found, not a server fault.
         resp = await self.client.get(path="/abc")
-        assert resp.status == 500
+        assert resp.status == 404
 
     async def test_wrong_login(self):
         resp = await self.client.post(path="/login", data={"username": "beer", "password": "123"})
