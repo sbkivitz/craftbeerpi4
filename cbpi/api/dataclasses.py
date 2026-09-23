@@ -56,7 +56,7 @@ class Props:
 class Actor:
     id: str = None
     name: str = None
-    props: Props = Props()
+    props: Props = field(default_factory=Props)
     state: bool = False
     power: int = 100
     maxoutput: int = 100
@@ -107,7 +107,7 @@ class DataType(Enum):
 class Sensor:
     id: str = None
     name: str = None
-    props: Props = Props()
+    props: Props = field(default_factory=Props)
     state: bool = False
     type: str = None
     instance: str = None
@@ -132,7 +132,7 @@ class Sensor:
 class Kettle:
     id: str = None
     name: str = None
-    props: Props = Props()
+    props: Props = field(default_factory=Props)
     instance: str = None
     agitator: Actor = None
     heater: Actor = None
@@ -170,7 +170,7 @@ class Kettle:
 class Step:
     id: str = None
     name: str = None
-    props: Props = Props()
+    props: Props = field(default_factory=Props)
     type: str = None
     status: StepState = StepState.INITIAL
     instance: str = None
@@ -210,7 +210,7 @@ class Fermenter:
     valve: Actor = None
     brewname: str = None
     description: str = None
-    props: Props = Props()
+    props: Props = field(default_factory=Props)
     target_temp: float = 0
     target_pressure: float = 0
     type: str = None
@@ -256,7 +256,7 @@ class FermenterStep:
     id: str = None
     name: str = None
     fermenter: Fermenter = None
-    props: Props = Props()
+    props: Props = field(default_factory=Props)
     type: str = None
     status: StepState = StepState.INITIAL
     endtime: int = 0  # endtime if step is active and timer is running
