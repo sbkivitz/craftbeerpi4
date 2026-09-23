@@ -101,11 +101,20 @@ class MashInStep(CBPiStep):
         await self.next()
 
     async def on_timer_done(self, timer):
+        # Deliberately does NOT clear the setpoint or switch AutoMode off.
+        #
+        # This fires the moment the mash reaches strike temperature, and then the
+        # step waits - indefinitely, and correctly - for the brewer to dough in
+        # and press Next. Releasing the kettle here meant nothing held
+        # temperature during exactly the minutes a sack of room-temperature grain
+        # is going in, which is the largest heat sink of the brew day. The mash
+        # then lands below target and, on a HERMS, the correction has to come
+        # back through the coil slowly with the grain already in.
+        #
+        # on_stop still switches AutoMode off. That is where the step is
+        # genuinely finished, and it is the right place for it.
         self.summary = ""
-        self.kettle.target_temp = 0
         await self.push_update()
-        if self.AutoMode == True:
-            await self.setAutoMode(False)
         self.cbpi.notify(
             self.name,
             self.props.get(
@@ -217,7 +226,12 @@ class MashStep(CBPiStep):
 
     async def on_timer_done(self, timer):
         self.summary = ""
-        self.kettle.target_temp = 0
+        # Guarded because get_kettle() returns None for a deleted or unset kettle -
+        # every on_start in this file already checks, but the timer callbacks did
+        # not. Raising here would skip both the notification and the next() call
+        # below, wedging the profile on a step that has actually finished.
+        if self.kettle is not None:
+            self.kettle.target_temp = 0
         if self.AutoMode == True:
             await self.setAutoMode(False)
         self.cbpi.notify(self.name, "Step finished", NotificationType.SUCCESS)
@@ -556,7 +570,10 @@ class BoilStep(CBPiStep):
 
     async def on_timer_done(self, timer):
         self.summary = ""
-        self.kettle.target_temp = 0
+        # See MashStep.on_timer_done: a missing kettle must not stop the profile
+        # advancing off a boil that has genuinely finished.
+        if self.kettle is not None:
+            self.kettle.target_temp = 0
         if self.AutoMode == True:
             await self.setAutoMode(False)
         self.cbpi.notify(self.name, "Boiling completed", NotificationType.SUCCESS)
@@ -667,7 +684,11 @@ class BoilStep(CBPiStep):
         await self.timer.stop()
         self.summary = ""
         self.summary2 = None
-        self.kettle.target_temp = 0
+        # Stopping must always succeed. Raising here would leave the step running
+        # with its heater still under AutoMode, which is the opposite of what
+        # stopping is for.
+        if self.kettle is not None:
+            self.kettle.target_temp = 0
         if self.AutoMode == True:
             await self.setAutoMode(False)
         if self.lid_actor is not None:
