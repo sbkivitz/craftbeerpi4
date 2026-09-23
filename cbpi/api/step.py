@@ -62,6 +62,17 @@ class CBPiStep(CBPiBase):
     # working element clears this in seconds.
     HEAT_STALL_MIN_RISE = 0.5
 
+    # How close to target counts as arrived. Inside this band the watch stays
+    # quiet, because a vessel being held on setpoint by a working controller is
+    # not rising and must not be reported as stalled.
+    #
+    # This matters more than it looks. A step waits for `sensor_value >= Temp`
+    # before starting its rest, so a mash settling a hundredth of a degree below
+    # target sits in the waiting state indefinitely - with a controller holding
+    # it there perfectly. Without this band the watch fires on the best-behaved
+    # rig in the fleet, and an alert that cries wolf is worse than no alert.
+    HEAT_STALL_NEAR_TARGET = 1.0
+
     def __init__(self, cbpi, id, name, props, on_done) -> None:
         self.name = name
         self.cbpi = cbpi
@@ -168,6 +179,21 @@ class CBPiStep(CBPiBase):
             return False
 
         now = time.time()
+
+        # Already there. A controller holding a vessel on setpoint produces no
+        # rise at all, which is exactly what a dead element looks like to this
+        # watch - so proximity to target, not movement, decides. Re-anchor while
+        # we are here, so drifting away from target later starts a fresh window
+        # rather than inheriting a stale one.
+        if target is not None:
+            try:
+                if float(target) - value <= self.HEAT_STALL_NEAR_TARGET:
+                    self._stall_anchor_value = value
+                    self._stall_anchor_at = now
+                    self._stall_reported = False
+                    return False
+            except (TypeError, ValueError):
+                pass
 
         if self._stall_anchor_value is None:
             self._stall_anchor_value = value
