@@ -68,7 +68,11 @@ async def error_middleware(request, handler):
         response = await handler(request)
         if response.status != 404:
             return response
-        message = response.message
+        # A handler that deliberately returned a 404 with its own body has already
+        # answered; only aiohttp's bare not-found response carries .message.
+        message = getattr(response, "message", None)
+        if message is None:
+            return response
     except web.HTTPException as ex:
         if ex.status != 404:
             raise
@@ -84,8 +88,11 @@ async def error_middleware(request, handler):
         return web.json_response(status=500, data={'error': "GracefulExit"})
     except asyncio.exceptions.CancelledError:
         return web.json_response(status=500, data={'error': "CancelledError"})
-        
-    return web.json_response(status=500, data={'error': message})
+
+    # Not found stays not found. This previously returned 500, which made every
+    # missing route or file look like a server fault and left handlers unable to
+    # report "no such thing" at all.
+    return web.json_response(status=404, data={'error': message})
 
 
 class CraftBeerPi:
