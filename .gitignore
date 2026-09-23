@@ -20,4 +20,8 @@ logs/
 .devcontainer/cbpi-dev-config/*
 cbpi4-*
 temp*
+# 'temp*' also matches cbpi/config/dashboard/templates, so the bundled starter
+# layouts would be silently untracked when a new one is added.
+!cbpi/config/dashboard/templates/
+!cbpi/config/dashboard/templates/**
 *.patch

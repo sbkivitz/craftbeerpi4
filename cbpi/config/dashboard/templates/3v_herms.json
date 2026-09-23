@@ -1,0 +1,180 @@
+{
+    "meta": {
+        "title": "3-Vessel HERMS",
+        "description": "HLT, Mash Tun and Boil Kettle with large PV/SV readouts, per-vessel controls, recirculation pipes and a mash step list. Kettles and sensors are auto-matched by name."
+    },
+    "elements": [
+        {
+            "id": "tpl-title",
+            "name": "3-Vessel HERMS",
+            "type": "Text",
+            "x": 420,
+            "y": 10,
+            "props": { "size": "20", "color": "#ffffff" }
+        },
+        {
+            "id": "tpl-hlt-label",
+            "name": "HLT",
+            "type": "Text",
+            "x": 155,
+            "y": 70,
+            "props": { "size": "16", "color": "#8efa00" }
+        },
+        {
+            "id": "tpl-hlt-kettle",
+            "name": "HLT Vessel",
+            "type": "Kettle",
+            "x": 120,
+            "y": 95,
+            "props": { "width": "120", "heigth": "170" }
+        },
+        {
+            "id": "tpl-hlt-pv",
+            "name": "HLT PV",
+            "type": "Sensor",
+            "x": 140,
+            "y": 130,
+            "props": { "sensor": "$sensor:HLT|Hot Liquor", "unit": "°", "size": "34", "color": "#ff1f1f", "digits": "1", "action": "no" }
+        },
+        {
+            "id": "tpl-hlt-sv",
+            "name": "HLT SV",
+            "type": "TargetTemp",
+            "x": 140,
+            "y": 180,
+            "props": { "kettle": "$kettle:HLT|Hot Liquor", "unit": "°", "size": "26", "color": "#00ff00" }
+        },
+        {
+            "id": "tpl-hlt-control",
+            "name": "HLT Control",
+            "type": "KettleControl",
+            "x": 110,
+            "y": 355,
+            "props": { "kettle": "$kettle:HLT|Hot Liquor", "size": "normal", "orientation": "horizontal" }
+        },
+        {
+            "id": "tpl-mash-label",
+            "name": "Mash Tun",
+            "type": "Text",
+            "x": 485,
+            "y": 70,
+            "props": { "size": "16", "color": "#8efa00" }
+        },
+        {
+            "id": "tpl-mash-kettle",
+            "name": "Mash Vessel",
+            "type": "Kettle",
+            "x": 470,
+            "y": 95,
+            "props": { "width": "120", "heigth": "170" }
+        },
+        {
+            "id": "tpl-mash-pv",
+            "name": "Mash PV",
+            "type": "Sensor",
+            "x": 490,
+            "y": 130,
+            "props": { "sensor": "$sensor:Mash|MLT|MT", "unit": "°", "size": "34", "color": "#ff1f1f", "digits": "1", "action": "no" }
+        },
+        {
+            "id": "tpl-mash-sv",
+            "name": "Mash SV",
+            "type": "TargetTemp",
+            "x": 490,
+            "y": 180,
+            "props": { "kettle": "$kettle:Mash|MLT|MT", "unit": "°", "size": "26", "color": "#00ff00" }
+        },
+        {
+            "id": "tpl-mash-control",
+            "name": "Mash Control",
+            "type": "KettleControl",
+            "x": 460,
+            "y": 355,
+            "props": { "kettle": "$kettle:Mash|MLT|MT", "size": "normal", "orientation": "horizontal" }
+        },
+        {
+            "id": "tpl-boil-label",
+            "name": "Boil Kettle",
+            "type": "Text",
+            "x": 835,
+            "y": 70,
+            "props": { "size": "16", "color": "#8efa00" }
+        },
+        {
+            "id": "tpl-boil-kettle",
+            "name": "Boil Vessel",
+            "type": "Kettle",
+            "x": 820,
+            "y": 95,
+            "props": { "width": "120", "heigth": "170" }
+        },
+        {
+            "id": "tpl-boil-pv",
+            "name": "Boil PV",
+            "type": "Sensor",
+            "x": 840,
+            "y": 130,
+            "props": { "sensor": "$sensor:Boil|BK|Kettle", "unit": "°", "size": "34", "color": "#ff1f1f", "digits": "1", "action": "no" }
+        },
+        {
+            "id": "tpl-boil-sv",
+            "name": "Boil SV",
+            "type": "TargetTemp",
+            "x": 840,
+            "y": 180,
+            "props": { "kettle": "$kettle:Boil|BK|Kettle", "unit": "°", "size": "26", "color": "#00ff00" }
+        },
+        {
+            "id": "tpl-boil-control",
+            "name": "Boil Control",
+            "type": "KettleControl",
+            "x": 810,
+            "y": 355,
+            "props": { "kettle": "$kettle:Boil|BK|Kettle", "size": "normal", "orientation": "horizontal" }
+        },
+        {
+            "id": "tpl-steps",
+            "name": "Mash Steps",
+            "type": "Steps",
+            "x": 110,
+            "y": 445,
+            "props": { "width": "250", "stepsize": "14", "namesize": "14" }
+        },
+        {
+            "id": "tpl-trend-label",
+            "name": "Trend:  HLT (orange)  /  Mash (blue)",
+            "type": "Text",
+            "x": 430,
+            "y": 450,
+            "props": { "size": "13", "color": "#8efa00" }
+        },
+        {
+            "id": "tpl-hlt-chart",
+            "name": "HLT Trend",
+            "type": "Chart",
+            "x": 430,
+            "y": 472,
+            "props": { "sensor": "$sensor:HLT|Hot Liquor", "linecolor": "#ff8c00", "refresh": "10", "width": "260", "height": "150" }
+        },
+        {
+            "id": "tpl-mash-chart",
+            "name": "Mash Trend",
+            "type": "Chart",
+            "x": 720,
+            "y": 472,
+            "props": { "sensor": "$sensor:Mash|MLT|MT", "linecolor": "#00bfff", "refresh": "10", "width": "260", "height": "150" }
+        }
+    ],
+    "pathes": [
+        {
+            "id": "tpl-path-herms",
+            "coordinates": [[180, 270], [180, 312], [530, 312], [530, 270]],
+            "condition": { "left": [], "right": [], "leftExpression": "", "rightExpression": "" }
+        },
+        {
+            "id": "tpl-path-mash-boil",
+            "coordinates": [[590, 270], [590, 330], [880, 330], [880, 270]],
+            "condition": { "left": [], "right": [], "leftExpression": "", "rightExpression": "" }
+        }
+    ]
+}
