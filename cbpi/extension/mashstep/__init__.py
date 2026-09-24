@@ -151,8 +151,8 @@ class MashInStep(CBPiStep):
         # on_stop still switches AutoMode off. That is where the step is
         # genuinely finished, and it is the right place for it.
         if self.kettle is not None:
-            self.kettle.target_temp = getattr(self, "rest_temp", None) or int(
-                self.props.get("Temp", 0)
+            self.kettle.target_temp = getattr(self, "rest_temp", None) or self._float_prop(
+                "Temp", 0
             )
         # Strike temperature is reached, so the brewer is about to dough in.
         # From here the tun must be assumed to contain grain - the flag goes
@@ -181,7 +181,7 @@ class MashInStep(CBPiStep):
     async def on_start(self):
         self.AutoMode = True if self.props.get("AutoMode", "No") == "Yes" else False
         self.kettle = self.get_kettle(self.props.get("Kettle", None))
-        self.rest_temp = int(self.props.get("Temp", 0))
+        self.rest_temp = self._float_prop("Temp", 0)
         self.strike_temp = self._strike_target(self.rest_temp)
         if self.kettle is not None:
             self.kettle.target_temp = self.strike_temp
@@ -206,6 +206,26 @@ class MashInStep(CBPiStep):
                 1, on_update=self.on_timer_update, on_done=self.on_timer_done
             )
         await self.push_update()
+
+    def _float_prop(self, name, default):
+        """A numeric property, without truncating the fraction away.
+
+        `int(self.props.get("Temp", 0))` silently turned a 152.6 F rest into a
+        152 F one. Two-tenths matters less than half a degree does, but the
+        brewer typed 152.6 and is entitled to get it - and the error is
+        systematic, applying to every step on every brew.
+        """
+        try:
+            value = self.props.get(name, None)
+            if value in (None, ""):
+                return float(default)
+            return float(value)
+        except (TypeError, ValueError):
+            logging.warning(
+                "%s: could not read %s=%r, using %s", self.name, name,
+                self.props.get(name, None), default
+            )
+            return float(default)
 
     def _set_grain_present(self, present):
         """Tell the kettle logic whether the tun holds grain.
