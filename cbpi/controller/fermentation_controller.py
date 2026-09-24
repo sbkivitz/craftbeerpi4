@@ -14,6 +14,7 @@ import cbpi
 import shortuuid
 import yaml
 from cbpi.api.dataclasses import Fermenter, FermenterStep, Props, Step
+from cbpi.api.persist import atomic_write_json
 from cbpi.controller.basic_controller2 import BasicController
 from cbpi.api.decorator import normalize_action_parameters, resolve_action
 from tabulate import tabulate
@@ -308,8 +309,7 @@ class FermentationController:
 
     def save(self):
         data = dict(data=list(map(lambda item: item.to_dict(), self.data)))
-        with open(self.path, "w") as file:
-            json.dump(data, file, indent=4, sort_keys=True)
+        atomic_write_json(self.path, data, sort_keys=True)
 
     def create_step(self, id, item):
         try:

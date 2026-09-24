@@ -5,6 +5,7 @@ from pathlib import Path
 
 from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import Config
+from cbpi.api.persist import atomic_write_json
 from cbpi.utils import load_config
 
 
@@ -61,8 +62,7 @@ class ConfigController:
             data = {}
             for key, value in self.cache.items():
                 data[key] = value.to_dict()
-            with open(self.path, "w") as file:
-                json.dump(data, file, indent=4, sort_keys=True)
+            atomic_write_json(self.path, data, sort_keys=True)
 
     async def add(
         self,
@@ -77,8 +77,7 @@ class ConfigController:
         data = {}
         for key, value in self.cache.items():
             data[key] = value.to_dict()
-        with open(self.path, "w") as file:
-            json.dump(data, file, indent=4, sort_keys=True)
+        atomic_write_json(self.path, data, sort_keys=True)
 
     async def remove(self, name):
         data = {}
@@ -101,8 +100,7 @@ class ConfigController:
                 print(e)
                 success = False
         if success == True:
-            with open(self.path, "w") as file:
-                json.dump(data, file, indent=4, sort_keys=True)
+            atomic_write_json(self.path, data, sort_keys=True)
             self.cache = self.testcache
 
     async def obsolete(self, remove=False):

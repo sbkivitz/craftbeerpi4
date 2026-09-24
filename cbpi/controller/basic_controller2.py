@@ -7,6 +7,7 @@ import sys
 
 import shortuuid
 from cbpi.api.dataclasses import Actor, Fermenter, NotificationType, Props
+from cbpi.api.persist import atomic_write_json, quarantine
 from cbpi.api.decorator import normalize_action_parameters, resolve_action
 from tabulate import tabulate
 
@@ -56,10 +57,12 @@ class BasicController:
                     await self.push_udpate()
         except Exception as e:
             # logging.error(e)
-            logging.warning("Invalid {} file - Creating empty file".format(self.path))
-            os.remove(self.path)
-            with open(self.path, "w") as file:
-                json.dump(dict(data=[]), file, indent=4, sort_keys=True)
+            kept = quarantine(self.path)
+            logging.warning(
+                "Invalid %s file - starting empty. The unreadable file was kept "
+                "at %s", self.path, kept or "(could not be preserved)"
+            )
+            atomic_write_json(self.path, dict(data=[]), sort_keys=True)
 
             with open(self.path) as json_file:
                 data = json.load(json_file)
@@ -77,8 +80,7 @@ class BasicController:
     async def save(self):
         logging.info("{} Save ".format(self.name))
         data = dict(data=list(map(lambda actor: actor.to_dict(), self.data)))
-        with open(self.path, "w") as file:
-            json.dump(data, file, indent=4, sort_keys=True)
+        atomic_write_json(self.path, data, sort_keys=True)
         await self.push_udpate()
 
     async def push_udpate(self):
