@@ -71,6 +71,7 @@ class ConfigUpdate(CBPiExtension):
         PLAY_BUZZER = self.cbpi.config.get("PLAY_BUZZER", None)
         BoilAutoTimer = self.cbpi.config.get("BoilAutoTimer", None)
         ActorInterlock = self.cbpi.config.get("ACTOR_INTERLOCK_GROUPS", None)
+        ActorInterlockMode = self.cbpi.config.get("ACTOR_INTERLOCK_MODE", None)
         ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", None)
         MASH_TUN = self.cbpi.config.get("MASH_TUN", None)
         AutoMode = self.cbpi.config.get("AutoMode", None)
@@ -894,12 +895,43 @@ class ConfigUpdate(CBPiExtension):
                     "ACTOR_INTERLOCK_GROUPS",
                     "",
                     type=ConfigType.STRING,
-                    description="Actors that must never be on together, e.g. "
-                                "'HLT Heater,Boil Heater'. Separate groups with ';'. "
-                                "Leave empty if your supply can run them together.",
+                    description="Advanced. Only needed if ACTOR_INTERLOCK_MODE "
+                                "cannot express your rig. Actor NAMES that must "
+                                "never be on together, e.g. 'HLT Heater,Boil "
+                                "Heater'; separate groups with ';'. Renaming an "
+                                "actor silently breaks this, so prefer the mode "
+                                "setting above.",
                     source="craftbeerpi",
                 )
                 ActorInterlock = self.cbpi.config.get("ACTOR_INTERLOCK_GROUPS", "")
+            except Exception:
+                logging.warning("Unable to update database")
+
+        if ActorInterlockMode is None:
+            logging.info("INIT ACTOR_INTERLOCK_MODE")
+            try:
+                await self.cbpi.config.add(
+                    "ACTOR_INTERLOCK_MODE",
+                    "Off",
+                    type=ConfigType.SELECT,
+                    description="Prevent two heating elements running at once. "
+                                "'One heating element at a time' uses the "
+                                "heaters your kettles already name, so there is "
+                                "nothing to type and renaming an actor cannot "
+                                "break it. Leave 'Off' if your supply can run "
+                                "both elements together.",
+                    source="craftbeerpi",
+                    options=[
+                        {"label": "Off", "value": "Off"},
+                        {
+                            "label": "One heating element at a time",
+                            "value": "One heating element at a time",
+                        },
+                    ],
+                )
+                ActorInterlockMode = self.cbpi.config.get(
+                    "ACTOR_INTERLOCK_MODE", "Off"
+                )
             except Exception:
                 logging.warning("Unable to update database")
 

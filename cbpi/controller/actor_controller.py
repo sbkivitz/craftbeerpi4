@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from cbpi.api.dataclasses import Actor, Props
@@ -67,33 +68,103 @@ class ActorController(BasicController):
                     logging.error("Failed to confirm actor %s off during shutdown: %s", item.id, e)
 
     INTERLOCK_SETTING = "ACTOR_INTERLOCK_GROUPS"
+    INTERLOCK_MODE = "ACTOR_INTERLOCK_MODE"
+    MODE_OFF = "Off"
+    MODE_ONE_ELEMENT = "One heating element at a time"
+
+    def _interlock_lock(self):
+        """Serializes the check-and-commit in on(). Created on first use
+        because this controller is not constructed through __init__."""
+        lock = getattr(self, "_interlock_lock_obj", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._interlock_lock_obj = lock
+        return lock
+
+    def _heater_actor_ids(self):
+        """The actors that kettles drive as heating elements.
+
+        These are the multi-kilowatt loads, and the software already knows
+        which they are - so "one element at a time" needs nothing typed and
+        cannot be broken by renaming an actor.
+
+        Fermenter heaters are deliberately excluded. They are tens of watts and
+        interlocking a fermentation chamber against a boil kettle would stop
+        fermentation temperature control for the length of a brew day.
+        """
+        ids = set()
+        try:
+            for kettle in self.cbpi.kettle.data:
+                heater = getattr(kettle, "heater", None)
+                if heater:
+                    ids.add(heater)
+        except Exception:  # noqa: BLE001
+            return set()
+        return ids
 
     def _interlock_groups(self):
-        """Sets of actor names that must never be energized together.
+        """Sets of actor *ids* that must never be energized together.
 
-        Read from config on every call so a change takes effect without a
-        restart. The setting is a list of groups separated by semicolons, each a
-        list of actor names separated by commas:
+        Two sources, both read on every call so a change takes effect without
+        a restart.
 
-            HLT Heater,Boil Heater
+        The first is ACTOR_INTERLOCK_MODE, a plain choice:
 
-        **Empty by default, which means no interlock at all.** That default is
+            Off                            - no interlock at all (default)
+            One heating element at a time  - every kettle heater is exclusive
+
+        The second is the legacy ACTOR_INTERLOCK_GROUPS string, kept working
+        for anyone already relying on it: groups separated by semicolons, actor
+        names separated by commas. Naming actors in free text is a poor
+        interface - a typo fails open, and renaming an actor silently breaks
+        the interlock - so the mode above is the supported way to do this and
+        this is only a fallback. Names are resolved to ids here so that the
+        rest of the logic never compares names.
+
+        **Off by default, which means no interlock at all.** That default is
         the important part. Plenty of rigs are wired for a 50A supply and heat
-        two elements deliberately; a safety feature that silently changes what a
-        working rig does is not a safety feature. A brewer whose supply cannot
-        carry both, or who has a selector switch doing this in hardware, names
-        the group and gets the same protection in software.
+        two elements deliberately; a safety feature that silently changes what
+        a working rig does is not a safety feature.
         """
+        groups = []
+
+        try:
+            mode = self.cbpi.config.get(self.INTERLOCK_MODE, self.MODE_OFF)
+        except Exception:  # noqa: BLE001
+            mode = self.MODE_OFF
+        if str(mode).strip() == self.MODE_ONE_ELEMENT:
+            heaters = self._heater_actor_ids()
+            # A group of one interlocks with nothing.
+            if len(heaters) > 1:
+                groups.append(heaters)
+
         try:
             raw = self.cbpi.config.get(self.INTERLOCK_SETTING, "") or ""
         except Exception:  # noqa: BLE001
-            return []
-        groups = []
+            raw = ""
+        by_name = {}
+        for actor in self.data:
+            if actor.name:
+                by_name.setdefault(str(actor.name).strip(), actor.id)
         for chunk in str(raw).split(";"):
-            names = {part.strip() for part in chunk.split(",") if part.strip()}
-            # A group of one interlocks with nothing, so it is not a group.
-            if len(names) > 1:
-                groups.append(names)
+            ids = set()
+            for part in chunk.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                resolved = by_name.get(part)
+                if resolved is None:
+                    logging.warning(
+                        "Actor interlock: no actor named %r - that group member "
+                        "is being ignored, which means the interlock is not "
+                        "protecting it",
+                        part,
+                    )
+                    continue
+                ids.add(resolved)
+            if len(ids) > 1:
+                groups.append(ids)
+
         return groups
 
     def _interlock_conflict(self, item):
@@ -102,10 +173,10 @@ class ActorController(BasicController):
         if not groups:
             return None
         for group in groups:
-            if item.name not in group:
+            if item.id not in group:
                 continue
             for other in self.data:
-                if other.id == item.id or other.name not in group:
+                if other.id == item.id or other.id not in group:
                     continue
                 try:
                     if other.instance is not None and other.instance.state is True:
@@ -155,13 +226,32 @@ class ActorController(BasicController):
                 # Turning off another vessel's element behind the brewer's back
                 # is a worse failure than declining to start this one, and it
                 # would do it silently.
-                blocking = self._interlock_conflict(item)
+                #
+                # Check and commit happen under one lock. Testing for a
+                # conflict and then energizing as two separate steps is a
+                # check-then-act race: two concurrent starts - two steps, a
+                # step and the interface, a step and MQTT - can both find the
+                # other element off and both proceed. The window is small, but
+                # software doing two things at once is the entire case this
+                # exists to prevent. The notification is raised outside the
+                # lock because it is slow and does not need protecting.
+                async with self._interlock_lock():
+                    blocking = self._interlock_conflict(item)
+                    if blocking is None:
+                        try:
+                            await item.instance.on(power, output)
+                        except:
+                            await item.instance.on(power)
+
                 if blocking is not None:
                     message = (
                         "'{}' was not switched on: '{}' is already running and "
-                        "they are interlocked. Switch that off first, or clear "
-                        "{} if this rig can supply both.".format(
-                            item.name, blocking.name, self.INTERLOCK_SETTING
+                        "they are interlocked. Switch that off first, or set "
+                        "{} to '{}' if this rig can supply both.".format(
+                            item.name,
+                            blocking.name,
+                            self.INTERLOCK_MODE,
+                            self.MODE_OFF,
                         )
                     )
                     logging.warning("Actor interlock: %s", message)
@@ -174,10 +264,6 @@ class ActorController(BasicController):
                     except Exception:  # noqa: BLE001
                         self.cbpi.notify("Interlock", message)
                     return False
-                try:
-                    await item.instance.on(power, output)
-                except:
-                    await item.instance.on(power)
                 # Record what was actually commanded.
                 #
                 # to_dict() reports state from the live instance but power from
