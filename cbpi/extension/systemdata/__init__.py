@@ -18,7 +18,13 @@ class Systemdata(CBPiExtension):
         self.update_key = "systemupdate"
         self.sorting = False
         self._task = asyncio.create_task(self.run())
-        logger.error("INIT Systemdata Extension")
+        # Normal startup, logged at INFO. This was logger.error, and
+        # NotificationController.notify_log_event turns ERROR records into user
+        # notifications when NOTIFY_ON_ERROR is on - so every single start
+        # raised a fault notification for an extension that had started
+        # perfectly. An alert that fires when nothing is wrong teaches the
+        # brewer to dismiss alerts.
+        logger.info("INIT Systemdata Extension")
 
     async def run(self):
         while True:

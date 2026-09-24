@@ -697,8 +697,22 @@ class BoilStep(CBPiStep):
         """Arm the boil kettle once the brewer says the wort is in it.
 
         See _needs_transfer_confirmation. Nothing heats until this runs.
+
+        Guarded against being run by a notification that is no longer current.
+        A CraftBeerPi notification stays clickable after the step that raised it
+        has stopped - the callback is held in NotificationController's cache,
+        not by the step - so without these checks an old "Wort transferred"
+        prompt could set a target and switch AutoMode on for a profile that had
+        since been stopped, skipped or reset. That is precisely the thing this
+        feature exists to prevent, arriving by a different route.
         """
         if getattr(self, "transfer_confirmed", False):
+            return
+        if not getattr(self, "running", False):
+            logging.info(
+                "%s: ignoring a transfer confirmation for a step that is no "
+                "longer running", self.name
+            )
             return
         self.transfer_confirmed = True
         if self.kettle is not None:
@@ -861,9 +875,16 @@ class BoilStep(CBPiStep):
                 await self.actor_off(self.lid_actor) 
             except:
                 pass
+        # Disarm. A notification stays clickable after the step that raised it
+        # has stopped, so leaving this set would let an old prompt re-arm a
+        # stopped step - and a restarted boil must ask again anyway, because
+        # whatever stopped it may well have been the brewer noticing the kettle
+        # was empty.
+        self.transfer_confirmed = False
         await self.push_update()
 
     async def reset(self):
+        self.transfer_confirmed = False
         self.timer = Timer(
             int(self.props.get("Timer", 0)) * 60,
             on_update=self.on_timer_update,
