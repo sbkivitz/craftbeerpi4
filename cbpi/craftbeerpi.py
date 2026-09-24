@@ -95,6 +95,42 @@ async def error_middleware(request, handler):
     return web.json_response(status=404, data={'error': message})
 
 
+@web.middleware
+async def _ui_cache_headers(request, handler):
+    """Tell the browser how long it may trust each interface file.
+
+    aiohttp's web.static sends ETag and Last-Modified but no Cache-Control.
+    With no directive, browsers fall back to heuristic caching and may reuse
+    index.html without asking the server at all.
+
+    That is unsafe here specifically because index.html names the hashed bundle
+    to load, and upgrading the interface deletes the old bundle. A browser
+    holding a stale index.html therefore asks for a file that no longer exists:
+    the shell renders, the script 404s, nothing mounts, and the page is black.
+    It stays black until someone knows to hard-refresh - which on a brewery
+    tablet, after an upgrade, looks exactly like the controller having died.
+
+    So the entry point is always revalidated, while the content-addressed
+    assets beneath it are cached hard: their names change whenever their
+    contents do, so they can never go stale.
+    """
+    response = await handler(request)
+    try:
+        if "Cache-Control" not in response.headers:
+            hashed = any(
+                seg in request.path
+                for seg in ("/static/js/", "/static/css/", "/static/media/")
+            )
+            response.headers["Cache-Control"] = (
+                "public, max-age=31536000, immutable" if hashed else "no-cache"
+            )
+    except (AttributeError, TypeError):
+        # Streamed or already-sent responses have no mutable headers. Serving
+        # the file matters more than labelling it, so never fail the request.
+        pass
+    return response
+
+
 class CraftBeerPi:
 
     def __init__(self, configFolder):
@@ -232,6 +268,9 @@ class CraftBeerPi:
             sub = web.Application()
             sub.add_routes(routes)
             if static is not None:
+                # Only subapps that serve interface files get the cache policy;
+                # API routes are left exactly as they were.
+                sub.middlewares.append(_ui_cache_headers)
                 sub.add_routes([web.static('/static', static, show_index=True)])
             self.app.add_subapp(url_prefix, sub)
         else:
