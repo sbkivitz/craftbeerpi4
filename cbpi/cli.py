@@ -603,7 +603,7 @@ class CraftBeerPiCli:
     "-l",
     default="",
     type=click.Path(),
-    help="Specify where the log folder is located. Defaults to '../logs' relative from the config folder.",
+    help="Specify where the log folder is located. Defaults to '../logs' relative from the config folder. Can also be set in config.yaml as 'logs-folder-path', which is the easier place on a systemd install. Point it at a USB stick or a mounted network share to keep the sensor CSVs and cbpi.log off the SD card, which is what wears out on a Pi.",
 )
 @click.option(
     "--debug-log-level",
@@ -616,15 +616,40 @@ def main(context, config_folder_path, logs_folder_path, debug_log_level):
     print("--------------------------")
     print("Welcome to CBPi " + __version__)
     print("--------------------------")
-    if logs_folder_path == "":
-        logs_folder_path = os.path.join(
-            Path(config_folder_path).absolute().parent, "logs"
-        )
+    # Where the logs live is worth caring about on a Pi: cbpi.log plus one
+    # rotating CSV per sensor are essentially the whole write volume of a
+    # running system, and an SD card is the part that wears out. Putting them
+    # on a USB stick or a network share moves that wear off the card entirely.
+    #
+    # It could only be set on the command line, which on a systemd install
+    # means editing the unit file. config.yaml is the file a brewer already
+    # edits, so it is read from there too - with the command line still
+    # winning, since it is the more specific instruction.
+    cli_logs_folder = logs_folder_path
+    default_logs_folder = os.path.join(
+        Path(config_folder_path).absolute().parent, "logs"
+    )
     formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
     )
-    config = ConfigFolder(config_folder_path, logs_folder_path)
+    # Provisional, only so config.yaml can be located; corrected immediately
+    # below if that file relocates the logs.
+    config = ConfigFolder(config_folder_path, cli_logs_folder or default_logs_folder)
     static_config = load_config(config.get_file_path("config.yaml"))
+
+    logs_folder_path = cli_logs_folder
+    if not logs_folder_path:
+        from_yaml = None
+        try:
+            from_yaml = (static_config or {}).get("logs-folder-path")
+        except Exception:  # noqa: BLE001
+            from_yaml = None
+        if from_yaml:
+            logs_folder_path = str(from_yaml)
+            print("logs folder from config.yaml: " + logs_folder_path)
+        else:
+            logs_folder_path = default_logs_folder
+    config.logsFolderPath = logs_folder_path
     try:
         if debug_log_level == 99:
             debug_log_level = static_config["debug-log-level"]
