@@ -74,6 +74,24 @@ class SensorLogTargetCSV(CBPiExtension):
                     logger.error("Error creating log file handler after trying to set rights: %s", e)
                     return
 
+            # Exactly one handler per sensor logger.
+            #
+            # logging.getLogger() returns a process-global singleton, and this
+            # block is re-entered whenever the datalogger dict has lost the id -
+            # after clear_log, or a sensor edit. Each pass used to attach ANOTHER
+            # RotatingFileHandler to the same file, so the file ended up with
+            # several open handles. On Windows the rollover then fails outright
+            # (os.rename cannot move a file another handle holds) and sensor
+            # logging stops; on Linux it survives but writes every reading two
+            # or three times. Either way the chart is wrong, which is how this
+            # was noticed.
+            for existing in list(data_logger.handlers):
+                try:
+                    data_logger.removeHandler(existing)
+                    existing.close()
+                except Exception as e:
+                    logger.warning("Could not close old log handler: %s", e)
+
             data_logger.addHandler(handler)
             self.cbpi.log.datalogger[id] = data_logger
 
