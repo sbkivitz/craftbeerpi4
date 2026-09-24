@@ -24,6 +24,61 @@ class KettleController(BasicController):
             target_temp=data.get("target_temp", 0),
         )
 
+    async def start(self, id):
+        # Two kettle logics driving one heater fight each other.
+        #
+        # On a HERMS it is normal and correct for two kettles to name the same
+        # heating element: the HLT element heats the mash through a coil, so the
+        # HLT and the mash tun genuinely share it. What is not correct is for
+        # both logics to be RUNNING at once. PID_HERMS drives that element from
+        # the mash temperature while Hysteresis drives it from the HLT's own
+        # target, and every second one of them undoes the other.
+        #
+        # The dangerous direction is specific: the HLT logic holds its own
+        # setpoint, which may be left over from an earlier step, so it can hold
+        # the element on while the cascade is trying to ease it off - and the
+        # mash overshoots.
+        #
+        # Warned rather than blocked. There is no legitimate reason to run both,
+        # but refusing to start a kettle the brewer explicitly asked for is a
+        # surprising way to find that out, and the brewer may be doing something
+        # deliberate that this cannot see.
+        try:
+            await self._warn_if_heater_shared(id)
+        except Exception as e:  # noqa: BLE001
+            logging.debug("shared-heater check skipped: %s", e)
+        await super().start(id)
+
+    async def _warn_if_heater_shared(self, id):
+        item = self.find_by_id(id)
+        heater = getattr(item, "heater", None)
+        if not heater:
+            return
+        clashes = []
+        for other in self.data:
+            if other.id == item.id or getattr(other, "heater", None) != heater:
+                continue
+            instance = getattr(other, "instance", None)
+            if instance is not None and getattr(instance, "running", False):
+                clashes.append(other)
+        if not clashes:
+            return
+
+        names = ", ".join(getattr(k, "name", k.id) for k in clashes)
+        message = (
+            "'{}' and '{}' drive the same heater. Both logics are now running "
+            "and will fight over it - one holding the element on while the "
+            "other tries to ease it off. Stop whichever one you do not want "
+            "controlling it.".format(getattr(item, "name", id), names)
+        )
+        logging.warning("Kettle: %s", message)
+        try:
+            from cbpi.api.dataclasses import NotificationType
+
+            self.cbpi.notify("Shared heater", message, NotificationType.WARNING)
+        except Exception:  # noqa: BLE001
+            self.cbpi.notify("Shared heater", message)
+
     async def toggle(self, id):
 
         try:
