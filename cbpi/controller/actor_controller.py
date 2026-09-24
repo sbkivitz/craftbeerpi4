@@ -124,13 +124,21 @@ class ActorController(BasicController):
             power_given = power is not None
             output_given = output is not None
             if power is None:
-                if item.power:
+                # `is not None`, not truthiness.
+                #
+                # Zero is a legitimate commanded level, not "unset". Treating it
+                # as unset made a deliberate 0 fall through to 100, so an actor
+                # that had been ramped down to zero came back at FULL power the
+                # next time anything called on() without an explicit level.
+                # The dataclass already defaults power to 100, so a fresh actor
+                # still starts fully on - nothing needs truthiness to get that.
+                if item.power is not None:
                     power = item.power
                 else:
                     power = 100
 
             if output is None:
-                if item.output:
+                if item.output is not None:
                     output = item.output
                 else:
                     output = 100
@@ -215,20 +223,47 @@ class ActorController(BasicController):
     async def off(self, id):
         try:
             item = self.find_by_id(id)
-            if item.instance.state is True:
-                await item.instance.off()
-                # await self.push_udpate()
-                self.cbpi.ws.send(
-                    dict(
-                        topic=self.update_key,
-                        data=list(map(lambda item: item.to_dict(), self.data)),
-                    ),
-                    self.sorting,
+            if item is None:
+                logging.error("Cannot switch off unknown actor %s", id)
+                return False
+
+            # Unconditional, and idempotent.
+            #
+            # This used to call the hardware only when the software believed the
+            # actor was already on. That makes OFF a no-op exactly when it is
+            # most needed: after a desync, a restart, a relay that latched, or a
+            # failed ON that left the instance's state flag behind. An emergency
+            # stop would then return success having sent nothing at all.
+            #
+            # Switching off something already off costs one redundant command
+            # and is always safe. Not switching off something that is on is not.
+            await item.instance.off()
+
+            self.cbpi.ws.send(
+                dict(
+                    topic=self.update_key,
+                    data=list(map(lambda item: item.to_dict(), self.data)),
+                ),
+                self.sorting,
+            )
+            self.cbpi.push_update("cbpi/actorupdate/{}".format(id), item.to_dict())
+
+            # Report what the hardware is actually doing, not what was asked.
+            # A caller that gets True from an emergency stop is entitled to
+            # believe the element is de-energized.
+            still_on = False
+            try:
+                still_on = item.instance.state is True
+            except Exception:  # noqa: BLE001
+                still_on = False
+            if still_on:
+                logging.error(
+                    "Actor %s reports still ON after being switched off", id
                 )
-                self.cbpi.push_update("cbpi/actorupdate/{}".format(id), item.to_dict())
+                return False
             return True
         except Exception as e:
-            logging.error("Failed to switch on Actor {} {}".format(id, e), True)
+            logging.error("Failed to switch off Actor {} {}".format(id, e))
             return False
 
     async def toogle(self, id):
@@ -251,12 +286,20 @@ class ActorController(BasicController):
     def _clamp_power(power):
         """A percentage, and nothing else. Out of range means the caller is
         confused, and driving an element from a confused number is worse than
-        driving it from a sane one."""
+        driving it from a sane one.
+
+        An unreadable value fails to 0, not 100. This used to return 100, so
+        `set_power(id, None)` or a malformed value from a plugin or an HTTP
+        request went to FULL power on a multi-kilowatt element. When the number
+        is meaningless the only defensible output is no heat.
+        """
         try:
-            power = int(round(float(power)))
+            return max(0, min(100, int(round(float(power)))))
         except (TypeError, ValueError):
-            return 100
-        return max(0, min(100, power))
+            logging.error(
+                "Uninterpretable power value %r - commanding 0%% instead", power
+            )
+            return 0
 
     async def set_power(self, id, power):
         try:
@@ -287,10 +330,14 @@ class ActorController(BasicController):
     async def actor_update(self, id, power, output=None, maxoutput=None):
         try:
             item = self.find_by_id(id)
-            if maxoutput:
+            if maxoutput is not None:
                 item.maxoutput = maxoutput
-            item.power = round(power)
-            if output:
+            # Same clamp as every other path. This one reports the actor's level
+            # to the interface and to any logic that reads it back, so an
+            # unclamped or unreadable figure here becomes a bad control decision
+            # somewhere else.
+            item.power = self._clamp_power(power)
+            if output is not None:
                 item.output = round(output)
 
             # await self.push_udpate()
