@@ -26,6 +26,17 @@ from voluptuous.schema_builder import message
 
 from ..api.step import StepMove, StepResult, StepState
 
+# aiohttp's default is ClientTimeout(total=5*60). Five minutes is not a hang,
+# but it is far too long for a call made while the operator is waiting on a
+# page, and long enough that a wedged Brewfather looks like a wedged server.
+#
+# Brewfather is a third party over the internet: give it room for a slow
+# response but not for a stall. The local call is to this very process, so if
+# it has not answered in a few seconds something is badly wrong and waiting
+# longer will not help.
+BREWFATHER_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+LOCAL_API_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5)
+
 
 class UploadController:
 
@@ -99,7 +110,9 @@ class UploadController:
             parameters = {"limit": limit}
             while repeat == True:
                 try:
-                    async with aiohttp.ClientSession(headers=headers) as bf_session:
+                    async with aiohttp.ClientSession(
+                        headers=headers, timeout=BREWFATHER_TIMEOUT
+                    ) as bf_session:
                         async with bf_session.get(self.url, params=parameters) as r:
                             if r.status == 429:
                                 try:
@@ -1184,7 +1197,9 @@ class UploadController:
                 headers = {"Authorization": "Basic %s" % encodedData}
                 bf_recipe = ""
 
-                async with aiohttp.ClientSession(headers=headers) as bf_session:
+                async with aiohttp.ClientSession(
+                    headers=headers, timeout=BREWFATHER_TIMEOUT
+                ) as bf_session:
                     async with bf_session.get(self.bf_url) as r:
                         bf_recipe = await r.json()
                     await bf_session.close()
@@ -1738,7 +1753,9 @@ class UploadController:
         # convert step:string to json required for api call.
         step = json.dumps(step_string)
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        async with aiohttp.ClientSession(headers=headers) as session:
+        async with aiohttp.ClientSession(
+            headers=headers, timeout=LOCAL_API_TIMEOUT
+        ) as session:
             async with session.post(self.url, data=step) as response:
                 return await response.text()
             await self.push_update()

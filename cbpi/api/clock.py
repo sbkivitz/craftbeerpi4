@@ -50,6 +50,7 @@ about a running server.
 import abc
 import asyncio
 import heapq
+import math
 import time
 
 __all__ = [
@@ -141,6 +142,17 @@ class ScaledTimeSource(TimeSource):
             rate = float(rate)
         except (TypeError, ValueError):
             raise ValueError("time scale must be a number, got {!r}".format(rate))
+        # Positive is not enough: float("inf") and float("nan") both get past a
+        # bare `rate <= 0`, and SIM_TIME_SCALE is a free-text number setting.
+        #
+        # An infinite rate makes every elapsed interval infinite, which is not a
+        # fast simulation but a hang - a consumer integrating over that interval
+        # never terminates, taking the whole event loop with it and leaving
+        # every GPIO pin latched wherever it was. A NaN rate is worse: it
+        # poisons every subsequent time arithmetic silently, and NaN comparisons
+        # are all False so no deadline is ever reached.
+        if not math.isfinite(rate):
+            raise ValueError("time scale must be finite, got {}".format(rate))
         if rate <= 0:
             raise ValueError("time scale must be positive, got {}".format(rate))
         return rate
