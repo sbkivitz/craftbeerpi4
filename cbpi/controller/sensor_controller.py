@@ -42,13 +42,51 @@ class SensorController(BasicController):
             state.setdefault(
                 "age", None if last_update is None else time.time() - last_update
             )
+            # How old this particular sensor's reading is allowed to get, so a
+            # consumer does not have to know anything about publish intervals.
+            state.setdefault("max_age", self.expected_max_age(id))
             return state
         except Exception as e:
             logging.error("Failed read sensor value {} {} ".format(id, e))
             return None
 
-    def is_fresh(self, id, max_age=30):
-        """True when this sensor produced a reading within max_age seconds.
+    # A sensor that publishes once a minute is not stale at 31 seconds.
+    #
+    # Thirty seconds was chosen on the assumption that drivers publish about
+    # once a second. The bundled OneWire driver defaults to `Interval = 60`, so
+    # on a healthy probe the reported age sawtooths 0 -> 60 and spends roughly
+    # half of every minute above 30. A consumer that cuts heat on that cycles
+    # the element and raises a fault pair every minute of a brew day, with
+    # nothing actually wrong. MQTT is worse: Tasmota's default telemetry period
+    # is 300s, so such a sensor would never look fresh at all.
+    #
+    # OneWire's own internal check already had the right idea - it allows
+    # `interval * 3` - so this follows that convention rather than inventing a
+    # second one. Three missed publications is a real fault at any cadence,
+    # where a fixed wall-clock number is only right for one.
+    DEFAULT_MAX_AGE = 30
+    MISSED_PUBLICATIONS = 3
+
+    def expected_max_age(self, id, floor=None):
+        """How old a reading from this sensor may be before it is suspect.
+
+        `floor` seconds, or three of the sensor's own publish intervals,
+        whichever is longer. A sensor that declares no interval just gets the
+        floor.
+        """
+        if floor is None:
+            floor = self.DEFAULT_MAX_AGE
+        try:
+            props = getattr(self.find_by_id(id).instance, "props", None) or {}
+            interval = props.get("Interval", None)
+            if interval is None:
+                return floor
+            return max(floor, float(interval) * self.MISSED_PUBLICATIONS)
+        except Exception:  # noqa: BLE001
+            return floor
+
+    def is_fresh(self, id, max_age=None):
+        """True when this sensor produced a reading recently enough.
 
         Reading a value tells you nothing about whether the probe is still alive.
         Several sensor implementations - the bundled OneWire one among them - catch
@@ -56,12 +94,17 @@ class SensorController(BasicController):
         reports a plausible temperature indefinitely. Callers that are about to act
         on a reading, especially to energize a heater, should ask this first.
 
+        `max_age` defaults to the sensor's own publish cadence rather than a
+        fixed number of seconds - see expected_max_age().
+
         Unknown sensors, sensors that have never produced a reading, and sensors
         whose instance cannot be reached all answer False: the safe direction is to
         treat anything unproven as stale.
         """
         if id is None:
             return False
+        if max_age is None:
+            max_age = self.expected_max_age(id)
         try:
             last_update = getattr(self.find_by_id(id).instance, "last_update", None)
         except Exception:

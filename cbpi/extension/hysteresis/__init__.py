@@ -52,11 +52,17 @@ class Hysteresis(CBPiKettleLogic):
             return None
 
         age = state.get("age")
-        if age is not None and age > self.MAX_SENSOR_AGE:
+        # The sensor's own cadence, not a fixed number of seconds. A OneWire
+        # probe on its default 60s interval is legitimately 59s old, and
+        # cutting heat on that cycles the element every minute of a brew day
+        # with nothing wrong. See SensorController.expected_max_age().
+        limit = state.get("max_age") or self.MAX_SENSOR_AGE
+        if age is not None and age > limit:
             logging.warning(
-                "Hysteresis: ignoring sensor %s, last updated %.0fs ago",
+                "Hysteresis: ignoring sensor %s, last updated %.0fs ago (limit %.0fs)",
                 sensor_id,
                 age,
+                limit,
             )
             return None
 
