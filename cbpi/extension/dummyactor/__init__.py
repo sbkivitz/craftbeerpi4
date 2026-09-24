@@ -46,6 +46,12 @@ class DummyActor(CBPiActor):
     async def run(self):
         pass
 
+    async def on_stop(self):
+        # Nothing physical here, but a stopped actor that still reports itself
+        # on will mislead anything that reads actor state back - including the
+        # interlock, which asks exactly that question.
+        self.state = False
+
 
 def setup(cbpi):
     """

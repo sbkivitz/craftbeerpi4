@@ -120,6 +120,26 @@ class GPIOActor(CBPiActor):
         GPIO.output(self.gpio, self.get_GPIO_state(0))
         self.state = False
 
+    async def on_stop(self):
+        """Leave the pin low whatever happened.
+
+        run() drives the GPIO high and then awaits the heating part of the
+        duty cycle. Stop the actor - or cancel its task - during that await and
+        the loop exits with the output still energized and nothing left running
+        to lower it. The element stays on until something else happens to
+        touch that pin.
+
+        CBPiActor._run() calls this from a finally, so it also covers
+        cancellation. It must therefore never raise: this is the last code that
+        gets to turn the heat off.
+        """
+        try:
+            GPIO.output(self.gpio, self.get_GPIO_state(0))
+        except Exception as e:  # noqa: BLE001
+            logger.error("ACTOR %s failed to lower GPIO %s on stop: %s",
+                         self.id, getattr(self, "gpio", "?"), e)
+        self.state = False
+
     def get_state(self):
         return self.state
 
@@ -274,6 +294,32 @@ class GPIOPWMActor(CBPiActor):
     async def run(self):
         while self.running == True:
             await asyncio.sleep(1)
+
+    async def on_stop(self):
+        """Stop the PWM and leave the pin low.
+
+        Without this the duty cycle simply stays wherever it was when the task
+        ended - a stopped actor that is still delivering power. Stopping the
+        PWM channel also releases it, so restarting the actor does not leave an
+        orphaned channel driving the same pin.
+
+        Called from a finally in CBPiActor._run(), so it must never raise.
+        """
+        try:
+            if self.p is not None:
+                self.p.ChangeDutyCycle(0 if self.inverted == "No" else 100)
+                self.p.stop()
+                self.p = None
+        except Exception as e:  # noqa: BLE001
+            logger.error("PWM ACTOR %s failed to stop PWM on %s: %s",
+                         self.id, getattr(self, "gpio", "?"), e)
+        try:
+            if self.gpio is not None:
+                GPIO.output(self.gpio, 0 if self.inverted == "No" else 1)
+        except Exception as e:  # noqa: BLE001
+            logger.error("PWM ACTOR %s failed to lower GPIO %s on stop: %s",
+                         self.id, getattr(self, "gpio", "?"), e)
+        self.state = False
 
 
 def setup(cbpi):
