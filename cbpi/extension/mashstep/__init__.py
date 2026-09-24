@@ -692,6 +692,46 @@ class BoilStep(CBPiStep):
         await self.note_progress(seconds, int(self.props.get("Timer", 0)) * 60)
         await self.push_update()
 
+    @action("Wort transferred - start heating", [])
+    async def confirm_transfer(self, **kwargs):
+        """Arm the boil kettle once the brewer says the wort is in it.
+
+        See _needs_transfer_confirmation. Nothing heats until this runs.
+        """
+        if getattr(self, "transfer_confirmed", False):
+            return
+        self.transfer_confirmed = True
+        if self.kettle is not None:
+            self.kettle.target_temp = float(self.props.get("Temp", 0))
+        if self.AutoMode == True:
+            await self.setAutoMode(True)
+        self.summary = "Waiting for Target Temp"
+        self.cbpi.notify(self.name, "Heating the boil kettle",
+                         NotificationType.INFO)
+        await self.push_update()
+
+    def _needs_transfer_confirmation(self):
+        """Should this step wait to be told the wort is actually in the kettle?
+
+        A mash step advances the moment its timer expires - MashStep.
+        on_timer_done ends in an unconditional next() - and this step's on_start
+        then energizes the boil element. Between those two things is a sparge, a
+        lauter and a transfer, none of which the software knows about and all of
+        which take a brewer away from the rig.
+
+        So a mash out finishing while nobody is present hands several kilowatts
+        to an empty kettle. Nothing else catches it: a probe in an empty vessel
+        reads air temperature, which is a perfectly plausible number, so every
+        sensor check passes.
+
+        Defaulting to Yes means an existing profile now stops and asks where it
+        used to run straight on. That is deliberate: the cost of the prompt is
+        one press, and the cost of getting it wrong is a fire. A rig that
+        genuinely runs unattended sets CONFIRM_BEFORE_BOIL to No, which is the
+        same decision made explicitly rather than by default.
+        """
+        return self.get_config_value("CONFIRM_BEFORE_BOIL", "Yes") != "No"
+
     async def on_start(self):
 
         self.lid_temp = 95 if self.get_config_value("TEMP_UNIT", "C") == "C" else 203
@@ -718,8 +758,13 @@ class BoilStep(CBPiStep):
         self.summary2 = None
 
         self.kettle = self.get_kettle(self.props.get("Kettle", None))
+        self.transfer_confirmed = not self._needs_transfer_confirmation()
         if self.kettle is not None:
-            self.kettle.target_temp = float(self.props.get("Temp", 0))
+            # Left at zero until the transfer is confirmed, so nothing heats
+            # even if a kettle logic is started by hand in the meantime.
+            self.kettle.target_temp = (
+                float(self.props.get("Temp", 0)) if self.transfer_confirmed else 0
+            )
 
         if self.cbpi.kettle is not None and self.timer is None:
             self.timer = Timer(
@@ -735,9 +780,22 @@ class BoilStep(CBPiStep):
             except:
                 pass
 
-        self.summary = "Waiting for Target Temp"
-        if self.AutoMode == True:
-            await self.setAutoMode(True)
+        if self.transfer_confirmed:
+            self.summary = "Waiting for Target Temp"
+            if self.AutoMode == True:
+                await self.setAutoMode(True)
+        else:
+            # Stop here and ask. The action is what arms the element; until it
+            # is pressed this step heats nothing and its timer cannot start.
+            self.summary = "Waiting for wort transfer"
+            self.cbpi.notify(
+                self.name,
+                "Is the wort in the boil kettle? Nothing will be heated until "
+                "you confirm. (Set CONFIRM_BEFORE_BOIL to No to skip this.)",
+                NotificationType.WARNING,
+                action=[NotificationAction("Wort transferred",
+                                           self.confirm_transfer)],
+            )
         await self.push_update()
 
     async def next_hop_timer(self):
@@ -835,6 +893,15 @@ class BoilStep(CBPiStep):
             # two disagree by exactly the time scale. Identical to
             # asyncio.sleep(1) on a real rig, where the two clocks are one.
             await clock.sleep(1)
+
+            # Nothing happens until the brewer says the wort is in the kettle.
+            # Held here as well as in on_start because this loop is what starts
+            # the boil timer: a kettle left hot from a previous step would
+            # otherwise satisfy the target check below and begin timing a boil
+            # that is not happening.
+            if not getattr(self, "transfer_confirmed", True):
+                continue
+
             sensor_value = self.get_sensor_value(self.props.get("Sensor", None)).get(
                 "value"
             )

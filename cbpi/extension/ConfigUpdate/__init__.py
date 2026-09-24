@@ -70,6 +70,8 @@ class ConfigUpdate(CBPiExtension):
         NOTIFY_ON_ERROR = self.cbpi.config.get("NOTIFY_ON_ERROR", None)
         PLAY_BUZZER = self.cbpi.config.get("PLAY_BUZZER", None)
         BoilAutoTimer = self.cbpi.config.get("BoilAutoTimer", None)
+        ActorInterlock = self.cbpi.config.get("ACTOR_INTERLOCK_GROUPS", None)
+        ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", None)
         MASH_TUN = self.cbpi.config.get("MASH_TUN", None)
         AutoMode = self.cbpi.config.get("AutoMode", None)
         AddMashIn = self.cbpi.config.get("AddMashInStep", None)
@@ -863,6 +865,43 @@ class ConfigUpdate(CBPiExtension):
                 )
             except:
                 logger.warning("Unable to update config")
+
+        if ConfirmBeforeBoil is None:
+            logging.info("INIT CONFIRM_BEFORE_BOIL")
+            try:
+                await self.cbpi.config.add(
+                    "CONFIRM_BEFORE_BOIL",
+                    "Yes",
+                    type=ConfigType.SELECT,
+                    description="Ask before heating the boil kettle. A mash step "
+                                "advances the moment its timer ends, which can "
+                                "energize the boil element before the wort has "
+                                "been transferred.",
+                    source="steps",
+                    options=[
+                        {"label": "Yes", "value": "Yes"},
+                        {"label": "No", "value": "No"},
+                    ],
+                )
+                ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", "Yes")
+            except Exception:
+                logging.warning("Unable to update database")
+
+        if ActorInterlock is None:
+            logging.info("INIT ACTOR_INTERLOCK_GROUPS")
+            try:
+                await self.cbpi.config.add(
+                    "ACTOR_INTERLOCK_GROUPS",
+                    "",
+                    type=ConfigType.STRING,
+                    description="Actors that must never be on together, e.g. "
+                                "'HLT Heater,Boil Heater'. Separate groups with ';'. "
+                                "Leave empty if your supply can run them together.",
+                    source="craftbeerpi",
+                )
+                ActorInterlock = self.cbpi.config.get("ACTOR_INTERLOCK_GROUPS", "")
+            except Exception:
+                logging.warning("Unable to update database")
 
         if BoilAutoTimer is None:
             logging.info("INIT BoilAutoTimer")

@@ -66,23 +66,106 @@ class ActorController(BasicController):
                 except Exception as e:
                     logging.error("Failed to confirm actor %s off during shutdown: %s", item.id, e)
 
+    INTERLOCK_SETTING = "ACTOR_INTERLOCK_GROUPS"
+
+    def _interlock_groups(self):
+        """Sets of actor names that must never be energized together.
+
+        Read from config on every call so a change takes effect without a
+        restart. The setting is a list of groups separated by semicolons, each a
+        list of actor names separated by commas:
+
+            HLT Heater,Boil Heater
+
+        **Empty by default, which means no interlock at all.** That default is
+        the important part. Plenty of rigs are wired for a 50A supply and heat
+        two elements deliberately; a safety feature that silently changes what a
+        working rig does is not a safety feature. A brewer whose supply cannot
+        carry both, or who has a selector switch doing this in hardware, names
+        the group and gets the same protection in software.
+        """
+        try:
+            raw = self.cbpi.config.get(self.INTERLOCK_SETTING, "") or ""
+        except Exception:  # noqa: BLE001
+            return []
+        groups = []
+        for chunk in str(raw).split(";"):
+            names = {part.strip() for part in chunk.split(",") if part.strip()}
+            # A group of one interlocks with nothing, so it is not a group.
+            if len(names) > 1:
+                groups.append(names)
+        return groups
+
+    def _interlock_conflict(self, item):
+        """An actor already on that `item` may not be on at the same time."""
+        groups = self._interlock_groups()
+        if not groups:
+            return None
+        for group in groups:
+            if item.name not in group:
+                continue
+            for other in self.data:
+                if other.id == item.id or other.name not in group:
+                    continue
+                try:
+                    if other.instance is not None and other.instance.state is True:
+                        return other
+                except Exception:  # noqa: BLE001
+                    continue
+        return None
+
     async def on(self, id, power=None, output=None):
         try:
             item = self.find_by_id(id)
+            # Remember which of the two the caller actually asked for. Power and
+            # output are two views of one quantity - output is maxoutput * power
+            # / 100 - so setting both independently is incoherent, and setting
+            # both from independently defaulted values is a bug. See below.
+            power_given = power is not None
+            output_given = output is not None
             if power is None:
-                logging.info("Power is none")
                 if item.power:
                     power = item.power
                 else:
                     power = 100
 
             if output is None:
-                logging.info("Output is none")
                 if item.output:
                     output = item.output
                 else:
                     output = 100
             if item.instance.state is False:
+                # Interlock, checked here because every element in the system is
+                # energized through this one function - no step, logic or
+                # third-party plugin can go round it.
+                #
+                # Only on the off -> on transition: on() doubles as "set power"
+                # for an actor that is already running, and that must not look
+                # like a second element trying to start.
+                #
+                # Refused rather than granted by switching the other one off.
+                # Turning off another vessel's element behind the brewer's back
+                # is a worse failure than declining to start this one, and it
+                # would do it silently.
+                blocking = self._interlock_conflict(item)
+                if blocking is not None:
+                    message = (
+                        "'{}' was not switched on: '{}' is already running and "
+                        "they are interlocked. Switch that off first, or clear "
+                        "{} if this rig can supply both.".format(
+                            item.name, blocking.name, self.INTERLOCK_SETTING
+                        )
+                    )
+                    logging.warning("Actor interlock: %s", message)
+                    try:
+                        from cbpi.api.dataclasses import NotificationType
+
+                        self.cbpi.notify(
+                            "Interlock", message, NotificationType.WARNING
+                        )
+                    except Exception:  # noqa: BLE001
+                        self.cbpi.notify("Interlock", message)
+                    return False
                 try:
                     await item.instance.on(power, output)
                 except:
@@ -110,8 +193,20 @@ class ActorController(BasicController):
                     "cbpi/actorupdate/{}".format(id), item.to_dict(), True
                 )
             else:
-                await self.set_power(id, power)
-                await self.set_output(id, output)
+                # Already running, so this is a change of level rather than a
+                # start. Exactly one of the two drives; the other is derived.
+                #
+                # It used to call both. `output` was defaulted from the actor
+                # before `set_power` ran, so `set_output` then recomputed the
+                # power from that stale figure and undid the change - asking a
+                # running heater for 60% left it at 100%. It was invisible only
+                # because item.power was never written at all, which made the
+                # guard inside set_output compare two stale values and do
+                # nothing.
+                if output_given and not power_given:
+                    await self.set_output(id, output)
+                else:
+                    await self.set_power(id, power)
             return True
         except Exception as e:
             logging.error("Failed to switch on Actor {} {}".format(id, e))
