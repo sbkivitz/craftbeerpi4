@@ -15,6 +15,7 @@ import shortuuid
 import yaml
 from cbpi.api.dataclasses import Fermenter, FermenterStep, Props, Step
 from cbpi.controller.basic_controller2 import BasicController
+from cbpi.api.decorator import normalize_action_parameters, resolve_action
 from tabulate import tabulate
 
 from ..api.step import (CBPiFermentationStep, CBPiStep, StepMove, StepResult,
@@ -641,8 +642,19 @@ class FermentationController:
         logging.info("FermenterStep Controller - call Action {} {}".format(id, action))
         try:
             item = await self.find_step_by_id(id)
-            logging.info(item)
-            await item.instance.__getattribute__(action)(**parameter)
+            if item is None:
+                logging.error("FermenterStep Controller - no such step %s", id)
+                return
+            method = resolve_action(item.instance, action)
+            if method is None:
+                logging.error(
+                    "FermenterStep Controller - refused undeclared action %r on "
+                    "%s - only methods decorated with @action can be called",
+                    action,
+                    id,
+                )
+                return
+            await method(**normalize_action_parameters(parameter))
         except Exception as e:
             logging.error(
                 "FermenterStep Controller - Failed to call action on {} {} {}".format(

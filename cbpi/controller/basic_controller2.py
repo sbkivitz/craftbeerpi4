@@ -7,6 +7,7 @@ import sys
 
 import shortuuid
 from cbpi.api.dataclasses import Actor, Fermenter, NotificationType, Props
+from cbpi.api.decorator import normalize_action_parameters, resolve_action
 from tabulate import tabulate
 
 
@@ -199,7 +200,20 @@ class BasicController:
         logging.info("{} call all Action {} {}".format(self.name, id, action))
         try:
             item = self.find_by_id(id)
-            await item.instance.__getattribute__(action)(**parameter)
+            if item is None:
+                logging.error("%s no such item %s", self.name, id)
+                return
+            method = resolve_action(item.instance, action)
+            if method is None:
+                logging.error(
+                    "%s refused undeclared action %r on %s - only methods "
+                    "decorated with @action can be called",
+                    self.name,
+                    action,
+                    id,
+                )
+                return
+            await method(**normalize_action_parameters(parameter))
         except Exception as e:
             logging.error(
                 "{} Failed to call action on {} {} {}".format(self.name, id, action, e)

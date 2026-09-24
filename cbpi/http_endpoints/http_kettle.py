@@ -263,8 +263,11 @@ class KettleHttpEndpoints:
         """
         actor_id = request.match_info["id"]
         data = await request.json()
+        # Every other endpoint sends "action"; this one read "name", so it
+        # passed None and no kettle action could ever be dispatched. Accept
+        # both rather than breaking whatever was sending the old key.
         await self.controller.call_action(
-            actor_id, data.get("name"), data.get("parameter")
+            actor_id, data.get("action", data.get("name")), data.get("parameter")
         )
 
         return web.Response(status=204)
