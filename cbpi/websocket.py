@@ -38,7 +38,24 @@ class CBPiWebSocket:
                             pass
                     await ws.send_json(data=data, dumps=json_dumps)
                 except Exception as e:
-                    self.logger.error("Error with client %s: %s" % (ws, str(e)))
+                    # A client going away is routine - a page reload does it -
+                    # and every broadcast already queued for that socket fails
+                    # at once, so one refresh produced two dozen ERROR lines.
+                    # That buries the errors that matter during a fault, and on
+                    # a Pi it is pointless SD card wear.
+                    #
+                    # Dropped either way: a socket that failed a send is not
+                    # usable again. discard() is idempotent, so the handler's
+                    # own cleanup still works.
+                    if getattr(ws, "closed", False):
+                        self.logger.debug(
+                            "dropping update for a closed client: %s", e
+                        )
+                    else:
+                        self.logger.error(
+                            "Error with client %s: %s" % (ws, str(e))
+                        )
+                    self._clients.discard(ws)
 
             self.cbpi.app.loop.create_task(send_data(ws, data))
 
