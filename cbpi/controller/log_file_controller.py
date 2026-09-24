@@ -185,7 +185,22 @@ class LogController:
         logging.info(f"Deleting logfiles for sensor {name}.")
 
         if name in self.datalogger:
-            self.datalogger[name].removeHandler(self.datalogger[name].handlers[0])
+            # Close, not just remove. removeHandler() detaches the handler from
+            # the logger but leaves its file open, and on Windows an open handle
+            # makes both the rotation rename and the os.remove below fail - so
+            # "clear log" would leave the files in place and the next rollover
+            # would start throwing.
+            #
+            # Every handler, not handlers[0]. A logger is a process-global
+            # singleton, so a previous leak can have left more than one attached
+            # to the same file, and taking only the first leaves the rest
+            # holding it open.
+            for handler in list(self.datalogger[name].handlers):
+                try:
+                    self.datalogger[name].removeHandler(handler)
+                    handler.close()
+                except Exception as e:
+                    logging.warning("Could not close log handler for %s: %s", name, e)
             del self.datalogger[name]
 
         for f in all_filenames:
