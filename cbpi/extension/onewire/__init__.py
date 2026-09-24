@@ -135,7 +135,12 @@ class OneWire(CBPiSensor):
 
     def __init__(self, cbpi, id, props):
         super(OneWire, self).__init__(cbpi, id, props)
-        self.value = 200
+        # Nothing has been read from the bus yet. This used to be 200, which is
+        # not a temperature this probe can produce and not one any consumer
+        # should act on. A placeholder that looks like a plausible reading is
+        # worse than no reading, because nothing downstream can tell them
+        # apart.
+        self.value = None
 
     async def start(self):
         await super().start()
@@ -243,12 +248,24 @@ class OneWire(CBPiSensor):
 
         while self.running == True:
             self.TEMP_UNIT = self.get_config_value("TEMP_UNIT", "C")
-            if (
-                self.TEMP_UNIT == "C"
-            ):  # Report temp in C if nothing else is selected in settings
-                self.value = round((self.t.value + self.offset), 2)
-            else:  # Report temp in F if unit selected in settings
-                self.value = round((9.0 / 5.0 * self.t.value + 32 + self.offset), 2)
+            # Only compute a value once the bus has actually produced one.
+            #
+            # The reader thread starts at 0 and keeps its last value on a failed
+            # read, so computing unconditionally turned "nothing read yet" into
+            # 0 C, or 32 F on a Fahrenheit rig. That number then sat in
+            # get_state() with age None - never published, so never aged - and
+            # any consumer willing to act on an ageless reading would call for
+            # full heat against it.
+            #
+            # last_success is None until the first CRC-checked read, which is
+            # exactly the condition "this probe has never told us anything".
+            if self.t.last_success is not None:
+                if (
+                    self.TEMP_UNIT == "C"
+                ):  # Report temp in C if nothing else is selected in settings
+                    self.value = round((self.t.value + self.offset), 2)
+                else:  # Report temp in F if unit selected in settings
+                    self.value = round((9.0 / 5.0 * self.t.value + 32 + self.offset), 2)
 
             # Only publish a reading the probe actually produced. The reader thread
             # keeps its previous value when a read fails, so publishing
