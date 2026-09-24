@@ -8,6 +8,7 @@ from os.path import isfile, join
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import NotificationType
+from cbpi.api.persist import atomic_write_json
 from voluptuous.schema_builder import message
 
 
@@ -49,8 +50,7 @@ class DashboardController:
         self.path = self.cbpi.config_folder.get_dashboard_path(
             "cbpi_dashboard_" + str(dashboard_id) + ".json"
         )
-        with open(self.path, "w", encoding="utf-8") as outfile:
-            json.dump(data, outfile, indent=4, sort_keys=True, ensure_ascii=False)
+        atomic_write_json(self.path, data, sort_keys=True, ensure_ascii=False)
         self.cbpi.notify(
             title="Dashboard {}".format(dashboard_id),
             message="Saved Successfully",

@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import os.path
+
+from cbpi.api.persist import atomic_write_json, quarantine
 from os import listdir
 from os.path import isfile, join
 
@@ -149,12 +151,14 @@ class StepController:
                 self._recover_interrupted_step()
 
         except:
-            logging.warning("Invalid step_data.json file - Creating empty file")
-            os.remove(self.path)
-            with open(self.path, "w") as file:
-                json.dump(
-                    dict(basic={"name": ""}, steps=[]), file, indent=4, sort_keys=True
-                )
+            kept = quarantine(self.path)
+            logging.warning(
+                "Invalid step_data.json file - starting empty. The unreadable "
+                "file was kept at %s", kept or "(could not be preserved)"
+            )
+            atomic_write_json(
+                self.path, dict(basic={"name": ""}, steps=[]), sort_keys=True
+            )
 
             with open(self.path) as json_file:
                 data = json.load(json_file)
@@ -207,8 +211,7 @@ class StepController:
             basic=self.basic_data,
             steps=list(map(lambda item: item.to_dict(), self.profile)),
         )
-        with open(self.path, "w") as file:
-            json.dump(data, file, indent=4, sort_keys=True)
+        atomic_write_json(self.path, data, sort_keys=True)
         self.push_udpate()
 
     async def start(self):
