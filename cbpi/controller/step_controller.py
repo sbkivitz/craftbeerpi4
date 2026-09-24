@@ -336,6 +336,16 @@ class StepController:
                     del item.props[CBPiStep.ELAPSED_PROP]
             except Exception as e:
                 logging.warning("Could not clear progress for %s: %s", item.id, e)
+                # Deleting is the tidy way, but the point is that no elapsed
+                # time survives a reset - so if the container will not let it
+                # be removed, overwrite it. Failing to do either is how a
+                # sixty minute rest silently becomes a fifteen minute one.
+                try:
+                    item.props[CBPiStep.ELAPSED_PROP] = 0
+                except Exception as e2:  # noqa: BLE001
+                    logging.error(
+                        "Could not reset progress for %s either: %s", item.id, e2
+                    )
             try:
                 await item.instance.reset()
                 if hasattr(item.instance, "clear_progress"):
