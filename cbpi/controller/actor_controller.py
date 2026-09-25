@@ -346,6 +346,21 @@ class ActorController(BasicController):
             # Report what the hardware is actually doing, not what was asked.
             # A caller that gets True from an emergency stop is entitled to
             # believe the element is de-energized.
+            #
+            # Power is cleared for the same reason. An actor kept its last
+            # commanded percentage after being switched off, so a de-energized
+            # element reported "power=100, state=False" - and every consumer
+            # showing power without also checking state displayed a number that
+            # was not true: the dashboard readout, the LED, the charts. Off
+            # means no power is being delivered, so say so once, here, rather
+            # than asking each caller to remember.
+            try:
+                item.power = 0
+                if item.instance is not None:
+                    item.instance.power = 0
+            except Exception:  # noqa: BLE001 - reporting, never fatal
+                pass
+
             still_on = False
             try:
                 still_on = item.instance.state is True
