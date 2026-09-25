@@ -40,6 +40,55 @@ class StepMove(Enum):
 
 class CBPiStep(CBPiBase):
 
+    def _float_prop(self, name, default):
+        """A numeric property, without truncating the fraction away.
+
+        `int(self.props.get("Temp", 0))` silently turned a 152.6 F rest into a
+        152 F one. The brewer typed 152.6 and is entitled to get it, and the
+        error is systematic: it applied to every step on every brew.
+
+        This lives on the base class because the first fix only reached
+        MashInStep. MashStep - the step that runs every mash rest, and the one
+        that matters most for fermentability - kept truncating, as did
+        CooldownStep and MashInStep's own no-grain fallback. A helper that one
+        subclass owns is a helper the others will not use.
+
+        Never raises. A malformed value warns and falls back, because a step
+        that throws here takes the whole profile down mid-brew.
+        """
+        try:
+            value = self.props.get(name, None)
+            if value in (None, ""):
+                return float(default)
+            return float(value)
+        except (TypeError, ValueError):
+            logging.warning(
+                "%s: could not read %s=%r, using %s", self.name, name,
+                self.props.get(name, None), default
+            )
+            return float(default)
+
+    def _int_prop(self, name, default):
+        """A whole-number property, tolerant of a value written as a decimal.
+
+        Timers are read with int(), which raises ValueError on "2.5" rather
+        than rounding it - and a recipe import or a hand-edited profile can
+        easily produce that. An exception here happens at step start, which is
+        the worst moment: the profile stops with a kettle possibly already
+        heating.
+        """
+        try:
+            value = self.props.get(name, None)
+            if value in (None, ""):
+                return int(default)
+            return int(float(value))
+        except (TypeError, ValueError):
+            logging.warning(
+                "%s: could not read %s=%r, using %s", self.name, name,
+                self.props.get(name, None), default
+            )
+            return int(default)
+
     # Props key holding how many seconds of this step have already run. Written
     # periodically so a restart can pick up where the step left off rather than
     # beginning a sixty minute rest again from zero. Underscored because it is
