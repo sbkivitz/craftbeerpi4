@@ -65,6 +65,35 @@ class LogController:
             except Exception as e:
                 logging.error("sensor logging listener exception: {}".format(e))
 
+    async def _flush_datalogger(self, name):
+        """Push any buffered readings to disk before something reads the files.
+
+        Sensor logging batches writes - see BatchingRotatingFileHandler - so up
+        to SENSOR_LOG_FLUSH_SECONDS of readings normally sit in memory. That is
+        the point, and it is invisible to anything that goes through the live
+        push updates.
+
+        It is very visible to anything that reads the log files directly, which
+        is what this controller does. Without this flush the chart a brewer
+        pulls up is missing its most recent minute - the minute they are most
+        likely to be looking for, because it is the one happening now. It also
+        broke tests/test_logger.py, which writes five readings and reads them
+        back immediately.
+
+        The flush runs in an executor for the same reason the writes do: on a
+        network share it can block, and this is called from the request path.
+        """
+        data_logger = self.datalogger.get(name)
+        if data_logger is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            for handler in list(data_logger.handlers):
+                await loop.run_in_executor(None, handler.flush)
+        except (RuntimeError, OSError) as e:  # noqa: BLE001
+            # Never fail a chart request over this; stale is better than broken.
+            logging.warning("Could not flush sensor log for %s: %s", name, e)
+
     async def get_data(self, names, sample_rate="60s"):
         logging.info("Start Log for {}".format(names))
         """
@@ -83,6 +112,8 @@ class LogController:
         result = None
 
         for name in names:
+            # Buffered readings are not on disk yet, and this reads the files.
+            await self._flush_datalogger(name)
             # get all log names
             all_filenames = glob.glob(
                 os.path.join(self.logsFolderPath, f"sensor_{name}.log*")
