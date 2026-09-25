@@ -351,7 +351,10 @@ class MashInStep(CBPiStep):
                 self.kettle.instance is None or self.kettle.instance.state == False
             ) and (auto_state is True):
                 await self.cbpi.kettle.toggle(self.kettle.id)
-            elif (self.kettle.instance.state == True) and (auto_state is False):
+            elif (
+                self.kettle.instance is not None
+                and self.kettle.instance.state == True
+            ) and (auto_state is False):
                 await self.cbpi.kettle.stop(self.kettle.id)
             await self.push_update()
 
@@ -492,7 +495,10 @@ class MashStep(CBPiStep):
                 self.kettle.instance is None or self.kettle.instance.state == False
             ) and (auto_state is True):
                 await self.cbpi.kettle.toggle(self.kettle.id)
-            elif (self.kettle.instance.state == True) and (auto_state is False):
+            elif (
+                self.kettle.instance is not None
+                and self.kettle.instance.state == True
+            ) and (auto_state is False):
                 await self.cbpi.kettle.stop(self.kettle.id)
             await self.push_update()
 
@@ -1100,7 +1106,10 @@ class BoilStep(CBPiStep):
                 self.kettle.instance is None or self.kettle.instance.state == False
             ) and (auto_state is True):
                 await self.cbpi.kettle.toggle(self.kettle.id)
-            elif (self.kettle.instance.state == True) and (auto_state is False):
+            elif (
+                self.kettle.instance is not None
+                and self.kettle.instance.state == True
+            ) and (auto_state is False):
                 await self.cbpi.kettle.stop(self.kettle.id)
             await self.push_update()
 
@@ -1257,4 +1266,5 @@ def setup(cbpi):
     cbpi.plugin.register("ToggleStep", ToggleStep)
     cbpi.plugin.register("ActorStep", ActorStep)
     cbpi.plugin.register("NotificationStep", NotificationStep)
+
 

@@ -200,7 +200,10 @@ class FermenterTargetTempStep(CBPiFermentationStep):
                 or self.fermenter.instance.state == False
             ) and (auto_state is True):
                 await self.cbpi.fermenter.toggle(self.fermenter.id)
-            elif (self.fermenter.instance.state == True) and (auto_state is False):
+            elif (
+                self.fermenter.instance is not None
+                and self.fermenter.instance.state == True
+            ) and (auto_state is False):
                 await self.cbpi.fermenter.toggle(self.fermenter.id)
             await self.push_update()
 
@@ -423,7 +426,10 @@ class FermenterStep(CBPiFermentationStep):
                 or self.fermenter.instance.state == False
             ) and (auto_state is True):
                 await self.cbpi.fermenter.toggle(self.fermenter.id)
-            elif (self.fermenter.instance.state == True) and (auto_state is False):
+            elif (
+                self.fermenter.instance is not None
+                and self.fermenter.instance.state == True
+            ) and (auto_state is False):
                 await self.cbpi.fermenter.toggle(self.fermenter.id)
             await self.push_update()
 
@@ -593,7 +599,10 @@ class FermenterRampTempStep(CBPiFermentationStep):
                 or self.fermenter.instance.state == False
             ) and (auto_state is True):
                 await self.cbpi.fermenter.toggle(self.fermenter.id)
-            elif (self.fermenter.instance.state == True) and (auto_state is False):
+            elif (
+                self.fermenter.instance is not None
+                and self.fermenter.instance.state == True
+            ) and (auto_state is False):
                 await self.fermenter.instance.stop()
             await self.push_update()
 
@@ -616,3 +625,4 @@ def setup(cbpi):
     cbpi.plugin.register("FermenterTargetTempStep", FermenterTargetTempStep)
     cbpi.plugin.register("FermenterRampTempStep", FermenterRampTempStep)
     cbpi.plugin.register("FermenterStep", FermenterStep)
+
