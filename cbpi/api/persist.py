@@ -39,10 +39,23 @@ def atomic_write_text(path, text, encoding="utf-8"):
     Writes a sibling temporary file, forces it to disk, then renames it over
     the target. The temporary file is created in the same directory because a
     rename is only atomic within one filesystem.
+
+    A write whose content matches what is already there is skipped. This runs
+    on a Raspberry Pi booting from an SD card, where the cost of a write is not
+    the bytes but the erase block: a few unchanged bytes rewritten repeatedly
+    wear the card exactly as fast as useful ones. Several callers here save
+    unconditionally after operations that often change nothing.
     """
     path = str(path)
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
+
+    try:
+        with open(path, "r", encoding=encoding) as existing:
+            if existing.read() == text:
+                return
+    except (OSError, ValueError):
+        pass
 
     fd, tmp = tempfile.mkstemp(
         prefix=os.path.basename(path) + ".", suffix=".tmp", dir=directory
