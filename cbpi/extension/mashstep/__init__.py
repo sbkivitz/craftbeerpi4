@@ -210,22 +210,10 @@ class MashInStep(CBPiStep):
     def _float_prop(self, name, default):
         """A numeric property, without truncating the fraction away.
 
-        `int(self.props.get("Temp", 0))` silently turned a 152.6 F rest into a
-        152 F one. Two-tenths matters less than half a degree does, but the
-        brewer typed 152.6 and is entitled to get it - and the error is
-        systematic, applying to every step on every brew.
+        Kept as a thin alias so MashInStep reads the same as it did; the real
+        implementation is on CBPiStep, where every step can reach it.
         """
-        try:
-            value = self.props.get(name, None)
-            if value in (None, ""):
-                return float(default)
-            return float(value)
-        except (TypeError, ValueError):
-            logging.warning(
-                "%s: could not read %s=%r, using %s", self.name, name,
-                self.props.get(name, None), default
-            )
-            return float(default)
+        return super()._float_prop(name, default)
 
     def _set_grain_present(self, present):
         """Tell the kettle logic whether the tun holds grain.
@@ -343,7 +331,7 @@ class MashInStep(CBPiStep):
             # there is no grain bill to compensate for.
             target = getattr(self, "strike_temp", None)
             if target is None:
-                target = int(self.props.get("Temp", 0))
+                target = self._float_prop("Temp", 0)
             if self.timer.is_running is not True:
                 self.note_heat_progress(sensor_value, target)
             if sensor_value >= target and self.timer.is_running is not True:
@@ -430,21 +418,21 @@ class MashStep(CBPiStep):
 
     async def on_timer_update(self, timer, seconds):
         self.summary = Timer.format_time(seconds)
-        await self.note_progress(seconds, int(self.props.get("Timer", 0)) * 60)
+        await self.note_progress(seconds, self._int_prop("Timer", 0) * 60)
         await self.push_update()
 
     async def on_start(self):
         self.AutoMode = True if self.props.get("AutoMode", "No") == "Yes" else False
         self.kettle = self.get_kettle(self.props.Kettle)
         if self.kettle is not None:
-            self.kettle.target_temp = int(self.props.get("Temp", 0))
+            self.kettle.target_temp = self._float_prop("Temp", 0)
         if self.AutoMode == True:
             await self.setAutoMode(True)
         await self.push_update()
 
         if self.cbpi.kettle is not None and self.timer is None:
             self.timer = Timer(
-                self.remaining_for(int(self.props.get("Timer", 0)) * 60),
+                self.remaining_for(self._int_prop("Timer", 0) * 60),
                 on_update=self.on_timer_update,
                 on_done=self.on_timer_done,
             )
@@ -467,7 +455,7 @@ class MashStep(CBPiStep):
 
     async def reset(self):
         self.timer = Timer(
-            int(self.props.get("Timer", 0)) * 60,
+            self._int_prop("Timer", 0) * 60,
             on_update=self.on_timer_update,
             on_done=self.on_timer_done,
         )
@@ -481,13 +469,13 @@ class MashStep(CBPiStep):
             if self.timer.is_running is not True:
                 self.note_heat_progress(sensor_value, self.props.get("Temp", 0))
             if (
-                sensor_value >= int(self.props.get("Temp", 0))
+                sensor_value >= self._float_prop("Temp", 0)
                 and self.timer.is_running is not True
             ):
                 self.timer.start()
                 self.timer.is_running = True
                 estimated_completion_time = datetime.fromtimestamp(
-                    time.time() + (int(self.props.get("Timer", 0))) * 60
+                    time.time() + (self._int_prop("Timer", 0)) * 60
                 )
                 self.cbpi.notify(
                     self.name,
@@ -530,7 +518,7 @@ class WaitStep(CBPiStep):
     async def on_start(self):
         if self.timer is None:
             self.timer = Timer(
-                int(self.props.Timer) * 60,
+                self._int_prop("Timer", 0) * 60,
                 on_update=self.on_timer_update,
                 on_done=self.on_timer_done,
             )
@@ -543,7 +531,7 @@ class WaitStep(CBPiStep):
 
     async def reset(self):
         self.timer = Timer(
-            int(self.props.Timer) * 60,
+            self._int_prop("Timer", 0) * 60,
             on_update=self.on_timer_update,
             on_done=self.on_timer_done,
         )
@@ -624,7 +612,7 @@ class ActorStep(CBPiStep):
     async def on_start(self):
         if self.timer is None:
             self.timer = Timer(
-                int(self.props.Timer) * 60,
+                self._int_prop("Timer", 0) * 60,
                 on_update=self.on_timer_update,
                 on_done=self.on_timer_done,
             )
@@ -639,7 +627,7 @@ class ActorStep(CBPiStep):
 
     async def reset(self):
         self.timer = Timer(
-            int(self.props.Timer) * 60,
+            self._int_prop("Timer", 0) * 60,
             on_update=self.on_timer_update,
             on_done=self.on_timer_done,
         )
@@ -770,7 +758,7 @@ class BoilStep(CBPiStep):
     async def on_timer_update(self, timer, seconds):
         self.summary = Timer.format_time(seconds)
         self.remaining_seconds = seconds
-        await self.note_progress(seconds, int(self.props.get("Timer", 0)) * 60)
+        await self.note_progress(seconds, self._int_prop("Timer", 0) * 60)
         await self.push_update()
 
     @action("Wort transferred - start heating", [])
@@ -863,7 +851,7 @@ class BoilStep(CBPiStep):
 
         if self.cbpi.kettle is not None and self.timer is None:
             self.timer = Timer(
-                self.remaining_for(int(self.props.get("Timer", 0)) * 60),
+                self.remaining_for(self._int_prop("Timer", 0) * 60),
                 on_update=self.on_timer_update,
                 on_done=self.on_timer_done,
             )
@@ -967,7 +955,7 @@ class BoilStep(CBPiStep):
     async def reset(self):
         self.transfer_confirmed = False
         self.timer = Timer(
-            int(self.props.get("Timer", 0)) * 60,
+            self._int_prop("Timer", 0) * 60,
             on_update=self.on_timer_update,
             on_done=self.on_timer_done,
         )
@@ -1039,7 +1027,7 @@ class BoilStep(CBPiStep):
                     self.timer.start()
                     self.timer.is_running = True
                     estimated_completion_time = datetime.fromtimestamp(
-                        time.time() + (int(self.props.get("Timer", 0))) * 60
+                        time.time() + (self._int_prop("Timer", 0)) * 60
                     )
                     self.cbpi.notify(
                         self.name,
@@ -1077,7 +1065,7 @@ class BoilStep(CBPiStep):
                 self.timer.start()
                 self.timer.is_running = True
                 estimated_completion_time = datetime.fromtimestamp(
-                    time.time() + (int(self.props.get("Timer", 0))) * 60
+                    time.time() + (self._int_prop("Timer", 0)) * 60
                 )
                 self.cbpi.notify(
                     self.name,
@@ -1164,7 +1152,7 @@ class CooldownStep(CBPiStep):
         self.time_array = []
         self.kettle = self.get_kettle(self.props.get("Kettle", None))
         self.actor = self.props.get("Actor", None)
-        self.target_temp = int(self.props.get("Temp", 0))
+        self.target_temp = self._float_prop("Temp", 0)
         self.Interval = (
             10  # Interval in minutes on how often cooldwon end time is calculated
         )
@@ -1269,3 +1257,4 @@ def setup(cbpi):
     cbpi.plugin.register("ToggleStep", ToggleStep)
     cbpi.plugin.register("ActorStep", ActorStep)
     cbpi.plugin.register("NotificationStep", NotificationStep)
+
