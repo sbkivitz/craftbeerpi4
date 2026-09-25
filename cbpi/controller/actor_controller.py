@@ -323,6 +323,15 @@ class ActorController(BasicController):
             #
             # Switching off something already off costs one redundant command
             # and is always safe. Not switching off something that is on is not.
+            if item.instance is None:
+                # Configured but never started - there is no driver to command.
+                # Report it rather than raising: this runs in shutdown sweeps
+                # and emergency stops, where an exception stops the sweep and
+                # leaves every actor after this one untouched.
+                logging.error(
+                    "Actor %s has no running instance; cannot command it off", id
+                )
+                return False
             await item.instance.off()
 
             self.cbpi.ws.send(
