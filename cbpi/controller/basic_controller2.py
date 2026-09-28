@@ -204,7 +204,50 @@ class BasicController:
             item = self.find_by_id(id)
             if item is None:
                 logging.error("%s no such item %s", self.name, id)
-                return
+                return False
+            if item.instance is None:
+                # Not a rejected action - there is nothing to dispatch to.
+                #
+                # Kettles have autostart False, so no logic instance exists
+                # until the brewer starts one. An action sent before that used
+                # to fall through to the allowlist check below and be reported
+                # as "undeclared action ... only methods decorated with
+                # @action", which blames the plugin author for a decorator that
+                # is present and correct.
+                #
+                # Observed on the rig: the brewer set a boil power from the
+                # dashboard before starting the logic, got HTTP 204 and no
+                # message, and the value did nothing. The log then sent whoever
+                # read it looking for a missing decorator.
+                logging.error(
+                    "%s cannot run action %r on %s: its logic is not running. "
+                    "Start the kettle first.",
+                    self.name,
+                    action,
+                    id,
+                )
+                # Tell the brewer, not just the log.
+                #
+                # The endpoint answers 204 either way, so a dashboard that
+                # sends an action to a stopped logic shows nothing at all: the
+                # dialog closes, the value appears to have been accepted, and
+                # nothing happens. Silence is the worst possible answer here,
+                # because the brewer goes on believing the element is about to
+                # do what was asked.
+                try:
+                    from cbpi.api.dataclasses import NotificationType
+
+                    self.cbpi.notify(
+                        getattr(item, "name", self.name),
+                        "Start the logic before setting this - {} is not "
+                        "running, so the change was not applied.".format(
+                            getattr(item, "name", "it")
+                        ),
+                        NotificationType.WARNING,
+                    )
+                except Exception:  # noqa: BLE001 - reporting, never fatal
+                    pass
+                return False
             method = resolve_action(item.instance, action)
             if method is None:
                 logging.error(
@@ -214,9 +257,11 @@ class BasicController:
                     action,
                     id,
                 )
-                return
+                return False
             await method(**normalize_action_parameters(parameter))
+            return True
         except Exception as e:
             logging.error(
                 "{} Failed to call action on {} {} {}".format(self.name, id, action, e)
             )
+            return False
