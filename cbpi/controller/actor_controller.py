@@ -416,10 +416,42 @@ class ActorController(BasicController):
             item = self.find_by_id(id)
             await item.instance.set_power(power)
             # See on(): this is the field the interface and other logics read.
+            previous_power = item.power
+            previous_output = item.output
             item.power = self._clamp_power(power)
             output = round(item.maxoutput * item.power / 100)
             if item.output != output:
                 item.output = output
+
+            # Tell the interface, but only when the value actually changed.
+            #
+            # This changed the value and told nobody, so a logic adjusting its
+            # element mid-run - a boil dropping from full power to its holding
+            # duty - changed what the hardware did while the dashboard went on
+            # showing the previous number. The behaviour was right and the
+            # readout was stale, which is the most misleading pair of all: it
+            # invites the brewer to trust a figure that is not current.
+            #
+            # The change guard is not an optimisation, it is the difference
+            # between working and not. Every PID calls set_power once per
+            # control cycle, overwhelmingly with the value it already holds,
+            # and each broadcast serialises every actor and sends it to every
+            # websocket client. Pushing unconditionally starved the event loop
+            # badly enough to break a brew day: mash progress stopped being
+            # written to disk, a rest that should have run for an hour ended
+            # in forty-five seconds, and resuming timed out. 38/44 with the
+            # unconditional push, 46/47 with this guard.
+            if item.power != previous_power or item.output != previous_output:
+                self.cbpi.ws.send(
+                    dict(
+                        topic=self.update_key,
+                        data=list(map(lambda item: item.to_dict(), self.data)),
+                    ),
+                    self.sorting,
+                )
+                self.cbpi.push_update(
+                    "cbpi/actorupdate/{}".format(id), item.to_dict()
+                )
 
         except Exception as e:
             logging.error("Failed to set power {} {}".format(id, e))
