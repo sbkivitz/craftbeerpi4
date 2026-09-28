@@ -347,19 +347,28 @@ class ActorController(BasicController):
             # A caller that gets True from an emergency stop is entitled to
             # believe the element is de-energized.
             #
-            # Power is cleared for the same reason. An actor kept its last
-            # commanded percentage after being switched off, so a de-energized
-            # element reported "power=100, state=False" - and every consumer
-            # showing power without also checking state displayed a number that
-            # was not true: the dashboard readout, the LED, the charts. Off
-            # means no power is being delivered, so say so once, here, rather
-            # than asking each caller to remember.
-            try:
-                item.power = 0
-                if item.instance is not None:
-                    item.instance.power = 0
-            except Exception:  # noqa: BLE001 - reporting, never fatal
-                pass
+            # `power` is deliberately NOT cleared here, and this reverses an
+            # earlier change that did clear it.
+            #
+            # The problem that change addressed is real: a de-energized element
+            # reported "power=100, state=False", and every consumer showing
+            # power without also checking state displayed a number that was not
+            # true. But `power` is not a report of what is flowing - it is the
+            # configured duty to use when the actor is next switched on.
+            # on(id) with no power argument reads it back.
+            #
+            # Zeroing it therefore destroyed the setting: a heater configured at
+            # 70%, switched off and switched on again, came back at 0% and
+            # silently delivered nothing. Verified on the rig - set 70, off,
+            # on, and the element sat at 0% while the interface claimed it was
+            # running. It persisted to actor.json too, so the configured duty
+            # was lost for good.
+            #
+            # A stale readout is a cosmetic fault. An element that does nothing
+            # when asked is the brewer standing over a kettle that will not
+            # heat, wondering which part of the rig has failed. Presentation is
+            # fixed where it is presented - a consumer showing delivered power
+            # must check state, which is why to_dict reports both.
 
             still_on = False
             try:
