@@ -95,11 +95,54 @@ class GPIOActor(CBPiActor):
         if state == 0:
             return 0 if self.inverted == False else 1
 
+    # Bounds on the time-proportioning period, in seconds.
+    #
+    # An SSR switches at zero-crossing with no moving parts, so it can run a
+    # far shorter period than the 5s default and deliver something much closer
+    # to continuous power - at 5s and 20% duty the element is on for one second
+    # and off for four, which a kettle sees as a pulse rather than a simmer.
+    #
+    # The lower bound is not arbitrary. run() sleeps heating_time and then
+    # wait_time; at a period of 0 both are zero, so neither branch sleeps and
+    # the loop spins, starving the event loop that carries every PID and the
+    # shutdown sweep that de-energizes the elements. A contactor should be
+    # nowhere near this bound - it has contacts to burn - which is why the
+    # period is configurable rather than simply lowered.
+    MIN_SAMPLE_TIME = 0.1
+    MAX_SAMPLE_TIME = 60.0
+
+    def _sample_time(self):
+        """The switching period, as a float and never zero.
+
+        Read with int(), so anything below 1s truncated to 0 and a sub-second
+        period - the whole point of using an SSR - was unreachable. A malformed
+        value falls back rather than raising: this runs in on_start, and an
+        exception there leaves an actor that cannot be commanded at all.
+        """
+        try:
+            value = float(self.props.get("SamplingTime", 5))
+        except (TypeError, ValueError):
+            logger.warning(
+                "ACTOR %s: SamplingTime=%r is not a number, using 5s",
+                self.id, self.props.get("SamplingTime"),
+            )
+            return 5.0
+        if value != value:  # NaN
+            return 5.0
+        if value < self.MIN_SAMPLE_TIME:
+            logger.warning(
+                "ACTOR %s: SamplingTime %.3fs is below the %.1fs minimum and "
+                "would spin the control loop; using the minimum",
+                self.id, value, self.MIN_SAMPLE_TIME,
+            )
+            return self.MIN_SAMPLE_TIME
+        return min(self.MAX_SAMPLE_TIME, value)
+
     async def on_start(self):
         self.power = None
         self.gpio = self.props.GPIO
         self.inverted = True if self.props.get("Inverted", "No") == "Yes" else False
-        self.sampleTime = int(self.props.get("SamplingTime", 5))
+        self.sampleTime = self._sample_time()
         GPIO.setup(self.gpio, GPIO.OUT)
         GPIO.output(self.gpio, self.get_GPIO_state(0))
         self.state = False
