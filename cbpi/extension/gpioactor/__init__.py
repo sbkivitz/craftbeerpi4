@@ -147,15 +147,44 @@ class GPIOActor(CBPiActor):
         GPIO.output(self.gpio, self.get_GPIO_state(0))
         self.state = False
 
+    @classmethod
+    def _duty(cls, value):
+        """A duty percentage the pulse loop can actually use. Never raises.
+
+        `power` was stored exactly as handed over, and the loop then computed
+        its on and off phases from it. A NaN made both `heating_time > 0` and
+        `wait_time > 0` false, so neither branch slept and `run()` spun without
+        awaiting anything - which starves the event loop. Nothing else could
+        run: not the OFF this actor had been sent, not cancellation, not
+        shutdown. The pin stayed at whatever level it was last driven to, with
+        several kilowatts behind it.
+
+        An unusable value fails to 0 rather than 100, for the same reason
+        ActorController._clamp_power does: when the number is meaningless, the
+        only defensible output is no heat.
+        """
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0
+        if numeric != numeric or numeric in (float("inf"), float("-inf")):
+            return 0
+        return max(0, min(100, numeric))
+
     async def on(self, power=None):
-        if power is not None:
-            self.power = power
-        else:
-            self.power = 100
-        #        await self.set_power(self.power)
+        self.power = self._duty(power if power is not None else 100)
 
         logger.info("ACTOR %s ON - GPIO %s " % (self.id, self.gpio))
-        GPIO.output(self.gpio, self.get_GPIO_state(1))
+        # Only energize if there is duty to deliver.
+        #
+        # This drove the pin high unconditionally, so on(0) asserted the output
+        # and left it there until the pulse loop next came round - up to a
+        # second, because an idle loop sleeps for one. A zero-duty start is a
+        # legitimate command and it must not deliver an unsolicited pulse.
+        if self.power > 0:
+            GPIO.output(self.gpio, self.get_GPIO_state(1))
+        else:
+            GPIO.output(self.gpio, self.get_GPIO_state(0))
         self.state = True
 
     async def off(self):
@@ -189,23 +218,35 @@ class GPIOActor(CBPiActor):
     async def run(self):
         while self.running == True:
             if self.state == True:
-                heating_time = self.sampleTime * (self.power / 100)
-                wait_time = self.sampleTime - heating_time
+                # Validated every pass, not just when it is set. The value can
+                # be written from anywhere between two iterations.
+                duty = self._duty(self.power)
+                sample = self.sampleTime
+                if not isinstance(sample, (int, float)) or sample != sample or sample <= 0:
+                    sample = self.MIN_SAMPLE_TIME
+                heating_time = sample * (duty / 100)
+                wait_time = sample - heating_time
                 if heating_time > 0:
-                    # logging.info("Heating Time: {}".format(heating_time))
                     GPIO.output(self.gpio, self.get_GPIO_state(1))
                     await asyncio.sleep(heating_time)
                 if wait_time > 0:
-                    # logging.info("Wait Time: {}".format(wait_time))
                     GPIO.output(self.gpio, self.get_GPIO_state(0))
                     await asyncio.sleep(wait_time)
+                if heating_time <= 0 and wait_time <= 0:
+                    # Unreachable with a validated duty and a positive sample
+                    # time, and kept anyway: an iteration of this loop that
+                    # awaits nothing starves the event loop, and the first
+                    # casualty is the OFF that would have stopped the element.
+                    # The cost of being wrong here is not a slow loop, it is a
+                    # heater that cannot be switched off.
+                    GPIO.output(self.gpio, self.get_GPIO_state(0))
+                    await asyncio.sleep(self.MIN_SAMPLE_TIME)
             else:
                 await asyncio.sleep(1)
 
     async def set_power(self, power):
-        self.power = power
-        await self.cbpi.actor.actor_update(self.id, power)
-        pass
+        self.power = self._duty(power)
+        await self.cbpi.actor.actor_update(self.id, self.power)
 
 
 @parameters(
