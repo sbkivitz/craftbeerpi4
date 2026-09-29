@@ -423,11 +423,31 @@ class ActorController(BasicController):
     async def set_power(self, id, power):
         try:
             item = self.find_by_id(id)
-            await item.instance.set_power(power)
-            # See on(): this is the field the interface and other logics read.
+            # Clamp before the driver sees it, not after.
+            #
+            # The raw value went to the hardware and only the reported field
+            # was clamped, so a driver could be left holding a NaN while the
+            # dashboard showed a sane number. In GPIOActor that stopped the
+            # pulse loop awaiting anything at all, which starved the event loop
+            # and made the element unswitchable.
+            #
+            # The driver validates its own input too. This is the boundary
+            # every logic, step and plugin goes through, so it is the cheapest
+            # place to be sure, and defending in both is worth the duplication
+            # when the failure is a heater that cannot be turned off.
+            safe_power = self._clamp_power(power)
+            # Snapshot before awaiting the driver.
+            #
+            # These were read after the await, and GPIOActor.set_power calls
+            # actor_update() from inside it - which writes item.power. The
+            # "previous" values could therefore already be the new ones, and
+            # the change guard below would compare a value against itself and
+            # conclude nothing had changed.
             previous_power = item.power
             previous_output = item.output
-            item.power = self._clamp_power(power)
+            await item.instance.set_power(safe_power)
+            # See on(): this is the field the interface and other logics read.
+            item.power = safe_power
             output = round(item.maxoutput * item.power / 100)
             if item.output != output:
                 item.output = output
