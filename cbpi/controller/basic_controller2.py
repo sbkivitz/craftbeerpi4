@@ -121,8 +121,47 @@ class BasicController:
         logging.info("{} Stop Id {} ".format(self.name, id))
         try:
             item = self.find_by_id(id)
-            await item.instance.stop()
-            item.instance.running = False
+            if item is None or item.instance is None:
+                return
+            instance = item.instance
+
+            # Order matters: ask the loop to finish, then give the driver its
+            # own hook, then cancel and join whatever is left.
+            instance.running = False
+            # The driver hook is advisory and must not be able to skip the
+            # cancellation below. It is `pass` on every shipped driver, but a
+            # plugin's can raise - and if that propagated, the pulse loop would
+            # be left running by the very call meant to stop it.
+            try:
+                await instance.stop()
+            except Exception as e:  # noqa: BLE001
+                logging.error(
+                    "%s driver stop hook failed for %s: %s", self.name, id, e
+                )
+
+            # Cancelling is what actually stops it.
+            #
+            # This set running=False and returned. For a GPIO actor that flag
+            # is only read at the top of its pulse loop, and the loop spends
+            # its time inside `await asyncio.sleep(heating_time)` with the pin
+            # HIGH - so at full duty the element stayed energized for the rest
+            # of the period, up to the whole sample time, after stop() had
+            # returned and the interface said it was off.
+            #
+            # delete() and update() both call this and then replace or discard
+            # the instance, so the abandoned task also outlived the registry
+            # entry: an old driver still holding a pin while a new one is
+            # created for it.
+            #
+            # CBPiActor._run() switches the output off in a finally, so
+            # cancelling is what guarantees the pin goes low - and awaiting it
+            # is what makes that true before this returns rather than
+            # eventually.
+            task = getattr(instance, "task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
             await self.push_udpate()
         except Exception as e:
             logging.error("{} Cant stop {} - {}".format(self.name, id, e))
