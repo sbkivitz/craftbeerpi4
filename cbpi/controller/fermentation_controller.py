@@ -56,28 +56,60 @@ class FermentationController:
             parents=True, exist_ok=True
         )
 
+    async def _deenergize(self, fermenter):
+        """Switch a fermenter's heater, cooler and valve off.
+
+        shutdown() stopped the step tasks and stopped there, so a fermenter
+        that was heating or cooling when it was shut down stayed that way.
+        Cancelling the task that was commanding an actor does not command the
+        actor off - nothing else was going to.
+
+        This is the same defect that ActorController.shutdown fixes for
+        kettles, in a different controller, and it matters most on the
+        single-fermenter path: ActorController.shutdown sweeps every actor, but
+        it only runs when the whole application exits. Shutting down one
+        fermenter runs none of it, so its element stayed live with no step
+        behind it.
+
+        Each actor is switched off independently. One failing must not stop the
+        others, because the remaining ones are exactly the elements still
+        energized.
+        """
+        for role in ("heater", "cooler", "valve"):
+            actor_id = getattr(fermenter, role, None)
+            if not actor_id:
+                continue
+            try:
+                await self.cbpi.actor.off(actor_id)
+            except Exception as e:  # noqa: BLE001
+                self.logger.error(
+                    "Failed to switch off %s %s for fermenter %s: %s",
+                    role, actor_id, getattr(fermenter, "name", "?"), e,
+                )
+
+    async def _stop_steps(self, fermenter):
+        for step in fermenter.steps:
+            try:
+                self.logger.info("Stop {}".format(step.name))
+                step.instance.shutdown = True
+                await step.instance.stop()
+            except Exception as e:
+                self.logger.error(e)
+
     async def shutdown(self, app=None, fermenterid=None):
         self.save()
         if fermenterid == None:
             for fermenter in self.data:
                 self.logger.info("Shutdown {}".format(fermenter.name))
-                for step in fermenter.steps:
-                    try:
-                        self.logger.info("Stop {}".format(step.name))
-                        step.instance.shutdown = True
-                        await step.instance.stop()
-                    except Exception as e:
-                        self.logger.error(e)
+                await self._stop_steps(fermenter)
+                # After the steps, so a step cannot re-command an actor this
+                # has just switched off.
+                await self._deenergize(fermenter)
         else:
             fermenter = self._find_by_id(fermenterid)
             self.logger.info("Shutdown {}".format(fermenter.name))
-            for step in fermenter.steps:
-                try:
-                    self.logger.info("Stop {}".format(step.name))
-                    step.instance.shutdown = True
-                    await step.instance.stop()
-                except Exception as e:
-                    self.logger.error(e)
+            await self._stop_steps(fermenter)
+            await self._deenergize(fermenter)
 
     async def load(self):
         try:
