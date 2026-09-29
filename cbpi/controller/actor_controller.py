@@ -471,16 +471,7 @@ class ActorController(BasicController):
             # in forty-five seconds, and resuming timed out. 38/44 with the
             # unconditional push, 46/47 with this guard.
             if item.power != previous_power or item.output != previous_output:
-                self.cbpi.ws.send(
-                    dict(
-                        topic=self.update_key,
-                        data=list(map(lambda item: item.to_dict(), self.data)),
-                    ),
-                    self.sorting,
-                )
-                self.cbpi.push_update(
-                    "cbpi/actorupdate/{}".format(id), item.to_dict()
-                )
+                self._publish_actor_state(id, item)
 
         except Exception as e:
             logging.error("Failed to set power {} {}".format(id, e))
@@ -498,9 +489,36 @@ class ActorController(BasicController):
         except Exception as e:
             logging.error("Failed to set output {} {}".format(id, e))
 
+    def _publish_actor_state(self, id, item):
+        """Broadcast the actor list. One owner, so the guard is not bypassable.
+
+        Both the controller's own commands and the drivers' callbacks publish,
+        and the driver path had no change guard at all: GPIOActor.set_power
+        calls actor_update() on every pulse-loop decision, so guarding only
+        set_power left the per-cycle broadcast load exactly where it was - on
+        the hardware path, which is the one that matters.
+
+        Each broadcast serialises every actor and sends it to every websocket
+        client. Doing that once per control cycle starved the event loop badly
+        enough to break a brew day: mash progress stopped being written to
+        disk, an hour-long rest ended in forty-five seconds, and resuming timed
+        out.
+        """
+        self.cbpi.ws.send(
+            dict(
+                topic=self.update_key,
+                data=list(map(lambda item: item.to_dict(), self.data)),
+            ),
+            self.sorting,
+        )
+        self.cbpi.push_update("cbpi/actorupdate/{}".format(id), item.to_dict())
+
     async def actor_update(self, id, power, output=None, maxoutput=None):
         try:
             item = self.find_by_id(id)
+            previous_power = item.power
+            previous_output = item.output
+            previous_maxoutput = item.maxoutput
             if maxoutput is not None:
                 item.maxoutput = maxoutput
             # Same clamp as every other path. This one reports the actor's level
@@ -511,15 +529,12 @@ class ActorController(BasicController):
             if output is not None:
                 item.output = round(output)
 
-            # await self.push_udpate()
-            self.cbpi.ws.send(
-                dict(
-                    topic=self.update_key,
-                    data=list(map(lambda item: item.to_dict(), self.data)),
-                ),
-                self.sorting,
-            )
-            self.cbpi.push_update("cbpi/actorupdate/{}".format(id), item.to_dict())
+            # Only when something actually changed - see _publish_actor_state.
+            # This is the callback every GPIO pulse arrives on.
+            if (item.power != previous_power
+                    or item.output != previous_output
+                    or item.maxoutput != previous_maxoutput):
+                self._publish_actor_state(id, item)
         except Exception as e:
             logging.error("Failed to update Actor {} {}".format(id, e))
 
