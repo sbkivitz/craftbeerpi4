@@ -141,12 +141,21 @@ class PluginController:
 
     def _parse_property_object(self, p):
         if isinstance(p, Property.Number):
+            # min/max/step/unit are optional and may be absent entirely on a
+            # Property.Number built by an older plugin or constructed by hand,
+            # so they are read with getattr rather than attribute access. An
+            # AttributeError here would take out the whole type listing and
+            # every plugin would vanish from the interface.
             return {
                 "label": p.label,
                 "type": "number",
                 "configurable": p.configurable,
                 "description": p.description,
                 "default_value": p.default_value,
+                "unit": getattr(p, "unit", ""),
+                "min": getattr(p, "min", None),
+                "max": getattr(p, "max", None),
+                "step": getattr(p, "step", None),
             }
         elif isinstance(p, Property.Text):
             return {
