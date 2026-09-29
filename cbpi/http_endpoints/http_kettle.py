@@ -266,9 +266,29 @@ class KettleHttpEndpoints:
         # Every other endpoint sends "action"; this one read "name", so it
         # passed None and no kettle action could ever be dispatched. Accept
         # both rather than breaking whatever was sending the old key.
-        await self.controller.call_action(
-            actor_id, data.get("action", data.get("name")), data.get("parameter")
+        action = data.get("action", data.get("name"))
+        ok = await self.controller.call_action(
+            actor_id, action, data.get("parameter")
         )
+
+        # Report failure to the caller.
+        #
+        # This answered 204 whatever happened, so an action sent to a stopped
+        # logic, or under a name that is not an action, was acknowledged as
+        # applied. The dashboard closed its dialog, the brewer believed the
+        # value was in force, and nothing had run. A notification is not a
+        # substitute for the result of the request that asked for it.
+        if ok is False:
+            return web.json_response(
+                {
+                    "error": "action not run",
+                    "detail": (
+                        "'{}' did not run. Either the kettle's logic is not "
+                        "running, or that is not a declared action.".format(action)
+                    ),
+                },
+                status=400,
+            )
 
         return web.Response(status=204)
 
