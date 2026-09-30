@@ -94,11 +94,48 @@ class LogController:
             # Never fail a chart request over this; stale is better than broken.
             logging.warning("Could not flush sensor log for %s: %s", name, e)
 
-    async def get_data(self, names, sample_rate="60s"):
+    # Points to aim for in a chart. The row cap below is 500, so this keeps
+    # the resample and the cap from fighting each other.
+    TARGET_POINTS = 500
+
+    def _sample_rate_for(self, index):
+        """Choose a bucket size from how much time the data actually covers.
+
+        This was hardcoded at 60s, which quietly decides that one minute of
+        wall-clock is the finest thing worth seeing. That is reasonable for a
+        six hour brew day and wrong for everything shorter.
+
+        It is badly wrong for an accelerated simulation. Log rows are stamped
+        with real time, so at SIM_TIME_SCALE=60 an hour-long mash happens in
+        one real minute and lands in a single 60s bucket - the whole step
+        becomes one point. Worse, the bucket is reduced with .max(), so the
+        dip when grain goes in is not merely coarse, it is invisible: the peak
+        wins. A chart that cannot show a dough-in dip or a stalled ramp is not
+        worth reading, and those are the two things it is read for.
+
+        Deriving the rate from the span fixes both, and needs no plugin, no
+        configuration and no knowledge of the time scale here.
+        """
+        try:
+            if len(index) < 2:
+                return None
+            span = (index.max() - index.min()).total_seconds()
+        except Exception:  # noqa: BLE001 - charting must not fail on odd data
+            return "60s"
+        if span <= 0:
+            return None
+        # One bucket per target point, never finer than a second - the logger
+        # writes at most one row a second, so anything finer is empty buckets.
+        seconds = max(1, int(span / self.TARGET_POINTS))
+        return "{}s".format(seconds)
+
+    async def get_data(self, names, sample_rate=None):
         logging.info("Start Log for {}".format(names))
         """
         :param names: name as string or list of names as string
-        :param sample_rate: rate for resampling the data
+        :param sample_rate: rate for resampling the data. None picks one from
+                            the span of the data, which is almost always what
+                            you want - see _sample_rate_for.
         :return:
         """
         # make string to array
@@ -132,8 +169,11 @@ class LogController:
             df.set_index("DateTime", inplace=True)
 
             # resample if rate provided
-            if sample_rate is not None:
-                df = df[name].resample(sample_rate).max()
+            rate = sample_rate
+            if rate is None:
+                rate = self._sample_rate_for(df.index)
+            if rate is not None:
+                df = df[name].resample(rate).max()
             logging.info("Sampled now for {}".format(names))
             df = df.dropna()
             # take every nth row so that total number of rows does not exceed max_rows * 2
