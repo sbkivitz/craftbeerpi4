@@ -7,6 +7,7 @@ import os
 import zipfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from datetime import datetime
 from time import localtime, strftime
 
 import pandas as pd
@@ -56,7 +57,27 @@ class LogController:
                 sensor = self.cbpi.sensor.find_by_id(id)
                 if sensor is not None:
                     name = sensor.name.replace(" ", "_")
-                    formatted_time = strftime("%Y-%m-%d %H:%M:%S", localtime())
+                    # Milliseconds, not whole seconds.
+                    #
+                    # This was "%Y-%m-%d %H:%M:%S", which is fine when readings
+                    # arrive once a second and destructive when they arrive
+                    # faster. A simulated vessel at SIM_TIME_SCALE=60 logs one
+                    # sample per simulated second, so about forty rows landed
+                    # in every real second carrying an identical timestamp -
+                    # measured on the rig, 400 rows collapsing to 13 distinct
+                    # timestamps.
+                    #
+                    # Two costs. The chart cannot resolve finer than one real
+                    # second, which at 60x is a whole simulated minute per
+                    # point, and the bucket is reduced with .max() so a ramp
+                    # comes out as a staircase and a dip vanishes. And the
+                    # duplicate rows are pure waste: sixty times the disk for
+                    # no extra information.
+                    #
+                    # Readers accept both formats, so existing logs still load.
+                    formatted_time = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S.%f"
+                    )[:-3]
                     asyncio.create_task(
                         self._call_sensor_data_listeners(
                             id, value, formatted_time, name
@@ -124,10 +145,15 @@ class LogController:
             return "60s"
         if span <= 0:
             return None
-        # One bucket per target point, never finer than a second - the logger
-        # writes at most one row a second, so anything finer is empty buckets.
-        seconds = max(1, int(span / self.TARGET_POINTS))
-        return "{}s".format(seconds)
+        # One bucket per target point. Timestamps carry milliseconds, so this
+        # is allowed below a second: an accelerated simulation writes dozens of
+        # distinct readings per real second, and flooring at 1s would throw
+        # them away again - which is the whole defect this is here to avoid.
+        # Floored at 100ms, which is finer than anything worth charting.
+        seconds = span / self.TARGET_POINTS
+        if seconds >= 1:
+            return "{}s".format(int(seconds))
+        return "{}ms".format(max(100, int(seconds * 1000)))
 
     async def get_data(self, names, sample_rate=None):
         logging.info("Start Log for {}".format(names))
@@ -165,7 +191,9 @@ class LogController:
                 ]
             )
             logging.info("Read all files for {}".format(names))
-            df["DateTime"] = pd.to_datetime(df["DateTime"], format=timestamp_format)
+            # format="mixed" so logs written before timestamps gained
+            # milliseconds still parse alongside new ones.
+            df["DateTime"] = pd.to_datetime(df["DateTime"], format="mixed")
             df.set_index("DateTime", inplace=True)
 
             # resample if rate provided
@@ -224,7 +252,9 @@ class LogController:
                         for f in all_filenames
                     ]
                 )
-                df["DateTime"] = pd.to_datetime(df["DateTime"], format=timestamp_format)
+                # format="mixed" so logs written before timestamps gained
+                # milliseconds still parse alongside new ones.
+                df["DateTime"] = pd.to_datetime(df["DateTime"], format="mixed")
                 df.set_index("DateTime", inplace=True)
                 df = df.resample("60s").max()
                 df = df.dropna()
