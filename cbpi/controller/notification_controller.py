@@ -11,6 +11,21 @@ from cbpi.api.dataclasses import NotificationType
 
 class NotificationController:
 
+    # Callbacks are only ever removed when the brewer clicks the action
+    # (notify_callback), so anything never clicked stayed forever. Every
+    # notification was cached, including the ones with no actions at all -
+    # and a toast with action=[] auto-dismisses, so it can never be clicked
+    # and its entry could never be removed by any code path.
+    #
+    # self.notifications is already capped at 100 for exactly this reason;
+    # this dict was not capped at all. On a long brew with NOTIFY_ON_ERROR
+    # enabled a fault logs a warning every control pass, and each one leaked
+    # an entry for the lifetime of the process.
+    #
+    # A class attribute so it can be read and overridden without constructing
+    # a controller.
+    MAX_CALLBACK_CACHE = 100
+
     def __init__(self, cbpi):
         """
         :param cbpi: craftbeerpi object
@@ -106,7 +121,17 @@ class NotificationController:
             return item.to_dict()
 
         actions = list(map(lambda item: prepare_action(item), action))
-        self.callback_cache[notifcation_id] = action
+        # Only cache what can actually be called back. A notification with no
+        # actions has nothing to dispatch to, and nothing that would ever
+        # remove its entry.
+        if action:
+            self.callback_cache[notifcation_id] = action
+            # Bound it. Unclicked alerts are normal - the brewer sees the hop
+            # go in and carries on - so eviction has to be by age rather than
+            # by waiting for a click that may never come. dict preserves
+            # insertion order, so the oldest pending callback goes first.
+            while len(self.callback_cache) > self.MAX_CALLBACK_CACHE:
+                self.callback_cache.pop(next(iter(self.callback_cache)))
         self.cbpi.ws.send(
             dict(
                 id=notifcation_id,
@@ -146,15 +171,24 @@ class NotificationController:
 
     def notify_callback(self, notification_id, action_id) -> None:
         try:
+            pending = self.callback_cache.get(notification_id)
+            if pending is None:
+                # Evicted, already handled, or never had actions. Clicking a
+                # stale alert is a normal thing for a brewer to do and must not
+                # look like a fault, but it should be diagnosable rather than
+                # silent - this used to raise KeyError into the handler below
+                # and be logged as an error.
+                self.logger.info(
+                    "Notification %s is no longer pending; ignoring action %s",
+                    notification_id,
+                    action_id,
+                )
+                return False
             action = next(
-                (
-                    item
-                    for item in self.callback_cache[notification_id]
-                    if item.id == action_id
-                ),
+                (item for item in pending if item.id == action_id),
                 None,
             )
-            if action.method is not None:
+            if action is not None and action.method is not None:
                 background_tasks = set()
                 task = asyncio.create_task(action.method())
                 background_tasks.add(task)
