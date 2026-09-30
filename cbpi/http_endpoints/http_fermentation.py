@@ -666,9 +666,21 @@ class FermentationHttpEndpoints:
         data = await request.json()
 
         id = request.match_info["id"]
-        await self.controller.call_action(
-            id, data.get("action"), data.get("parameter", [])
+        action = data.get("action", data.get("name"))
+        ok = await self.controller.call_action(
+            id, action, data.get("parameter", [])
         )
+        if ok is False:
+            return web.json_response(
+                {
+                    "error": "action not run",
+                    "detail": (
+                        "'{}' did not run. Either the logic is not running, or "
+                        "that is not a declared action.".format(action)
+                    ),
+                },
+                status=400,
+            )
         return web.Response(status=204)
 
     @request_mapping(path="/savetobook/{id}", method="POST", auth_required=False)
