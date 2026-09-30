@@ -194,8 +194,31 @@ class SensorHttpEndpoints:
         """
         sensor_id = request.match_info["id"]
         data = await request.json()
-        await self.controller.call_action(
-            sensor_id, data.get("action"), data.get("parameter")
+        # Accept either key. The kettle endpoint has always taken `name`, this
+        # one only ever took `action`, and nothing says which is which at the
+        # call site - sending the wrong one produced a 200 and an action named
+        # None, refused in the log where nobody was looking.
+        action = data.get("action", data.get("name"))
+        ok = await self.controller.call_action(
+            sensor_id, action, data.get("parameter")
         )
+
+        # Report failure to the caller, as the kettle endpoint does.
+        #
+        # This answered 200 whatever happened, so an action that was refused -
+        # wrong name, no running instance - was acknowledged as applied. It
+        # cost a real diagnosis: a vessel reset came back 200 and did nothing,
+        # and the reason was only ever in the log.
+        if ok is False:
+            return web.json_response(
+                {
+                    "error": "action not run",
+                    "detail": (
+                        "'{}' did not run. Either the sensor is not running, "
+                        "or that is not a declared action.".format(action)
+                    ),
+                },
+                status=400,
+            )
 
         return web.Response(status=200)

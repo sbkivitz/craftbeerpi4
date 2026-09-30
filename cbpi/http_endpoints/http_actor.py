@@ -259,10 +259,24 @@ class ActorHttpEndpoints:
         """
         actor_id = request.match_info["id"]
         data = await request.json()
-        # print(data)
-        await self.controller.call_action(
-            actor_id, data.get("action"), data.get("parameter")
+        action = data.get("action", data.get("name"))
+        ok = await self.controller.call_action(
+            actor_id, action, data.get("parameter")
         )
+
+        # Report failure to the caller, as the kettle endpoint does. Answering
+        # 200 for an action that was refused tells the dashboard it applied.
+        if ok is False:
+            return web.json_response(
+                {
+                    "error": "action not run",
+                    "detail": (
+                        "'{}' did not run. Either the actor has no running "
+                        "instance, or that is not a declared action.".format(action)
+                    ),
+                },
+                status=400,
+            )
 
         return web.Response(status=200)
 
