@@ -57,34 +57,56 @@ class LogController:
                 sensor = self.cbpi.sensor.find_by_id(id)
                 if sensor is not None:
                     name = sensor.name.replace(" ", "_")
-                    # Milliseconds, not whole seconds.
-                    #
-                    # This was "%Y-%m-%d %H:%M:%S", which is fine when readings
-                    # arrive once a second and destructive when they arrive
-                    # faster. A simulated vessel at SIM_TIME_SCALE=60 logs one
-                    # sample per simulated second, so about forty rows landed
-                    # in every real second carrying an identical timestamp -
-                    # measured on the rig, 400 rows collapsing to 13 distinct
-                    # timestamps.
-                    #
-                    # Two costs. The chart cannot resolve finer than one real
-                    # second, which at 60x is a whole simulated minute per
-                    # point, and the bucket is reduced with .max() so a ramp
-                    # comes out as a staircase and a dip vanishes. And the
-                    # duplicate rows are pure waste: sixty times the disk for
-                    # no extra information.
-                    #
-                    # Readers accept both formats, so existing logs still load.
-                    formatted_time = datetime.now().strftime(
-                        "%Y-%m-%d %H:%M:%S.%f"
-                    )[:-3]
-                    asyncio.create_task(
-                        self._call_sensor_data_listeners(
-                            id, value, formatted_time, name
-                        )
-                    )
+                    self._emit(id, value, name)
             except Exception as e:
                 logging.error("sensor logging listener exception: {}".format(e))
+
+    def log_control_data(self, series_id: str, value, name: str = None) -> None:
+        """Log a series that is not a sensor - a duty, a setpoint, a PID term.
+
+        log_data() resolves the id to a registered sensor to get a display
+        name, and silently returns when it cannot. That is correct for sensors
+        and fatal for anything else: a kettle logic writing "<kettle>.duty" is
+        not a sensor, so every write was dropped without a word.
+
+        Found by running it: PID_LOGGING on, the cascade running, and not one
+        series file on disk. The unit test had passed throughout because it
+        stubbed cbpi.log.log_data and so never met the real controller - a fake
+        more permissive than the thing it stood in for.
+
+        This takes the name instead of looking it up. Everything downstream is
+        unchanged: the same listeners, the same millisecond timestamps, the
+        same batching, rotation and retention, and the same chart endpoint.
+        """
+        if not self.sensor_data_listeners:
+            return
+        try:
+            self._emit(series_id, value, (name or series_id).replace(" ", "_"))
+        except Exception as e:  # noqa: BLE001 - telemetry never breaks control
+            logging.error("control logging listener exception: {}".format(e))
+
+    def _emit(self, id, value, name):
+        """Hand a reading to every log target, stamped to the millisecond.
+
+        Timestamps were "%Y-%m-%d %H:%M:%S", which is fine when readings arrive
+        once a second and destructive when they arrive faster. A simulated
+        vessel at SIM_TIME_SCALE=60 logs one sample per simulated second, so
+        about forty rows landed in every real second carrying an identical
+        timestamp - measured on the rig, 400 rows collapsing to 13 distinct
+        timestamps.
+
+        Two costs. The chart cannot resolve finer than one real second, which
+        at 60x is a whole simulated minute per point, and the bucket is reduced
+        with .max() so a ramp comes out as a staircase and a dip vanishes. And
+        the duplicate rows are pure waste: sixty times the disk for no extra
+        information.
+
+        Readers accept both formats, so existing logs still load.
+        """
+        formatted_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        asyncio.create_task(
+            self._call_sensor_data_listeners(id, value, formatted_time, name)
+        )
 
     async def _flush_datalogger(self, name):
         """Push any buffered readings to disk before something reads the files.
