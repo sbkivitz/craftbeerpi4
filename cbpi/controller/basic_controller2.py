@@ -237,6 +237,38 @@ class BasicController:
         self.data = list(filter(lambda x: x.id != id, self.data))
         await self.save()
 
+    def _transient_instance(self, item, action):
+        """A logic instance for configuring a stopped item, or None.
+
+        Built only when the named action declares `allow_stopped=True`, and
+        only for configuration: it is constructed and discarded, never started,
+        so `running` stays False and `_run()` never launches. An action reached
+        this way can write properties; it has no loop from which to drive an
+        actor.
+
+        Resolved from the registered class rather than from any instance, so
+        the opt-in cannot be faked by something in an instance dictionary.
+        """
+        try:
+            if item.type is None:
+                return None
+            registered = self.types.get(item.type)
+            if not registered:
+                return None
+            clazz = registered["class"]
+            declared = getattr(clazz, action, None) if isinstance(action, str) else None
+            if declared is None or not getattr(declared, "action", False):
+                return None
+            if not getattr(declared, "allow_stopped", False):
+                return None
+            return clazz(self.cbpi, item.id, item.props)
+        except Exception as e:  # noqa: BLE001 - never fail a request on this
+            logging.warning(
+                "%s could not prepare %r for a stopped %s: %s",
+                self.name, action, item.id, e,
+            )
+            return None
+
     async def call_action(self, id, action, parameter) -> None:
         logging.info("{} call all Action {} {}".format(self.name, id, action))
         try:
@@ -245,6 +277,30 @@ class BasicController:
                 logging.error("%s no such item %s", self.name, id)
                 return False
             if item.instance is None:
+                # No running logic. Some actions are still legitimate.
+                #
+                # The distinction is commanding versus configuring. Most
+                # actions command something and genuinely need a running
+                # instance. But an action that only writes a property the
+                # logic reads on its next pass has nothing to do with whether
+                # it is running, and refusing it makes the setting unreachable
+                # exactly when a brewer would naturally reach for it - setting
+                # the boil power before starting the boil.
+                #
+                # Opt-in per action via @action(..., allow_stopped=True), so
+                # nothing that was previously rejected starts running by
+                # accident. The instance built here is never started: running
+                # stays False and its control loop never launches, so it can
+                # configure but not command.
+                transient = self._transient_instance(item, action)
+                if transient is not None:
+                    method = resolve_action(transient, action)
+                    if method is not None:
+                        await method(**normalize_action_parameters(parameter))
+                        await self.save()
+                        await self.push_udpate()
+                        return True
+
                 # Not a rejected action - there is nothing to dispatch to.
                 #
                 # Kettles have autostart False, so no logic instance exists
