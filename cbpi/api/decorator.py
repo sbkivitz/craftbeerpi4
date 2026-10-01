@@ -69,11 +69,31 @@ def on_event(topic):
     return real_decorator
 
 
-def action(key, parameters):
+def action(key, parameters, allow_stopped=False):
+    """Declare a method callable from the interface.
+
+    `allow_stopped` marks an action that is safe to run when the logic is not
+    running, and it defaults to False so no existing action changes behaviour.
+
+    The distinction is between commanding and configuring. Most actions command
+    something - start a timer, add five minutes, acknowledge an alert - and
+    those genuinely need a running instance; dispatching them to a stopped one
+    would be meaningless or unsafe. But some only write a configured property
+    that the logic will read next time it runs, and refusing those is simply
+    wrong: a brewer setting the boil power before starting the boil is doing
+    the most ordinary thing there is, and being told "start the kettle first"
+    makes the setting unreachable exactly when it is most natural to set it.
+
+    An action that opts in is dispatched on a transient instance that is
+    constructed and discarded. It is never started, `running` stays False and
+    its control loop never launches, so it can configure but not command.
+    """
+
     def real_decorator(func):
         func.action = True
         func.key = key
         func.parameters = parameters
+        func.allow_stopped = bool(allow_stopped)
         return func
 
     return real_decorator
