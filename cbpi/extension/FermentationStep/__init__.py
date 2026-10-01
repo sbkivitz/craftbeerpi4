@@ -165,7 +165,7 @@ class FermenterTargetTempStep(CBPiFermentationStep):
                     self.props.get("Sensor", None)
                 ).get("value")
                 if (
-                    sensor_value >= self.fermenter.target_temp
+                    self.target_reached(sensor_value, self.fermenter.target_temp)
                     and self.timer.is_running is not True
                 ):
                     self.timer.start()
@@ -374,7 +374,7 @@ class FermenterStep(CBPiFermentationStep):
                     self.props.get("Sensor", None)
                 ).get("value")
                 if (
-                    sensor_value >= self.fermenter.target_temp
+                    self.target_reached(sensor_value, self.fermenter.target_temp)
                     and self.timer.is_running is not True
                 ):
                     self.timer.start()
@@ -562,7 +562,7 @@ class FermenterRampTempStep(CBPiFermentationStep):
                     self.props.get("Sensor", None)
                 ).get("value")
                 if (
-                    sensor_value >= self.target_temp
+                    self.target_reached(sensor_value, self.target_temp)
                     and self.timer.is_running is not True
                 ):
                     self.timer.start()

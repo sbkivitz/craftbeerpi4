@@ -40,6 +40,48 @@ class StepMove(Enum):
 
 class CBPiStep(CBPiBase):
 
+    def target_reached(self, sensor_value, target):
+        """Has the vessel arrived at `target`, within instrument tolerance?
+
+        This was a bare `sensor_value >= target`, and it can hang a brew.
+
+        Observed on the rig, mid-mash: Mash Out waiting on 168.8 with the mash
+        sitting at 168.79. The PID had settled - HLT at 173.84, element at 31%,
+        pump running - and it was never going to climb the last hundredth of a
+        degree, because that is what "settled" means. The step waited forever,
+        and would have waited all night.
+
+        A controller holds *near* a setpoint, not exactly on it: it has a
+        steady-state offset, the probe quantises (a DS18B20 steps in 0.0625 C
+        and is spec'd to half a degree), and the reading is rounded for
+        transport. Demanding equality against any of those is demanding
+        something the physical system does not promise.
+
+        The tolerance is deliberately far below brewing significance - nobody
+        can taste a third of a degree in a mash out - and far above sensor
+        resolution and float noise. Starting a rest a fraction early is
+        harmless; not starting it at all ruins the day.
+
+        Expressed in the configured unit, because a tolerance in degrees is
+        not unit-free.
+        """
+        try:
+            value = float(sensor_value)
+            goal = float(target)
+        except (TypeError, ValueError):
+            return False
+        if value != value or goal != goal:  # NaN never arrives
+            return False
+        return value >= goal - self._target_tolerance()
+
+    def _target_tolerance(self):
+        """How close counts as arrived, in the configured unit."""
+        try:
+            unit = self.cbpi.config.get("TEMP_UNIT", "C")
+        except Exception:  # noqa: BLE001
+            unit = "C"
+        return 0.5 if str(unit).upper().startswith("F") else 0.3
+
     def _float_prop(self, name, default):
         """A numeric property, without truncating the fraction away.
 
