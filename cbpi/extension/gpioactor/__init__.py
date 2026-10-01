@@ -106,12 +106,18 @@ class GPIOActor(CBPiActor):
             )
         ],
     )
-    async def setpower(self, Power=100, **kwargs):
-        self.power = int(Power)
-        if self.power < 0:
-            self.power = 0
-        if self.power > 100:
-            self.power = 100
+    async def setpower(self, Power=None, **kwargs):
+        # Defaulting to 100 meant an action invoked with no value - an empty
+        # payload from the interface or an integration - drove the element to
+        # full power. ActorController.on() already refuses that inference for
+        # the same reason: treating "unset" as a level is how a deliberate 0
+        # became 100 there.
+        #
+        # int(Power) also raised on a NaN or an empty string, so a malformed
+        # request failed inside the action rather than being rejected.
+        if Power is None:
+            Power = self.power if self.power is not None else 0
+        self.power = _clamp_duty(Power)
         await self.set_power(self.power)
 
     def get_GPIO_state(self, state):
@@ -316,13 +322,19 @@ class GPIOPWMActor(CBPiActor):
             )
         ],
     )
-    async def setpower(self, Power=100, **kwargs):
+    async def setpower(self, Power=None, **kwargs):
         logging.info(Power)
-        self.power = int(Power)
-        if self.power < 0:
-            self.power = 0
-        if self.power > 100:
-            self.power = 100
+        # Defaulting to 100 meant an action invoked with no value - an empty
+        # payload from the interface or an integration - drove the element to
+        # full power. ActorController.on() already refuses that inference for
+        # the same reason: treating "unset" as a level is how a deliberate 0
+        # became 100 there.
+        #
+        # int(Power) also raised on a NaN or an empty string, so a malformed
+        # request failed inside the action rather than being rejected.
+        if Power is None:
+            Power = self.power if self.power is not None else 0
+        self.power = _clamp_duty(Power)
         await self.set_power(self.power)
 
     async def on_start(self):
