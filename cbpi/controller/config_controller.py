@@ -63,6 +63,37 @@ class ConfigController:
             for key, value in self.cache.items():
                 data[key] = value.to_dict()
             atomic_write_json(self.path, data, sort_keys=True)
+            await self.push_update()
+
+    async def push_update(self):
+        """Tell every connected client the configuration changed.
+
+        Nothing did this. set() updated the cache and wrote the file and told
+        no one, and there was no config topic anywhere in the server, so a
+        browser's idea of the configuration was whatever it fetched when the
+        page loaded and never changed again.
+
+        The interface appeared to work only because its own save path calls
+        navigate(0) - a full page reload - which re-fetches everything. A
+        change from anywhere else was invisible: the API, a plugin, a second
+        browser, a phone in the brewery while the laptop sits in the kitchen.
+
+        That is worse than a stale display. Observed on the rig: the server
+        was running at SIM_TIME_SCALE 60 while the settings menu showed 1, so
+        the brewer read a number, believed it, and was wrong. The same applies
+        to TEMP_UNIT, CONFIRM_BEFORE_BOIL and NOTIFY_ON_ERROR - settings that
+        change what the rig does and what it warns about.
+
+        Sent as the whole config rather than one key, matching how kettles,
+        actors and sensors already broadcast, so a client that missed an
+        earlier message cannot drift.
+        """
+        try:
+            self.cbpi.ws.send(
+                dict(topic="configupdate", data=self.get_state())
+            )
+        except Exception as e:  # noqa: BLE001 - never fail a write on telemetry
+            self.logger.warning("Could not push config update: %s", e)
 
     async def add(
         self,
@@ -78,6 +109,7 @@ class ConfigController:
         for key, value in self.cache.items():
             data[key] = value.to_dict()
         atomic_write_json(self.path, data, sort_keys=True)
+        await self.push_update()
 
     async def remove(self, name):
         data = {}
@@ -102,6 +134,7 @@ class ConfigController:
         if success == True:
             atomic_write_json(self.path, data, sort_keys=True)
             self.cache = self.testcache
+            await self.push_update()
 
     async def obsolete(self, remove=False):
         result = {}
