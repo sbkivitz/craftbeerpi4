@@ -68,6 +68,7 @@ class ConfigUpdate(CBPiExtension):
         SENSOR_LOG_MAX_BYTES = self.cbpi.config.get("SENSOR_LOG_MAX_BYTES", None)
         slow_pipe_animation = self.cbpi.config.get("slow_pipe_animation", None)
         NOTIFY_ON_ERROR = self.cbpi.config.get("NOTIFY_ON_ERROR", None)
+        PID_LOGGING = self.cbpi.config.get("PID_LOGGING", None)
         PLAY_BUZZER = self.cbpi.config.get("PLAY_BUZZER", None)
         BoilAutoTimer = self.cbpi.config.get("BoilAutoTimer", None)
         ActorInterlock = self.cbpi.config.get("ACTOR_INTERLOCK_GROUPS", None)
@@ -832,6 +833,28 @@ class ConfigUpdate(CBPiExtension):
                 logger.warning("Unable to update config")
 
         ## Check if NOTIFY_ON_ERROR is in config
+        if PID_LOGGING is None:
+            logger.info("INIT PID_LOGGING")
+            try:
+                await self.cbpi.config.add(
+                    "PID_LOGGING",
+                    "No",
+                    type=ConfigType.SELECT,
+                    description=(
+                        "Record what the control logics ask for - element duty "
+                        "and setpoint - alongside the temperatures, so a PID "
+                        "can be judged after the brew. Off by default; it "
+                        "writes extra log data."
+                    ),
+                    source="craftbeerpi",
+                    options=[
+                        {"label": "Yes", "value": "Yes"},
+                        {"label": "No", "value": "No"},
+                    ],
+                )
+            except:
+                logger.warning("Unable to update config")
+
         if NOTIFY_ON_ERROR is None:
             logger.info("INIT NOTIFY_ON_ERROR")
             try:
