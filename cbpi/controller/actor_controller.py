@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 
 from cbpi.api.dataclasses import Actor, Props
@@ -12,7 +13,68 @@ class ActorController(BasicController):
         super(ActorController, self).__init__(cbpi, Actor, "actor.json")
         self.update_key = "actorupdate"
         self.sorting = True
+        # Whether a driver's on() takes `output`, keyed by driver class. An
+        # instance attribute rather than a class one so two controllers cannot
+        # share it - see _on_accepts_output.
+        self._on_signature_cache = {}
 
+    def _on_accepts_output(self, instance):
+        """Does this driver's on() take `output` as well as `power`?
+
+        Answered from the signature, never by calling and catching.
+
+        The previous form called on(power, output) inside a bare `except:` and
+        called on(power) when anything at all went wrong. A bare except catches
+        CancelledError and every genuine driver fault, so "this failed to
+        energize" and "this was cancelled" both became "energize again" - the
+        one retry a heating element must never be given. The observed trace was
+        ON, OFF, ON, with the request reporting success and the actor left on.
+
+        Needing to choose between two forms is real: CBPiActor.on is
+        (power, output=None), but the bundled GPIO and MQTT actors declare
+        (power) alone. Choosing from the signature keeps that compatibility
+        while letting a driver that raises while energizing be reported rather
+        than retried.
+
+        When the signature cannot be read, the single-argument form wins. Every
+        driver accepts it, so a driver that wanted `output` loses a refinement
+        instead of being switched on a second time.
+        """
+        cls = type(instance)
+        # Lazily created: the controller is sometimes built with
+        # object.__new__ (harnesses, and any caller that bypasses __init__),
+        # so this must not depend on __init__ having run.
+        cache = getattr(self, "_on_signature_cache", None)
+        if cache is None:
+            cache = {}
+            self._on_signature_cache = cache
+        cached = cache.get(cls)
+        if cached is not None:
+            return cached
+
+        accepts = False
+        try:
+            parameters = list(inspect.signature(instance.on).parameters.values())
+            positional = [
+                p
+                for p in parameters
+                if p.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            takes_varargs = any(
+                p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters
+            )
+            accepts = takes_varargs or len(positional) >= 2
+        except (TypeError, ValueError):
+            # Builtins and some C-implemented callables have no readable
+            # signature. Fall back to the form every driver supports.
+            accepts = False
+
+        cache[cls] = accepts
+        return accepts
     def create(self, data):
         # The base implementation only restores id/name/type/props, so everything
         # actor.json persists beyond that was silently reset to the dataclass
@@ -238,9 +300,12 @@ class ActorController(BasicController):
                 async with self._interlock_lock():
                     blocking = self._interlock_conflict(item)
                     if blocking is None:
-                        try:
+                        # No try/except around this. A driver that fails to
+                        # energize must surface that failure, not be asked a
+                        # second time with different arguments.
+                        if self._on_accepts_output(item.instance):
                             await item.instance.on(power, output)
-                        except:
+                        else:
                             await item.instance.on(power)
 
                 if blocking is not None:
