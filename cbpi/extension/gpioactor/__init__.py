@@ -21,6 +21,33 @@ if mode is None:
     GPIO.setmode(GPIO.BCM)
 
 
+def _clamp_duty(value):
+    """A duty percentage a GPIO actor can actually use. Never raises.
+
+    `power` was stored exactly as handed over, and the pulse loop then computed
+    its on and off phases from it. A NaN made both `heating_time > 0` and
+    `wait_time > 0` false, so neither branch slept and `run()` spun without
+    awaiting anything - which starves the event loop. Nothing else could run:
+    not the OFF this actor had been sent, not cancellation, not shutdown. The
+    pin stayed at whatever level it was last driven to, with several kilowatts
+    behind it.
+
+    An unusable value fails to 0 rather than 100, for the same reason
+    ActorController._clamp_power does: when the number is meaningless, the only
+    defensible output is no heat.
+
+    Module level because both actors in this file need it. GPIOPWMActor had no
+    validation at all and handed `power` straight through to RPi.GPIO.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        return 0
+    return max(0, min(100, numeric))
+
+
 @parameters(
     [
         Property.Select(
@@ -151,25 +178,11 @@ class GPIOActor(CBPiActor):
     def _duty(cls, value):
         """A duty percentage the pulse loop can actually use. Never raises.
 
-        `power` was stored exactly as handed over, and the loop then computed
-        its on and off phases from it. A NaN made both `heating_time > 0` and
-        `wait_time > 0` false, so neither branch slept and `run()` spun without
-        awaiting anything - which starves the event loop. Nothing else could
-        run: not the OFF this actor had been sent, not cancellation, not
-        shutdown. The pin stayed at whatever level it was last driven to, with
-        several kilowatts behind it.
-
-        An unusable value fails to 0 rather than 100, for the same reason
-        ActorController._clamp_power does: when the number is meaningless, the
-        only defensible output is no heat.
+        Kept as a classmethod because it is part of this actor's tested
+        surface; the implementation moved to module level so GPIOPWMActor can
+        use it too. See _clamp_duty.
         """
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return 0
-        if numeric != numeric or numeric in (float("inf"), float("-inf")):
-            return 0
-        return max(0, min(100, numeric))
+        return _clamp_duty(value)
 
     async def on(self, power=None):
         self.power = self._duty(power if power is not None else 100)
@@ -329,10 +342,9 @@ class GPIOPWMActor(CBPiActor):
 
     async def on(self, power=None):
         logging.debug("PWM Actor Power: {}".format(power))
-        if power is not None:
-            self.power = power
-        else:
-            self.power = 100
+        # Validated like GPIOActor's. This handed `power` straight to RPi.GPIO,
+        # so a NaN or an out-of-range value reached the PWM driver unchecked.
+        self.power = _clamp_duty(power if power is not None else 100)
 
         logging.debug("PWM Final Power: {}".format(self.power))
 
@@ -348,20 +360,51 @@ class GPIOPWMActor(CBPiActor):
             else:
                 self.p.start(100 - self.power)
             self.state = True
-        #            await self.cbpi.actor.actor_update(self.id,self.power)
-        except:
-            pass
+        except Exception as e:
+            # Was `except: pass`. That swallowed CancelledError and every real
+            # driver fault without a word, so an element or pump that failed to
+            # start looked exactly like one that started. On a HERMS a pump that
+            # silently fails to run leaves the coil with no flow while the HLT
+            # keeps heating, and nobody is told.
+            #
+            # Left off and reported. ActorController.on() turns the exception
+            # into a logged failure and a False return, which is what the caller
+            # needs in order to know.
+            self.state = False
+            logger.error(
+                "PWM ACTOR %s failed to switch on - GPIO %s - %s",
+                self.id,
+                self.gpio,
+                e,
+            )
+            raise
 
     async def off(self):
         logger.info("PWM ACTOR %s OFF - GPIO %s " % (self.id, self.gpio))
-        if self.inverted == "No":
-            self.p.ChangeDutyCycle(0)
-        else:
-            self.p.ChangeDutyCycle(100)
-
+        # self.p is None before the first successful on(), and again after
+        # on_stop() clears it. This called ChangeDutyCycle on it regardless, so
+        # switching off an actor that had never started raised AttributeError -
+        # an actor that cannot be turned off, during whatever sequence was
+        # trying to turn it off.
+        if self.p is not None:
+            try:
+                if self.inverted == "No":
+                    self.p.ChangeDutyCycle(0)
+                else:
+                    self.p.ChangeDutyCycle(100)
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "PWM ACTOR %s could not be driven off - GPIO %s - %s",
+                    self.id,
+                    self.gpio,
+                    e,
+                )
+        # Recorded as off either way. A failure to drive the pin must not also
+        # leave the actor believing it is still running.
         self.state = False
 
     async def set_power(self, power):
+        power = _clamp_duty(power)
         if self.p and self.state == True:
             if self.inverted == "No":
                 self.p.ChangeDutyCycle(power)
