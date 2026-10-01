@@ -64,7 +64,12 @@ class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
         that just writes.
         """
         try:
-            self.cbpi.log.log_data("{}.{}".format(self.id, series), value)
+            series_id = "{}.{}".format(self.id, series)
+            # Not log_data(): that resolves the id to a registered sensor to
+            # get a display name and silently returns when it cannot, so every
+            # control write was dropped without a word. Found by running it -
+            # PID_LOGGING on, cascade running, not one file on disk.
+            self.cbpi.log.log_control_data(series_id, value, series_id)
         except Exception as e:  # noqa: BLE001 - telemetry never breaks control
             logging.getLogger(type(self).__name__).warning(
                 "Could not log %s for %s: %s", series, self.id, e
