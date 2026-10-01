@@ -124,8 +124,19 @@ class SensorLogTargetCSV(CBPiExtension):
             # but after initially enabling this logging target a restart is required.
             return
         if id not in self.cbpi.log.datalogger:
-            max_bytes = int(self.cbpi.config.get("SENSOR_LOG_MAX_BYTES", 100000))
-            backup_count = int(self.cbpi.config.get("SENSOR_LOG_BACKUP_COUNT", 3))
+            # Sized to hold a brew day, not an hour.
+            #
+            # The defaults were 100 KB x 3, which is 400 KB per sensor. A real
+            # sensor logs about once a second at roughly 32 bytes a row, so
+            # that is about three and a half hours - the chart silently loses
+            # the start of a mash before the boil is over, and the one time
+            # anyone reads back a whole session is after something went wrong.
+            #
+            # 500 KB x 5 is 3 MB per sensor, about 26 hours at one row a
+            # second. Three sensors is 9 MB, which is nothing on the smallest
+            # card anyone runs this on, and rotation still bounds it.
+            max_bytes = int(self.cbpi.config.get("SENSOR_LOG_MAX_BYTES", 500000))
+            backup_count = int(self.cbpi.config.get("SENSOR_LOG_BACKUP_COUNT", 5))
             # How long a reading may sit in memory before it reaches the disk.
             # Configurable rather than fixed because the right answer depends
             # on the storage: 60 s suits an SD card, 0 restores the original
