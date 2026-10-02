@@ -1,3 +1,4 @@
+import asyncio
 import glob
 import importlib
 import json
@@ -290,6 +291,36 @@ class SystemController:
             )
 
     async def systeminfo(self):
+        """Gather system information without stopping everything else.
+
+        The body of this was `async def` but contained nothing awaitable: every
+        call in it is synchronous blocking I/O. `psutil.sensors_temperatures`
+        and `net_if_stats` read sysfs, and on Linux the wlan0 branch runs
+
+            os.popen("iwlist wlan0 rate | grep Rate").read()
+
+        which spawns a subprocess and blocks until it exits. A coroutine that
+        blocks blocks the whole event loop - `async def` does not make it
+        concurrent, and neither would wrapping it in a task.
+
+        So opening the System page stalled the server for as long as the slowest
+        of those took. Nothing else ran meanwhile: not a PWM actor's next duty
+        transition, not a step's timer, not an operator pressing OFF. On a Pi
+        with a busy or marginal wireless link, `iwlist` is the slow one.
+
+        The collection now runs in a worker thread. It is the same fix already
+        applied to the InfluxDB log target, and for the same reason.
+
+        Split out as a separate synchronous method rather than inlined so a test
+        can substitute a deliberately slow collector and measure whether the
+        loop still runs - which is the only thing that distinguishes this from
+        the version that looked asynchronous and was not.
+        """
+        return await asyncio.get_running_loop().run_in_executor(
+            None, self._collect_systeminfo
+        )
+
+    def _collect_systeminfo(self):
         logging.info("SYSTEMINFO")
         system = ""
         temp = 0
@@ -441,6 +472,20 @@ class SystemController:
         totalmem = 0
         availmem = 0
         mempercent = 0
+        # Bound before the try. It used to be assigned only on the success path,
+        # inside a block ending in `except: pass`, so any failure reading memory
+        # fell through to `return meminfo` and raised UnboundLocalError - turning
+        # a missing statistic into a 500 from the endpoint.
+        #
+        # Left on the event loop deliberately, unlike systeminfo(): this reads
+        # /proc/meminfo and returns in microseconds, with no subprocess, so a
+        # thread hand-off per call would cost more than it saves.
+        meminfo = {
+            "totalmem": totalmem,
+            "availmem": availmem,
+            "mempercent": mempercent,
+            "minmem": self.cbpi.config.get("MIN_MEMORY", 200),
+        }
 
         try:
             mem = psutil.virtual_memory()
@@ -448,12 +493,12 @@ class SystemController:
             mempercent = round(float(mem.percent), 1)
             totalmem = round((int(mem.total) / (1024 * 1024)), 1)
             meminfo = {
-            "totalmem": totalmem,
-            "availmem": availmem,
-            "mempercent": mempercent,
-            "minmem": self.cbpi.config.get("MIN_MEMORY", 200)
-        }
-        except:
-            pass
+                "totalmem": totalmem,
+                "availmem": availmem,
+                "mempercent": mempercent,
+                "minmem": self.cbpi.config.get("MIN_MEMORY", 200),
+            }
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not read memory information: %s", e)
 
         return meminfo
