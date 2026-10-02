@@ -468,37 +468,44 @@ class SystemController:
 
     async def get_memory_info(self):
         logging.info("SYSTEMINFO")
-        system = ""
-        totalmem = 0
-        availmem = 0
-        mempercent = 0
-        # Bound before the try. It used to be assigned only on the success path,
-        # inside a block ending in `except: pass`, so any failure reading memory
-        # fell through to `return meminfo` and raised UnboundLocalError - turning
-        # a missing statistic into a 500 from the endpoint.
-        #
-        # Left on the event loop deliberately, unlike systeminfo(): this reads
-        # /proc/meminfo and returns in microseconds, with no subprocess, so a
-        # thread hand-off per call would cost more than it saves.
-        meminfo = {
-            "totalmem": totalmem,
-            "availmem": availmem,
-            "mempercent": mempercent,
-            "minmem": self.cbpi.config.get("MIN_MEMORY", 200),
-        }
+        minmem = self.cbpi.config.get("MIN_MEMORY", 200)
 
+        # What this returns when it cannot measure matters more than it looks.
+        #
+        # DashboardContext polls this every five minutes and does:
+        #
+        #     if (data.meminfo.availmem < data.meminfo.minmem)
+        #         window.location.reload(true);
+        #
+        # An earlier version of this method bound `meminfo` only on the success
+        # path inside a block ending in `except: pass`, so a failed read raised
+        # UnboundLocalError and the endpoint returned 500. Binding it first
+        # fixed the crash and introduced a worse fault: the fallback carried
+        # availmem = 0, and 0 < 200, so an *unknown* statistic was read as
+        # genuinely exhausted memory and forced a page reload - every five
+        # minutes for as long as the fault lasted, discarding whatever the
+        # brewer had on screen. On a rig that can include an unanswered
+        # notification or a prompt waiting on them.
+        #
+        # So an unavailable measurement omits the numbers entirely rather than
+        # substituting one. `undefined < 200` is false in JavaScript, so the
+        # shipped interface stops reloading without needing to be rebuilt.
+        # Returning null would not do: JSON null coerces to 0 in `<`, which is
+        # the same bug with a different spelling.
+        #
+        # `available` is the explicit signal for a client that wants to show
+        # "unknown" rather than a blank, and for the guard that belongs in
+        # DashboardContext - requiring a valid measured number before reloading,
+        # instead of inferring it from a missing one.
         try:
             mem = psutil.virtual_memory()
-            availmem = round((int(mem.available) / (1024 * 1024)), 1)
-            mempercent = round(float(mem.percent), 1)
-            totalmem = round((int(mem.total) / (1024 * 1024)), 1)
-            meminfo = {
-                "totalmem": totalmem,
-                "availmem": availmem,
-                "mempercent": mempercent,
-                "minmem": self.cbpi.config.get("MIN_MEMORY", 200),
+            return {
+                "totalmem": round((int(mem.total) / (1024 * 1024)), 1),
+                "availmem": round((int(mem.available) / (1024 * 1024)), 1),
+                "mempercent": round(float(mem.percent), 1),
+                "minmem": minmem,
+                "available": True,
             }
         except Exception as e:  # noqa: BLE001
             logging.warning("Could not read memory information: %s", e)
-
-        return meminfo
+            return {"minmem": minmem, "available": False}
