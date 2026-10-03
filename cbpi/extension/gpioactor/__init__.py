@@ -398,22 +398,74 @@ class GPIOPWMActor(CBPiActor):
         # switching off an actor that had never started raised AttributeError -
         # an actor that cannot be turned off, during whatever sequence was
         # trying to turn it off.
-        if self.p is not None:
+        if self.p is None:
+            # Nothing is driving the pin, so there is nothing to fail at.
+            self.state = False
+            return
+
+        try:
+            if self.inverted == "No":
+                self.p.ChangeDutyCycle(0)
+            else:
+                self.p.ChangeDutyCycle(100)
+            self.state = False
+            return
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "PWM ACTOR %s could not be driven off - GPIO %s - %s",
+                self.id,
+                self.gpio,
+                e,
+            )
+
+        # Try harder before giving up. A failed duty write does not mean the
+        # channel has stopped, so stop the PWM outright, and failing that drive
+        # the pin to its de-energized level directly.
+        for attempt in (self._stop_pwm, self._force_pin_low):
             try:
-                if self.inverted == "No":
-                    self.p.ChangeDutyCycle(0)
-                else:
-                    self.p.ChangeDutyCycle(100)
+                attempt()
+                self.state = False
+                logger.warning(
+                    "PWM ACTOR %s was de-energized by fallback after a failed "
+                    "duty write - GPIO %s",
+                    self.id,
+                    self.gpio,
+                )
+                return
             except Exception as e:  # noqa: BLE001
                 logger.error(
-                    "PWM ACTOR %s could not be driven off - GPIO %s - %s",
+                    "PWM ACTOR %s fallback de-energize failed - GPIO %s - %s",
                     self.id,
                     self.gpio,
                     e,
                 )
-        # Recorded as off either way. A failure to drive the pin must not also
-        # leave the actor believing it is still running.
-        self.state = False
+
+        # OFF could not be established. Do NOT report it as established.
+        #
+        # An earlier version set state = False here, reasoning that a failure
+        # to drive the pin should not also leave the actor believing it was
+        # running. That is backwards for the interlock, which is the thing
+        # standing between two multi-kilowatt elements and a supply that can
+        # carry only one. A false OFF releases it: measured, the controller
+        # reported OFF, the channel retained 85% duty, and the other heater was
+        # then ALLOWED to start. The revision before that reported failure,
+        # kept the state ON, and refused it.
+        #
+        # So an actor whose output cannot be verified off stays on as far as
+        # everything else is concerned, and the failure reaches the caller.
+        # Known-unsafe must not be made indistinguishable from known-safe.
+        raise RuntimeError(
+            "PWM ACTOR {} could not be switched off on GPIO {}".format(
+                self.id, self.gpio
+            )
+        )
+
+    def _stop_pwm(self):
+        self.p.stop()
+        self.p = None
+
+    def _force_pin_low(self):
+        GPIO.output(self.gpio, 0 if self.inverted == "No" else 1)
 
     async def set_power(self, power):
         power = _clamp_duty(power)
