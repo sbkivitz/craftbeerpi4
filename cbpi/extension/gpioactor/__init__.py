@@ -39,13 +39,56 @@ def _clamp_duty(value):
     Module level because both actors in this file need it. GPIOPWMActor had no
     validation at all and handed `power` straight through to RPi.GPIO.
     """
+    parsed = _parse_duty(value)
+    return 0 if parsed is None else parsed
+
+
+def _parse_duty(value):
+    """The duty the caller actually specified, or None if they did not.
+
+    Deliberately distinct from _clamp_duty. They answer different questions:
+
+      _parse_duty  - "did I receive a level?"      A command needs this.
+      _clamp_duty  - "what should the output be?"  A control loop needs this,
+                     and must always have an answer.
+
+    Conflating them is how a Set Power action carrying an empty string or a
+    stray word reported success while moving the element to zero: the clamp did
+    its job, failing an unusable value safely to 0, and the action then
+    presented that as the command the brewer had sent. Out of range is still a
+    level and is clamped; unparseable is not a level at all.
+    """
     try:
         numeric = float(value)
     except (TypeError, ValueError):
-        return 0
+        return None
     if numeric != numeric or numeric in (float("inf"), float("-inf")):
-        return 0
+        return None
     return max(0, min(100, numeric))
+
+
+def _commanded_duty(actor, Power):
+    """Resolve a Set Power command, or refuse it.
+
+    Raises rather than returning a sentinel, because raising is the only way a
+    refusal becomes visible. BasicController.call_action returns True
+    unconditionally after awaiting an action, and False only when it raises -
+    so an action that returns a failure value is reported to the caller as a
+    success, and the dialog closes on it.
+    """
+    if Power is None:
+        # Nothing specified, so nothing changes. Not an error: an omitted
+        # optional parameter is a legitimate request to leave the level alone,
+        # and defaulting it to a number is how an empty request became 100%.
+        current = getattr(actor, "power", None)
+        return _clamp_duty(current if current is not None else 0)
+    parsed = _parse_duty(Power)
+    if parsed is None:
+        raise ValueError(
+            "Set Power needs a number from 0 to 100, not {!r}. The level was "
+            "left unchanged at {}.".format(Power, getattr(actor, "power", None))
+        )
+    return parsed
 
 
 @parameters(
@@ -115,9 +158,11 @@ class GPIOActor(CBPiActor):
         #
         # int(Power) also raised on a NaN or an empty string, so a malformed
         # request failed inside the action rather than being rejected.
-        if Power is None:
-            Power = self.power if self.power is not None else 0
-        self.power = _clamp_duty(Power)
+        # Refused rather than reinterpreted. _clamp_duty would turn "" or a
+        # stray word into 0, which is right for a control loop and wrong for a
+        # command: the element would move and the brewer would be told the
+        # level they sent had been applied.
+        self.power = _commanded_duty(self, Power)
         await self.set_power(self.power)
 
     def get_GPIO_state(self, state):
@@ -332,9 +377,11 @@ class GPIOPWMActor(CBPiActor):
         #
         # int(Power) also raised on a NaN or an empty string, so a malformed
         # request failed inside the action rather than being rejected.
-        if Power is None:
-            Power = self.power if self.power is not None else 0
-        self.power = _clamp_duty(Power)
+        # Refused rather than reinterpreted. _clamp_duty would turn "" or a
+        # stray word into 0, which is right for a control loop and wrong for a
+        # command: the element would move and the brewer would be told the
+        # level they sent had been applied.
+        self.power = _commanded_duty(self, Power)
         await self.set_power(self.power)
 
     async def on_start(self):
