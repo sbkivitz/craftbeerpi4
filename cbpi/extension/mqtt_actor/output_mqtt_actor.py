@@ -88,11 +88,13 @@ class OutputMQTTActor(CBPiActor):
         pass
 
     async def off(self):
-        self.state = False
+        # Publish first, then record it - see MQTTActor.off(). Setting the
+        # state before the publish leaves an unreachable broker looking like a
+        # successful switch-off to the interlock.
         await self.cbpi.satellite.publish(
             self.topic, json.dumps({"state": "off", "power": 0, "output": 0}), True
         )
-        pass
+        self.state = False
 
     async def run(self):
         while self.running:
