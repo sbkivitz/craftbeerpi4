@@ -46,11 +46,20 @@ class MQTTActor(CBPiActor):
         pass
 
     async def off(self):
-        self.state = False
+        # Publish first, then record it.
+        #
+        # This set state = False before publishing, so a broker that could not
+        # be reached left an actor reporting itself off while its output was
+        # untouched. The exception does reach ActorController.off(), which logs
+        # it and returns False - but every other reader sees an actor that is
+        # off, and the interlock is one of those readers: a false OFF lets
+        # another element start.
+        #
+        # on() in this same class already had the order right.
         await self.cbpi.satellite.publish(
             self.topic, json.dumps({"state": "off", "power": 0}), True
         )
-        pass
+        self.state = False
 
     async def run(self):
         while self.running:
