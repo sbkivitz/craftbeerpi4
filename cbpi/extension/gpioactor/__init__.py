@@ -21,6 +21,69 @@ if mode is None:
     GPIO.setmode(GPIO.BCM)
 
 
+# PWM frequency, in Hz, for GPIOPWMActor.
+#
+# The code has always fallen back to 0.5 Hz - a two second period - but the
+# property declared no default and no description, so the field is blank in the
+# UI and the operator has to invent a number. There is no clue anywhere that
+# this is meant to be well below 1.
+DEFAULT_FREQUENCY = 0.5
+
+# Above this, warn. Not an error: a DC pump or fan driven from a GPIO may
+# legitimately want a high carrier. It is wrong for a mains heating element.
+#
+# RPi.GPIO's PWM is software PWM, a thread subject to ordinary Linux scheduling
+# jitter, and a zero-cross SSR can only act on a mains zero crossing - every
+# 8.3 ms on 60 Hz mains. At 30 Hz the PWM period is 33 ms, so about four
+# crossings fit inside it and the duty the element actually receives quantises
+# to roughly 25% steps. A PID asking for 37% gets 25% or 50%, and which one it
+# gets moves around with scheduler jitter.
+#
+# None of that buys anything thermally. A 15 gallon HLT measured an ultimate
+# period of 985 seconds, so a two second PWM period is already about 1/500th of
+# the loop's own timescale and completely invisible to the water.
+HIGH_FREQUENCY_WARN = 10.0
+
+
+def _parse_frequency(value, actor_id=None):
+    """A PWM frequency RPi.GPIO can actually be given. Never raises.
+
+    `frequency` went from the property straight into GPIO.PWM() with no
+    checking, so zero, a negative, a blank field or a non-finite value all
+    reached the driver. Zero has no period to divide into, and NaN propagates
+    into the pulse timing the same way an unusable duty did.
+
+    An unusable value falls back to the documented default rather than failing
+    the actor: refusing to start the element is not safer than driving it at
+    the frequency the code has always used when the field was empty.
+    """
+    try:
+        hz = float(value)
+    except (TypeError, ValueError):
+        hz = None
+    if hz is None or hz != hz or hz in (float("inf"), float("-inf")) or hz <= 0:
+        logger.error(
+            "PWM ACTOR %s - frequency %r is not a usable number of Hz, "
+            "using %s Hz",
+            actor_id,
+            value,
+            DEFAULT_FREQUENCY,
+        )
+        return DEFAULT_FREQUENCY
+    if hz > HIGH_FREQUENCY_WARN:
+        logger.warning(
+            "PWM ACTOR %s - frequency is %s Hz. For a mains heating element "
+            "this is far too fast: a zero-cross SSR only switches at mains "
+            "zero crossings, so the duty quantises coarsely and wanders with "
+            "scheduler jitter. Heating elements want well under 1 Hz - the "
+            "default is %s Hz. Correct for a DC pump or fan.",
+            actor_id,
+            hz,
+            DEFAULT_FREQUENCY,
+        )
+    return hz
+
+
 def _clamp_duty(value):
     """A duty percentage a GPIO actor can actually use. Never raises.
 
@@ -348,7 +411,21 @@ class GPIOActor(CBPiActor):
                 27,
             ],
         ),
-        Property.Number(label="Frequency", configurable=True),
+        Property.Number(
+            label="Frequency",
+            configurable=True,
+            default_value=DEFAULT_FREQUENCY,
+            description=(
+                "PWM frequency in Hz. For a mains heating element on an SSR "
+                "this belongs well below 1 Hz - the default 0.5 Hz is a two "
+                "second period. A zero-cross SSR can only switch at a mains "
+                "zero crossing, so a fast carrier quantises the duty coarsely "
+                "and makes it wander; a slow one gives fine resolution and far "
+                "less switching. The vessel's thermal mass makes a two second "
+                "period invisible either way. Higher values are intended for a "
+                "DC pump or fan, not an element."
+            ),
+        ),
         Property.Select(
             label="Inverted",
             options=["Yes", "No"],
@@ -387,7 +464,9 @@ class GPIOPWMActor(CBPiActor):
     async def on_start(self):
         self.gpio = self.props.get("GPIO", None)
         self.inverted = self.props.get("Inverted", "No")
-        self.frequency = self.props.get("Frequency", 0.5)
+        self.frequency = _parse_frequency(
+            self.props.get("Frequency", DEFAULT_FREQUENCY), self.id
+        )
         if self.gpio is not None:
             GPIO.setup(self.gpio, GPIO.OUT)
             if self.inverted == "No":
