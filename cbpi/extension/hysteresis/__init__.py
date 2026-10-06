@@ -32,6 +32,35 @@ class Hysteresis(CBPiKettleLogic):
     # not driven against a stale number for any meaningful part of a rest.
     MAX_SENSOR_AGE = 30
 
+    @staticmethod
+    def _finite(value):
+        """The number in `value`, or None if it is not a usable temperature.
+
+        float() accepts "nan" and "inf" happily, so a non-finite reading used
+        to arrive here looking like any other float. That is not a harmless
+        oddity in a comparison-driven controller: every comparison against NaN
+        is False, so with a NaN reading
+
+            if sensor_value < target_temp - offset_on:      -> False
+            elif sensor_value >= target_temp - offset_off:  -> False
+
+        neither branch runs, no command is issued, and the element simply stays
+        in whatever state it was already in. Worse, the no-reading path above
+        never runs either, so sensor_failures resets to zero and the controller
+        goes on believing it has a good reading.
+
+        Measured on an already-energized element: a NaN reading, a NaN target
+        and an infinite target each produced NO actuator command at all, with
+        the element left on indefinitely.
+        """
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric != numeric or numeric in (float("inf"), float("-inf")):
+            return None
+        return numeric
+
     def _read_temp(self, sensor_id):
         """Current temperature, or None if it cannot be trusted.
 
@@ -47,8 +76,10 @@ class Hysteresis(CBPiKettleLogic):
         """
         try:
             state = self.get_sensor_value(sensor_id)
-            value = float(state.get("value"))
+            value = self._finite(state.get("value"))
         except (AttributeError, TypeError, ValueError):
+            return None
+        if value is None:
             return None
 
         age = state.get("age")
@@ -70,11 +101,30 @@ class Hysteresis(CBPiKettleLogic):
 
     async def run(self):
         try:
-            self.offset_on = float(self.props.get("OffsetOn", 0))
-            self.offset_off = float(self.props.get("OffsetOff", 0))
+            # Resolve the actuator before anything that can fail.
+            #
+            # float(self.props.get("OffsetOn", 0)) raises on a malformed
+            # offset, and the finally below commands self.heater - which would
+            # not exist yet. Same correction as PIDHerms and PIDBoil: resolving
+            # the actuator is what makes the cleanup able to act at all.
             self.kettle = self.get_kettle(self.id)
             self.heater = self.kettle.heater
             heater = self.cbpi.actor.find_by_id(self.heater)
+
+            # Offsets go through the same finiteness check. A NaN offset is not
+            # a harmless configuration error: target_temp - nan is nan, so both
+            # comparisons below go False and the controller stops commanding
+            # the element entirely, exactly as a NaN reading would.
+            self.offset_on = self._finite(self.props.get("OffsetOn", 0))
+            self.offset_off = self._finite(self.props.get("OffsetOff", 0))
+            if self.offset_on is None or self.offset_off is None:
+                self.offset_on = 0 if self.offset_on is None else self.offset_on
+                self.offset_off = 0 if self.offset_off is None else self.offset_off
+                self.cbpi.notify(
+                    "{} config".format(getattr(self.kettle, "name", "Kettle")),
+                    "Hysteresis offset was not a usable number - using 0",
+                    NotificationType.WARNING,
+                )
             logging.info(
                 "Hysteresis {} {} {} {}".format(
                     self.offset_on, self.offset_off, self.id, self.heater
@@ -89,7 +139,11 @@ class Hysteresis(CBPiKettleLogic):
             while self.running == True:
 
                 sensor_value = self._read_temp(self.kettle.sensor)
-                target_temp = self.get_kettle_target_temp(self.id)
+                # The target gets the same treatment as the reading. A NaN or
+                # infinite setpoint makes every comparison below False, which
+                # leaves the element in whatever state it was already in with
+                # no command issued and no fault raised.
+                target_temp = self._finite(self.get_kettle_target_temp(self.id))
                 try:
                     heater_state = heater.instance.state
                 except:
@@ -104,9 +158,14 @@ class Hysteresis(CBPiKettleLogic):
                         await self.actor_off(self.heater)
                     if sensor_failures >= self.MAX_SENSOR_FAILURES and not fault_notified:
                         fault_notified = True
+                        reason = (
+                            "No temperature reading"
+                            if sensor_value is None
+                            else "Target temperature is not a usable number"
+                        )
                         self.cbpi.notify(
                             "{} sensor".format(getattr(self.kettle, "name", "Kettle")),
-                            "No temperature reading - heating suspended until it returns",
+                            "{} - heating suspended until it returns".format(reason),
                             NotificationType.ERROR,
                         )
                     await asyncio.sleep(1)
