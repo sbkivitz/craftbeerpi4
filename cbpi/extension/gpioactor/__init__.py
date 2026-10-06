@@ -130,6 +130,42 @@ def _parse_duty(value):
     return max(0, min(100, numeric))
 
 
+def _warn_unchanged(actor):
+    """Say that a Set Power carrying no value changed nothing.
+
+    An omitted optional parameter legitimately means "leave the level alone",
+    so this is not an error and must not raise - refusing it would break a
+    valid request. But it must not pass silently either: submitting the dialog
+    with the field blank returns success and changes nothing, so the brewer
+    believes they commanded a level while the element sits where it was.
+
+    Notified as well as logged. The log is the right record and the wrong
+    channel - nobody reads journalctl with a mash tun in front of them, and
+    this is exactly the moment someone thinks they just changed something.
+
+    NotificationType is imported here rather than at module scope because
+    `from cbpi.api import *` does NOT export it - checked, not assumed. A
+    module-level import would have been an ImportError at plugin load, taking
+    both GPIO actors with it.
+    """
+    level = getattr(actor, "power", None)
+    actor_id = getattr(actor, "id", "the actor")
+    message = (
+        "Set Power was sent with no value, so {} was left at {}. Enter a "
+        "number from 0 to 100 to change it.".format(
+            actor_id,
+            "its current level" if level is None else "{}%".format(level),
+        )
+    )
+    logger.warning("ACTOR %s - %s", actor_id, message)
+    try:
+        from cbpi.api.dataclasses import NotificationType
+
+        actor.cbpi.notify("Set Power", message, NotificationType.WARNING)
+    except Exception:  # noqa: BLE001 - a notice must never break a command
+        pass
+
+
 def _commanded_duty(actor, Power):
     """Resolve a Set Power command, or refuse it.
 
@@ -225,8 +261,27 @@ class GPIOActor(CBPiActor):
         # stray word into 0, which is right for a control loop and wrong for a
         # command: the element would move and the brewer would be told the
         # level they sent had been applied.
+        #
+        # A request carrying NO value is not an error - an omitted optional
+        # parameter legitimately means "leave the level alone" - but it must
+        # not pass silently either. Submitting the dialog with the field blank
+        # returns success and changes nothing, so the brewer believes they
+        # commanded a level and the element is still wherever it was. Said out
+        # loud rather than inferred.
+        if Power is None:
+            self._tell_unchanged()
         self.power = _commanded_duty(self, Power)
         await self.set_power(self.power)
+
+    def _tell_unchanged(self):
+        """Report a Set Power that carried no value, rather than succeeding mutely.
+
+        Notification as well as a log line. The log is the right record and the
+        wrong channel: nobody reads journalctl with a mash tun in front of
+        them, and this is precisely the moment a brewer thinks they have just
+        changed something.
+        """
+        _warn_unchanged(self)
 
     def get_GPIO_state(self, state):
         # ON
@@ -458,6 +513,11 @@ class GPIOPWMActor(CBPiActor):
         # stray word into 0, which is right for a control loop and wrong for a
         # command: the element would move and the brewer would be told the
         # level they sent had been applied.
+        #
+        # A request carrying no value changes nothing, which is correct, but
+        # is reported rather than passing mutely - see _warn_unchanged.
+        if Power is None:
+            _warn_unchanged(self)
         self.power = _commanded_duty(self, Power)
         await self.set_power(self.power)
 
