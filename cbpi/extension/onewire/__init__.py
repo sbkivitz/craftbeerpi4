@@ -10,6 +10,19 @@ from aiohttp import web
 from cbpi.api import *
 from cbpi.api.dataclasses import NotificationAction, NotificationType
 
+# Publish cadence in seconds when a sensor's props carry no "Interval" key.
+#
+# This must stay equal to the Property.Select default_value below, and exists
+# so the two cannot drift apart again. They had: the Select was changed to 1
+# in April 2025 while the lookup kept the 60 it was given in March 2023, so a
+# sensor created in the UI published every second while one whose props lacked
+# the key published every minute. Worse, SensorController.expected_max_age()
+# falls back to a 30 s floor for a sensor that declares no interval, so the
+# 60 s sensor was stale by construction - is_fresh() answered False
+# permanently, and anything gated on freshness refused to run against a probe
+# that was working perfectly.
+DEFAULT_INTERVAL = 1
+
 
 def getSensors():
     try:
@@ -105,7 +118,7 @@ class ReadThread(threading.Thread):
         Property.Select(
             label="Interval",
             options=[1, 5, 10, 30, 60],
-            default_value=1,
+            default_value=DEFAULT_INTERVAL,
             description="Interval in Seconds",
         ),
         Property.Kettle(
@@ -142,10 +155,19 @@ class OneWire(CBPiSensor):
         # apart.
         self.value = None
 
+    def resolve_interval(self):
+        """Publish cadence in seconds, from props or the declared default.
+
+        Split out of start() so the fallback can be exercised without an
+        event loop or a cbpi instance - the divergence this guards against
+        was invisible precisely because nothing ever tested it.
+        """
+        return int(self.props.get("Interval", DEFAULT_INTERVAL))
+
     async def start(self):
         await super().start()
         self.name = self.props.get("Sensor")
-        self.interval = int(self.props.get("Interval", 60))
+        self.interval = self.resolve_interval()
         self.offset = float(self.props.get("offset", 0))
 
         self.reducedfrequency = float(self.props.get("ReducedLogging", 60))
