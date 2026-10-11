@@ -35,6 +35,48 @@ def getSensors():
         return []
 
 
+def _scratchpad_is_empty(crc_line):
+    """True when the DS18B20 returned nine zero bytes.
+
+    An unpowered or otherwise unresponsive part answers with an all-zero
+    scratchpad. The driver computes the CRC over those nine bytes, gets 0x00,
+    compares it against the stored CRC byte which is also 0x00, and reports
+    YES. **An all-zero scratchpad passes CRC**, and `t=0` then parses to a
+    confident 0 C.
+
+    That is not a theoretical concern. On 11 Oct a failing probe branch on the
+    rig did exactly this to two physically healthy probes: both reported 0 C,
+    both passed CRC, and both published with a fresh age, because the read
+    "succeeded" and refreshed last_success. Every staleness protection
+    downstream keys off last_success, so all of them were satisfied by a
+    reading that was pure fiction. On a Fahrenheit rig that is 32 F on every
+    probe at once - and a kettle logic reading 32 F against a mash target sees
+    a vessel 120 F cold and calls for full power.
+
+    A genuine 0 C reading is NOT rejected by this. Real scratchpads carry the
+    alarm registers, the configuration byte and the reserved bytes in positions
+    2 through 7, and those are non-zero on any responding part. Captured from
+    the rig while healthy:
+
+        BK    17 02 4b 46 7f ff 0c 10 36   t=33437
+        Mash  0c 01 4b 46 7f ff 0c 10 ca   t=16750
+
+    A probe actually sitting in ice water reads 00 00 4b 46 7f ff 0c 10 - the
+    temperature bytes zero, everything else intact. Only a part that never
+    answered returns nine zeros.
+    """
+    fields = crc_line.split(" ")
+    if len(fields) < 9:
+        return False
+    data = fields[:9]
+    try:
+        return all(int(b, 16) == 0 for b in data)
+    except ValueError:
+        # Not hex where hex was expected. Let the normal path deal with it
+        # rather than inventing a verdict from a line we cannot parse.
+        return False
+
+
 class ReadThread(threading.Thread):
 
     value = 0
@@ -67,15 +109,27 @@ class ReadThread(threading.Thread):
                     "/sys/bus/w1/devices/%s/w1_slave" % self.sensor_name, "r"
                 ) as content_file:
                     content = content_file.read()
-                    if content.split("\n")[0].split(" ")[11] == "YES":
-                        temp = float(content.split("=")[-1]) / 1000  # temp in Celcius
-                        self.value = temp
-                        self.last_success = time.time()
-                        if self.failing:
-                            self.failing = False
-                            logging.info(
-                                "OneWire %s: reads recovered", self.sensor_name
+                    crc_line = content.split("\n")[0]
+                    if crc_line.split(" ")[11] == "YES":
+                        if _scratchpad_is_empty(crc_line):
+                            # Passed CRC and still means nothing - see
+                            # _scratchpad_is_empty. Treated exactly like a CRC
+                            # failure: the value is not taken and last_success
+                            # is NOT advanced, so the reading ages and every
+                            # staleness check downstream can finally see it.
+                            self._note_failure(
+                                "all-zero scratchpad: the part answered with "
+                                "nothing, which passes CRC and parses as 0 C"
                             )
+                        else:
+                            temp = float(content.split("=")[-1]) / 1000  # temp in Celcius
+                            self.value = temp
+                            self.last_success = time.time()
+                            if self.failing:
+                                self.failing = False
+                                logging.info(
+                                    "OneWire %s: reads recovered", self.sensor_name
+                                )
                     else:
                         # CRC failed. Keeping the previous value is fine for a single
                         # bad sample, but last_success is deliberately not advanced,
