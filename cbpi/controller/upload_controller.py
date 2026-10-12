@@ -39,6 +39,24 @@ LOCAL_API_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5)
 
 
 class UploadController:
+    # Fallback step temperatures, in the unit the system is configured for.
+    #
+    # These used to be bare numbers inline - `config.get("steps_boil_temp", 98)`
+    # and `config.get("steps_cooldown_temp", 25)` - which is the Interval defect
+    # a third time (see RIG-NOTES 24). ConfigUpdate seeds these settings with
+    # UNIT-AWARE values, 99 C / 212 F for boil and 20 C / 68 F for cooldown, so
+    # the two disagreed in both directions:
+    #
+    #   * On a Fahrenheit rig with the setting absent, the importer built a boil
+    #     step targeting 98 F. A kettle cannot boil at 98 F, so the step either
+    #     never starts its timer or runs the whole boil far below boiling - and
+    #     nothing reports an error, because 98 is a perfectly valid number.
+    #   * Even in Celsius they disagreed: 98 against 99, and 25 against 20.
+    #
+    # A fallback that contradicts the value the application seeds is not a
+    # fallback, it is a second configuration. One definition, unit-aware.
+    DEFAULT_BOIL_TEMP = {"C": 99, "F": 212}
+    DEFAULT_COOLDOWN_TEMP = {"C": 20, "F": 68}
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
@@ -1692,9 +1710,14 @@ class UploadController:
         self.whirlpool = "Waitstep"
         self.cooldown = self.cbpi.config.get("steps_cooldown", "WaitStep")
         # get default boil temp from settings
-        self.BoilTemp = self.cbpi.config.get("steps_boil_temp", 98)
+        self.BoilTemp = self.cbpi.config.get(
+            "steps_boil_temp", self.DEFAULT_BOIL_TEMP.get(self.TEMP_UNIT, 99)
+        )
         # get default cooldown temp alarm setting
-        self.CoolDownTemp = self.cbpi.config.get("steps_cooldown_temp", 25)
+        self.CoolDownTemp = self.cbpi.config.get(
+            "steps_cooldown_temp",
+            self.DEFAULT_COOLDOWN_TEMP.get(self.TEMP_UNIT, 20),
+        )
         self.CoolDownActor = self.cbpi.config.get("steps_cooldown_actor", None)
         # get default Kettle from Settings
         self.id = self.cbpi.config.get("MASH_TUN", None)
