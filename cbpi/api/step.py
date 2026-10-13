@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import time
 from abc import abstractmethod
 
@@ -79,7 +80,10 @@ class _TargetArrival:
             goal = float(target)
         except (TypeError, ValueError):
             return False
-        if value != value or goal != goal:  # NaN never arrives
+        # Only a finite reading arrives. NaN never compares true, but -inf
+        # is below every target: a probe fault read as -inf completed a
+        # cooling step on the spot (DEFECTS F6).
+        if not (math.isfinite(value) and math.isfinite(goal)):
             return False
         return value >= goal - self._target_tolerance()
 
@@ -98,9 +102,26 @@ class _TargetArrival:
             goal = float(target)
         except (TypeError, ValueError):
             return False
-        if value != value or goal != goal:  # NaN never arrives
+        # Only a finite reading arrives. NaN never compares true, but -inf
+        # is below every target: a probe fault read as -inf completed a
+        # cooling step on the spot (DEFECTS F6).
+        if not (math.isfinite(value) and math.isfinite(goal)):
             return False
         return value <= goal + self._target_tolerance()
+
+    @staticmethod
+    def reading_usable(value):
+        """A reading a step can start from: a finite number below the 900 sentinel.
+
+        The fermentation steps waited with `value > 900`, which raises on a
+        None - the reading before a probe's first sample - and killed the step
+        before it began (DEFECTS F6). NaN and infinities wait too.
+        """
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(v) and v < 900
 
     def _target_tolerance(self):
         """How close counts as arrived, in the configured unit."""

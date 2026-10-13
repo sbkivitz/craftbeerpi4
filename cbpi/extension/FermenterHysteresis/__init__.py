@@ -46,11 +46,20 @@ class FermenterAutostart(CBPiExtension):
                 if item.instance is None or not item.instance.state:
                     await self.controller.start_logic(item.id)
                     logging.info("Autostart: temperature control on for %s", item.name)
-                if (item.id in getattr(self.controller, "interrupted", ())
-                        and self.controller._find_by_status(item.steps, StepState.STOP)
-                        is not None):
-                    await self.controller.start(item.id)
-                    logging.info("Autostart: resumed the profile of %s", item.name)
+                running = getattr(self.controller, "interrupted", {}).get(item.id)
+                if running is not None:
+                    # start() resumes the FIRST stopped step. Only let it if
+                    # that is the one that was running - a paused step ahead of
+                    # it would otherwise be resumed instead (DEFECTS F7).
+                    first = self.controller._find_by_status(item.steps, StepState.STOP)
+                    if first is not None and first.id == running:
+                        await self.controller.start(item.id)
+                        logging.info("Autostart: resumed the profile of %s", item.name)
+                    else:
+                        logging.warning(
+                            "Autostart: %s was running step %s, but a paused step "
+                            "comes before it - not resuming the profile. "
+                            "Temperature control is on.", item.name, running)
             except Exception as e:  # noqa: BLE001 - one fermenter must not stop the rest
                 logging.error("Autostart failed for fermenter %s: %s",
                               getattr(item, "name", "?"), e)
