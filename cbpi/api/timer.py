@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import time
 
@@ -26,6 +27,7 @@ class Timer(object):
         self.end_time = None
         self._deadline = None
         self._started = False
+        self._update_error = None
 
     def done(self, task):
         # A cancelled timer has not finished, it was stopped. Firing the completion
@@ -69,7 +71,19 @@ class Timer(object):
                 remaining = self._deadline - clock.now()
                 self.count = max(0, int(round(remaining, 0)))
                 if self._update is not None:
-                    await self._update(self, self.count)
+                    try:
+                        await self._update(self, self.count)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:  # noqa: BLE001
+                        # A display callback must never end a rest. Raising
+                        # here ended _job(), and done() fires the completion
+                        # callback for any end that is not a cancellation -
+                        # so one failed push_update finished a fourteen-day
+                        # fermentation rest on the spot (DEFECTS F13).
+                        if getattr(self, "_update_error", None) != repr(e):
+                            self._update_error = repr(e)
+                            logging.warning("Timer display update failed: %s", e)
                 if remaining <= 0:
                     return
                 # Whichever comes first: the next time the display should tick,

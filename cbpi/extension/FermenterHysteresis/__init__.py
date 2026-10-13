@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import math
+import time
 
 from cbpi.api import *
+from cbpi.api.dataclasses import NotificationType
 from cbpi.api.step import StepState
 from cbpi.controller.fermentation_controller import FermentationController
 
@@ -64,6 +67,445 @@ class FermenterAutostart(CBPiExtension):
                 logging.error("Autostart failed for fermenter %s: %s",
                               getattr(item, "name", "?"), e)
 
+
+def _finite(value):
+    """`value` as a float, or None when it is not a finite number."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+class _GuardedHysteresis:
+    """Hysteresis temperature control that survives what an unattended fermenter meets.
+
+    Both bundled logics read the sensor with float(get_sensor_value(id)["value"])
+    and the target with float() every second, and resolved the fermenter, its
+    actors and its offsets once, at start. So:
+
+      - a missing sensor, a probe that stopped updating, a "nan", a target of
+        None: each raised, the task ended, and temperature control with it,
+        while the switch went on showing it on (DEFECTS F8, F9);
+      - a DS18B20 that browns out reads 85.0 C until it is next read, and this
+        cooled against "85 C" flat out (F9);
+      - an edited offset did nothing until a restart, and a cooler moved to
+        another actor left the old one running (F10);
+      - nothing stopped the heater and cooler running at once (F11).
+
+    Now every tick re-reads the fermenter - sensor, actors, target, offsets -
+    and acts only on a reading that is a finite number, fresh by the sensor's
+    own cadence, and a temperature a fermenter can have. Anything else
+    switches heating and cooling off and keeps watching. The brewer is told
+    once a fault has lasted FAULT_NOTIFY_AFTER ticks, reminded every
+    FAULT_REMIND_EVERY seconds while it lasts, and told when control resumes,
+    which it does by itself the moment the reading is usable again.
+    """
+
+    # Consecutive bad ticks before anyone is told. At one tick a second this
+    # rides out a single glitch without crying wolf.
+    FAULT_NOTIFY_AFTER = 5
+
+    # Wall-clock seconds between reminders while a fault lasts. A human
+    # cadence, not a brewing one: an accelerated twin should not page anybody
+    # faster than a real fermenter would.
+    FAULT_REMIND_EVERY = 3600
+
+    # Age limit for a sensor that does not declare its own (see
+    # SensorController.expected_max_age, which normally does).
+    DEFAULT_MAX_AGE = 30
+
+    # Temperatures a fermenter, or its glycol, can actually have, in C. Outside
+    # this is a probe fault, not a beer: a DS18B20 reads 85.0 at power-on and
+    # some drivers report -127 for a missing one; 900+ is CraftBeerPi's own
+    # "no reading" sentinel. Converted when the server runs in F.
+    PLAUSIBLE_C = (-30.0, 80.0)
+
+    # A driver that has not finished switching an actor in this long is not
+    # going to. Without a bound, one hung relay call froze the whole loop.
+    ACTOR_TIMEOUT = 10
+
+    # Used when an offset is left blank, as the original logic did.
+    OFFSET_DEFAULTS = (
+        ("HeaterOffsetOn", 0.2),
+        ("HeaterOffsetOff", 0.0),
+        ("CoolerOffsetOn", 0.2),
+        ("CoolerOffsetOff", 0.0),
+    )
+
+    # Actors this logic drives, switched off when it stops.
+    ROLES = ("heater", "cooler")
+
+    # Whether heater and cooler are driven at HeaterMaxPower / CoolerMaxPower.
+    USES_MAX_POWER = False
+
+    def _guard_reset(self):
+        """Per-run state. Set here rather than in __init__, so a restarted run starts clean."""
+        self._alerts = {}
+        self._warned = set()
+        self._assigned = None
+        self._deferred = set()
+        self._tick_error = None
+        self._valve_seen = None
+        self._missing_ticks = 0
+        self.heater = self.cooler = None
+        self.valve = None
+
+    # --- reading the world ---------------------------------------------
+
+    def _live_props(self, fermenter):
+        # The fermenter's, not self.props: FermentationController.update()
+        # replaces fermenter.props, and self.props is the object this logic
+        # was started with (DEFECTS F10).
+        props = getattr(fermenter, "props", None)
+        return props if props is not None else (self.props or {})
+
+    def _unit(self):
+        try:
+            unit = self.cbpi.config.get("TEMP_UNIT", "C")
+        except Exception:  # noqa: BLE001
+            unit = "C"
+        return "F" if str(unit).strip().upper().startswith("F") else "C"
+
+    def _plausible(self):
+        low, high = self.PLAUSIBLE_C
+        if self._unit() == "F":
+            return low * 9 / 5 + 32, high * 9 / 5 + 32
+        return low, high
+
+    def _sensor_label(self, sensor_id):
+        try:
+            return self.get_sensor(sensor_id).name or sensor_id
+        except Exception:  # noqa: BLE001
+            return sensor_id
+
+    def _fresh_value(self, sensor_id, what):
+        """(value, None) for a finite, fresh reading, else (None, (kind, why))."""
+        if not sensor_id:
+            return None, ("unassigned", "No {} sensor is assigned".format(what))
+        try:
+            state = self.get_sensor_value(sensor_id)
+        except Exception:  # noqa: BLE001
+            state = None
+        if not isinstance(state, dict):
+            return None, ("silent", "{} sensor {} is not reporting".format(
+                what.capitalize(), self._sensor_label(sensor_id)))
+        raw = state.get("value")
+        value = _finite(raw)
+        if value is None:
+            return None, ("value", "{} sensor reads {!r}, not a number".format(
+                what.capitalize(), raw))
+        age = _finite(state.get("age"))
+        limit = _finite(state.get("max_age")) or self.DEFAULT_MAX_AGE
+        if age is not None and age > limit:
+            return None, ("stale", "{} sensor has not updated for {:.0f}s".format(
+                what.capitalize(), age))
+        return value, None
+
+    def _check_temperature(self, sensor_id):
+        value, problem = self._fresh_value(sensor_id, "temperature")
+        if problem is not None:
+            return None, problem
+        low, high = self._plausible()
+        if not low <= value <= high:
+            return None, ("implausible",
+                          "Temperature sensor reads {:.1f}{} - no fermenter can be "
+                          "that, so the probe has failed".format(value, self._unit()))
+        return value, None
+
+    def _check_target(self):
+        try:
+            raw = self.get_fermenter_target_temp(self.id)
+        except Exception:  # noqa: BLE001
+            raw = None
+        target = _finite(raw)
+        if target is None:
+            return None, ("target", "Target temperature {!r} is not a number".format(raw))
+        low, high = self._plausible()
+        if not low <= target <= high:
+            return None, ("target", "Target temperature {:.1f}{} is outside "
+                                    "{:.0f} to {:.0f}".format(target, self._unit(), low, high))
+        return target, None
+
+    def _warn_once(self, key, message):
+        if key in self._warned:
+            return
+        self._warned.add(key)
+        logging.warning("Fermenter %s: %s", self._fermenter_name(), message)
+        self._notify("{} configuration".format(self._fermenter_name()), message,
+                     NotificationType.WARNING)
+
+    def _number(self, props, name, default):
+        """A numeric property; blank means the default, nonsense warns and uses it."""
+        try:
+            raw = props.get(name, None)
+        except Exception:  # noqa: BLE001
+            raw = None
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return default
+        value = _finite(raw)
+        if value is None:
+            self._warn_once(("prop", name, repr(raw)),
+                            "{} is {!r}, not a number - using {}".format(name, raw, default))
+            return default
+        return value
+
+    def _offsets(self, props, heater, cooler):
+        h_on, h_off, c_on, c_off = (self._number(props, name, default)
+                                    for name, default in self.OFFSET_DEFAULTS)
+        if heater and h_on < h_off:
+            self._warn_once(("inverted", "heater", h_on, h_off),
+                            "HeaterOffsetOn ({:g}) is below HeaterOffsetOff ({:g}): the "
+                            "heater will switch on and off every second near target".format(h_on, h_off))
+        if cooler and c_on < c_off:
+            self._warn_once(("inverted", "cooler", c_on, c_off),
+                            "CoolerOffsetOn ({:g}) is below CoolerOffsetOff ({:g}): the "
+                            "cooler will switch on and off every second near target".format(c_on, c_off))
+        if heater and cooler and (h_off + c_on < 0 or c_off + h_on < 0):
+            self._warn_once(("overlap", h_on, h_off, c_on, c_off),
+                            "The heater and cooler offsets overlap, so one would start "
+                            "while the other runs. They never run together: the one "
+                            "running finishes first.")
+        return h_on, h_off, c_on, c_off
+
+    def _max_power(self, props, name):
+        if not self.USES_MAX_POWER:
+            return None
+        value = self._number(props, name, 100)
+        power = int(min(100, max(0, value)))
+        if not 0 <= value <= 100:
+            self._warn_once(("power", name, value),
+                            "{} is {:g}% - using {}%".format(name, value, power))
+        return power
+
+    # --- actors ----------------------------------------------------------
+
+    def _find_actor(self, actor_id):
+        try:
+            return self.cbpi.actor.find_by_id(actor_id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _actor(self, actor_id, role):
+        """The assigned actor if it can be driven; None if unassigned or missing."""
+        if not actor_id:
+            self._clear_alert(("actor", role), None)
+            return None
+        actor = self._find_actor(actor_id)
+        if actor is None or getattr(actor, "instance", None) is None:
+            self._raise_alert(("actor", role),
+                              ("missing", "The {} ({}) is missing or its driver is not "
+                                          "running".format(role, actor_id)),
+                              "it cannot be switched")
+            return None
+        self._clear_alert(("actor", role), "The {} can be switched again".format(role))
+        return actor
+
+    @staticmethod
+    def _is_on(actor):
+        try:
+            return bool(actor.instance.state)
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _switch(self, actor_id, on, power=None):
+        try:
+            if not on:
+                await asyncio.wait_for(self.actor_off(actor_id), self.ACTOR_TIMEOUT)
+            elif self.USES_MAX_POWER:
+                await asyncio.wait_for(self.actor_on(actor_id, power, power), self.ACTOR_TIMEOUT)
+            else:
+                await asyncio.wait_for(self.actor_on(actor_id), self.ACTOR_TIMEOUT)
+        except asyncio.TimeoutError:
+            logging.error("Fermenter %s: switching %s %s did not finish within %ss",
+                          self._fermenter_name(), actor_id, "on" if on else "off",
+                          self.ACTOR_TIMEOUT)
+
+    async def _follow_reassignment(self, heater, cooler):
+        """An actor that stopped being this fermenter's heater or cooler is switched off."""
+        current = {"heater": heater, "cooler": cooler}
+        previous, self._assigned = self._assigned, current
+        self.heater, self.cooler = heater, cooler
+        if previous is None:
+            return
+        for role, old in previous.items():
+            if old and old != current[role]:
+                logging.info("Fermenter %s: %s changed from %s to %s - switching %s off",
+                             self._fermenter_name(), role, old, current[role], old)
+                await self._switch(old, False)
+
+    async def _release_all(self):
+        """Switch off everything this logic drives, as currently assigned."""
+        try:
+            fermenter = self.get_fermenter(self.id)
+        except Exception:  # noqa: BLE001
+            fermenter = None
+        source = fermenter if fermenter is not None else self
+        for actor_id in dict.fromkeys(getattr(source, role, None) for role in self.ROLES):
+            if actor_id:
+                await self._switch(actor_id, False)
+
+    # --- telling the brewer ------------------------------------------------
+
+    def _notify(self, title, message, kind):
+        try:
+            self.cbpi.notify(title, message, kind)
+        except Exception as e:  # noqa: BLE001 - telling must never break controlling
+            logging.error("Could not notify %r: %s", title, e)
+
+    def _alert_title(self, key):
+        name = self._fermenter_name()
+        if key == "control":
+            return "{} temperature control".format(name)
+        if key == "pressure":
+            return "{} spunding".format(name)
+        return "{} {}".format(name, key[1] if isinstance(key, tuple) else key)
+
+    def _raise_alert(self, key, problem, consequence):
+        kind, text = problem
+        alert = self._alerts.get(key)
+        if alert is None or alert["kind"] != kind:
+            # INFO, not WARNING: with NOTIFY_ON_ERROR every warning is a
+            # notification, and a one-tick glitch is not worth one.
+            logging.info("Fermenter %s: %s - %s", self._fermenter_name(), text, consequence)
+            if alert is None:
+                alert = self._alerts[key] = {"ticks": 0, "notified_at": None}
+            alert["kind"] = kind
+        alert["ticks"] += 1
+        alert["text"] = text
+        now = time.monotonic()
+        due = alert["notified_at"] is None or now - alert["notified_at"] >= self.FAULT_REMIND_EVERY
+        if alert["ticks"] >= self.FAULT_NOTIFY_AFTER and due:
+            alert["notified_at"] = now
+            message = "{} - {}".format(text, consequence)
+            logging.error("Fermenter %s: %s", self._fermenter_name(), message)
+            self._notify(self._alert_title(key), message, NotificationType.ERROR)
+
+    def _clear_alert(self, key, message):
+        alert = self._alerts.pop(key, None)
+        if alert is None:
+            return
+        if alert["notified_at"] is not None and message:
+            logging.info("Fermenter %s: %s", self._fermenter_name(), message)
+            self._notify(self._alert_title(key), message, NotificationType.INFO)
+        else:
+            logging.info("Fermenter %s: recovered after %d tick(s) (%s)",
+                         self._fermenter_name(), alert["ticks"], alert.get("text"))
+
+    # --- the loop ----------------------------------------------------------
+
+    async def _suspend(self, problem):
+        """No trustworthy reading or target: heating and cooling off, and say so."""
+        entering = "control" not in self._alerts
+        for actor_id in dict.fromkeys((self.heater, self.cooler)):
+            # Unconditionally on entry - the state flag may be the thing that
+            # is wrong - and then whenever something has switched it back on.
+            if actor_id and (entering or self._is_on(self._find_actor(actor_id))):
+                await self._switch(actor_id, False)
+        self._raise_alert("control", problem, "heating and cooling are off until it is fixed")
+
+    async def _fermenter_gone(self):
+        """No fermenter by this id. Off at once; given up only once it has stayed gone.
+
+        FermentationController.delete() stops the logic itself, so this is the
+        fallback - and a lookup that misses once is not proof of a deletion.
+        """
+        for actor_id in dict.fromkeys(getattr(self, role, None) for role in self.ROLES):
+            if actor_id and (self._missing_ticks == 0 or self._is_on(self._find_actor(actor_id))):
+                await self._switch(actor_id, False)
+        self._missing_ticks += 1
+        if self._missing_ticks < self.FAULT_NOTIFY_AFTER:
+            return
+        logging.warning("Fermenter %s no longer exists - its temperature control stops", self.id)
+        self.stop_requested = True
+        self.running = False
+        self.state = False
+
+    def _defer(self, role, why):
+        if role not in self._deferred:
+            logging.info("Fermenter %s: not starting the %s - %s",
+                         self._fermenter_name(), role, why)
+        self._deferred_now.add(role)
+
+    async def _temperature_tick(self):
+        self._deferred_now = set()
+        fermenter = self.get_fermenter(self.id)
+        if fermenter is None:
+            await self._fermenter_gone()
+            return
+        self._missing_ticks = 0
+        self.fermenter = fermenter
+        props = self._live_props(fermenter)
+        heater = getattr(fermenter, "heater", None) or None
+        cooler = getattr(fermenter, "cooler", None) or None
+        await self._follow_reassignment(heater, cooler)
+
+        if heater is not None and heater == cooler:
+            await self._suspend(("config", "The same actor is set as both heater and cooler"))
+            return
+        reading, problem = self._check_temperature(getattr(fermenter, "sensor", None))
+        if problem is None:
+            target, problem = self._check_target()
+        if problem is not None:
+            await self._suspend(problem)
+            return
+        self._clear_alert("control", "Temperature reading is usable again - control resumed")
+
+        h_on, h_off, c_on, c_off = self._offsets(props, heater, cooler)
+        heater_actor = self._actor(heater, "heater")
+        cooler_actor = self._actor(cooler, "cooler")
+        heater_on = self._is_on(heater_actor)
+        cooler_on = self._is_on(cooler_actor)
+        if heater_on and cooler_on:
+            # Both running - switched by hand, or left so by an earlier
+            # configuration. Never leave them fighting: both off, and the rule
+            # decides afresh next tick.
+            logging.info("Fermenter %s: heater and cooler were both on - switching both off",
+                         self._fermenter_name())
+            await self._switch(heater, False)
+            await self._switch(cooler, False)
+            return
+        heating = heater_on
+
+        # The rule itself is unchanged - the same comparisons, in the same
+        # order, against the state read at the top of the tick. What is new is
+        # that neither actor is started while the other runs (DEFECTS F11).
+        if heater_actor is not None:
+            if reading + h_on <= target and not heater_on:
+                if cooler_on:
+                    self._defer("heater", "the cooler is still running")
+                else:
+                    await self._switch(heater, True, self._max_power(props, "HeaterMaxPower"))
+                    heating = True
+            if reading + h_off >= target and heater_on:
+                await self._switch(heater, False)
+                heating = False
+        if cooler_actor is not None:
+            if reading >= c_on + target and not cooler_on:
+                if heating:
+                    self._defer("cooler", "the heater is still running")
+                else:
+                    await self._switch(cooler, True, self._max_power(props, "CoolerMaxPower"))
+            if reading <= c_off + target and cooler_on:
+                await self._switch(cooler, False)
+        self._deferred = self._deferred_now
+        self._tick_error = None
+
+    async def _temperature_loop(self):
+        while self.running:
+            try:
+                await self._temperature_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - a bad tick must not end control
+                if self._tick_error != repr(e):
+                    self._tick_error = repr(e)
+                    logging.error("Fermenter %s: temperature control error",
+                                  self._fermenter_name(), exc_info=e)
+                await self._suspend(("error", "Temperature control error: {}".format(e)))
+            await asyncio.sleep(1)
+
+
 @parameters(
     [
         Property.Number(
@@ -106,75 +548,18 @@ class FermenterAutostart(CBPiExtension):
         ),
     ]
 )
-class FermenterHysteresis(CBPiFermenterLogic):
+class FermenterHysteresis(_GuardedHysteresis, CBPiFermenterLogic):
+
+    USES_MAX_POWER = True
 
     async def run(self):
+        self._guard_reset()
         try:
-            self.heater_offset_min = float(self.props.get("HeaterOffsetOn", 0.2))
-            self.heater_offset_max = float(self.props.get("HeaterOffsetOff", 0))
-            self.cooler_offset_min = float(self.props.get("CoolerOffsetOn", 0.2))
-            self.cooler_offset_max = float(self.props.get("CoolerOffsetOff", 0))
-            self.heater_max_power = int(self.props.get("HeaterMaxPower", 100))
-            self.cooler_max_power = int(self.props.get("CoolerMaxPower", 100))
-            self.heater_max_output = self.heater_max_power
-            self.cooler_max_output = self.cooler_max_power
-
-
-            self.fermenter = self.get_fermenter(self.id)
-            self.heater = self.fermenter.heater
-            self.cooler = self.fermenter.cooler
-
-            heater = self.cbpi.actor.find_by_id(self.heater)
-            cooler = self.cbpi.actor.find_by_id(self.cooler)
-
-            while self.running == True:
-
-                sensor_value = float(
-                    self.get_sensor_value(self.fermenter.sensor).get("value")
-                )
-                target_temp = float(self.get_fermenter_target_temp(self.id))
-
-                try:
-                    heater_state = heater.instance.state
-                except:
-                    heater_state = False
-                try:
-                    cooler_state = cooler.instance.state
-                except:
-                    cooler_state = False
-
-                if sensor_value + self.heater_offset_min <= target_temp:
-                    if self.heater and (heater_state == False):
-                        await self.actor_on(
-                            self.heater, self.heater_max_power, self.heater_max_output
-                        )
-
-                if sensor_value + self.heater_offset_max >= target_temp:
-                    if self.heater and (heater_state == True):
-                        await self.actor_off(self.heater)
-
-                if sensor_value >= self.cooler_offset_min + target_temp:
-                    if self.cooler and (cooler_state == False):
-                        await self.actor_on(
-                            self.cooler, self.cooler_max_power, self.cooler_max_output
-                        )
-
-                if sensor_value <= self.cooler_offset_max + target_temp:
-                    if self.cooler and (cooler_state == True):
-                        await self.actor_off(self.cooler)
-
-                await asyncio.sleep(1)
-
-        except asyncio.CancelledError as e:
-            pass
-        except Exception as e:
-            logging.error("Fermenter Hysteresis Error {}".format(e))
+            await self._temperature_loop()
         finally:
             self.running = False
-            if self.heater:
-                await self.actor_off(self.heater)
-            if self.cooler:
-                await self.actor_off(self.cooler)
+            await self._release_all()
+
 
 @parameters(
     [
@@ -191,12 +576,12 @@ class FermenterHysteresis(CBPiFermenterLogic):
         Property.Number(
             label="CoolerOffsetOn",
             configurable=True,
-            description="Offset as decimal number when the cooler is switched on. Should be greater then 'CoolerOffsetOff'. For example a value of 2 switches on the cooler if the current temperature is 2 degrees below the target temperature",
+            description="Offset as decimal number when the cooler is switched on. Should be greater then 'CoolerOffsetOff'. For example a value of 2 switches on the cooler if the current temperature is 2 degrees above the target temperature",
         ),
         Property.Number(
             label="CoolerOffsetOff",
             configurable=True,
-            description="Offset as decimal number when the cooler is switched off. Should be smaller then 'CoolerOffsetOn'. For example a value of 1 switches off the cooler if the current temperature is 1 degree below the target temperature",
+            description="Offset as decimal number when the cooler is switched off. Should be smaller then 'CoolerOffsetOn'. For example a value of 1 switches off the cooler if the current temperature is 1 degree above the target temperature",
         ),
         Property.Number(
             label="SpundingOffsetOpen",
@@ -223,112 +608,118 @@ class FermenterHysteresis(CBPiFermenterLogic):
         ),
     ]
 )
-class FermenterSpundingHysteresis(CBPiFermenterLogic):
-    # subroutine that controls pressure
+class FermenterSpundingHysteresis(_GuardedHysteresis, CBPiFermenterLogic):
+    """Temperature as FermenterHysteresis, plus a spunding valve held at target pressure.
+
+    run() awaited the pressure loop first and the temperature loop second, so
+    a temperature loop that died went unnoticed for as long as the pressure
+    loop lived - the heater and cooler frozen in whatever state they were in
+    (DEFECTS F12). Both loops are now watched together: either ending while
+    the logic should be running fails the run, which the base class restarts.
+    """
+
+    ROLES = ("heater", "cooler", "valve")
+
+    # Shortest valve pulse or pause. A zero from a hand-edited profile made the
+    # venting loop slam the solenoid as fast as the event loop would allow.
+    MIN_VALVE_SECONDS = 1
+
+    def _seconds(self, props, name, default):
+        return max(self.MIN_VALVE_SECONDS, int(self._number(props, name, default)))
+
+    def _check_pressure_target(self, fermenter):
+        raw = getattr(fermenter, "target_pressure", None)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return 0.0, None  # no target: not spunding
+        value = _finite(raw)
+        if value is None:
+            return None, ("target", "Target pressure {!r} is not a number".format(raw))
+        return value, None
+
+    async def _close_valve(self):
+        if self.valve and self._is_on(self._find_actor(self.valve)):
+            await self._switch(self.valve, False)
+
+    async def _pressure_tick(self):
+        fermenter = self.get_fermenter(self.id)
+        if fermenter is None:
+            return  # the temperature loop stops the logic
+        valve = getattr(fermenter, "valve", None) or None
+        if valve != self._valve_seen:
+            old, self._valve_seen = self._valve_seen, valve
+            if old:
+                await self._switch(old, False)
+            if valve:
+                await self._switch(valve, False)  # start closed, as it always did
+        self.valve = valve
+        sensor = getattr(fermenter, "pressure_sensor", None) or None
+        if valve is None or sensor is None:
+            self._clear_alert("pressure", None)
+            return
+
+        props = self._live_props(fermenter)
+        offset = self._number(props, "SpundingOffsetOpen", 0)
+        self.valverelease = self._seconds(props, "ValveRelease", 1)
+        self.pause = self._seconds(props, "Pause", 2)
+        target, problem = self._check_pressure_target(fermenter)
+        if problem is None:
+            pressure, problem = self._fresh_value(sensor, "pressure")
+        if problem is not None:
+            await self._close_valve()
+            self._raise_alert("pressure", problem, "the spunding valve is kept closed")
+            return
+        self._clear_alert("pressure", "Pressure reading is usable again - spunding resumed")
+        if target == 0 or pressure < target + offset:
+            return
+
+        while self.running and pressure >= target:
+            await self._switch(valve, True)
+            await asyncio.sleep(self.valverelease)
+            await self._switch(valve, False)
+            await asyncio.sleep(self.pause)
+            pressure, problem = self._fresh_value(sensor, "pressure")
+            if problem is None:
+                target, problem = self._check_pressure_target(fermenter)
+            if problem is not None or not target:
+                return  # the next tick raises the alert, valve already closed
+
     async def pressure_control(self):
-        self.spunding_offset = float(self.props.get("SpundingOffsetOpen", 0))
-        self.valverelease = int(self.props.get("ValveRelease", 1))
-        self.pause = int(self.props.get("Pause", 2))
-        if self.valve and self.fermenter.pressure_sensor:
-            # valve = self.cbpi.actor.find_by_id(self.valve)
-
-            await self.actor_off(self.valve)
-            # logging.info("Closing Spunding Valve")
-
-            while self.running:
-                target_pressure = float(self.fermenter.target_pressure)
-                current_pressure = float(
-                    self.get_sensor_value(self.fermenter.pressure_sensor).get("value")
-                )
-                # logging.info(f'Target: {target_pressure} | Current: {current_pressure}')
-                if (
-                    current_pressure >= (target_pressure + self.spunding_offset)
-                    and target_pressure != 0
-                ):
-                    while current_pressure >= target_pressure:
-                        await self.actor_on(self.valve)
-                        await asyncio.sleep(self.valverelease)
-                        await self.actor_off(self.valve)
-                        await asyncio.sleep(self.pause)
-                        current_pressure = float(
-                            self.get_sensor_value(self.fermenter.pressure_sensor).get(
-                                "value"
-                            )
-                        )
-                        # logging.info("Value higher than target: Spunding loop is running")
-
-                await asyncio.sleep(1)
-        else:
-            logging.info("No valve or pressure sensor defined")
-
-    async def temperature_control(self):
-        self.heater_offset_min = float(self.props.get("HeaterOffsetOn", 0.2))
-        self.heater_offset_max = float(self.props.get("HeaterOffsetOff", 0))
-        self.cooler_offset_min = float(self.props.get("CoolerOffsetOn", 0.2))
-        self.cooler_offset_max = float(self.props.get("CoolerOffsetOff", 0))
-
-        heater = self.cbpi.actor.find_by_id(self.heater)
-        cooler = self.cbpi.actor.find_by_id(self.cooler)
-
-        while self.running == True:
-
-            sensor_value = float(
-                self.get_sensor_value(self.fermenter.sensor).get("value")
-            )
-            target_temp = float(self.get_fermenter_target_temp(self.id))
-
+        while self.running:
             try:
-                heater_state = heater.instance.state
-            except:
-                heater_state = False
-            try:
-                cooler_state = cooler.instance.state
-            except:
-                cooler_state = False
-
-            if sensor_value + self.heater_offset_min <= target_temp:
-                if self.heater and (heater_state == False):
-                    await self.actor_on(self.heater)
-
-            if sensor_value + self.heater_offset_max >= target_temp:
-                if self.heater and (heater_state == True):
-                    await self.actor_off(self.heater)
-
-            if sensor_value >= self.cooler_offset_min + target_temp:
-                if self.cooler and (cooler_state == False):
-                    await self.actor_on(self.cooler)
-
-            if sensor_value <= self.cooler_offset_max + target_temp:
-                if self.cooler and (cooler_state == True):
-                    await self.actor_off(self.cooler)
-
+                await self._pressure_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - a bad tick must not end spunding
+                logging.error("Fermenter %s: pressure control error",
+                              self._fermenter_name(), exc_info=e)
+                await self._close_valve()
+                self._raise_alert("pressure", ("error", "Pressure control error: {}".format(e)),
+                                  "the spunding valve is kept closed")
             await asyncio.sleep(1)
 
+    async def temperature_control(self):
+        await self._temperature_loop()
+
     async def run(self):
+        self._guard_reset()
+        loops = [asyncio.create_task(self.temperature_control()),
+                 asyncio.create_task(self.pressure_control())]
         try:
-            self.fermenter = self.get_fermenter(self.id)
-            self.heater = self.fermenter.heater
-            self.cooler = self.fermenter.cooler
-            self.valve = self.fermenter.valve
-
-            pressure_controller = asyncio.create_task(self.pressure_control())
-            temperature_controller = asyncio.create_task(self.temperature_control())
-
-            await pressure_controller
-            await temperature_controller
-
-        except asyncio.CancelledError as e:
-            pass
-        except Exception as e:
-            logging.error("Fermenter Spunding Hysteresis Error {}".format(e))
+            done, _ = await asyncio.wait(loops, return_when=asyncio.FIRST_COMPLETED)
+            if self.running:
+                for task in done:
+                    if not task.cancelled() and task.exception() is not None:
+                        raise task.exception()
+                raise RuntimeError("a control loop ended while the logic was running")
         finally:
             self.running = False
-            if self.heater:
-                await self.actor_off(self.heater)
-            if self.cooler:
-                await self.actor_off(self.cooler)
-            if self.valve:
-                await self.actor_off(self.valve)
+            for task in loops:
+                task.cancel()
+            await asyncio.wait(loops)
+            for task in loops:
+                if not task.cancelled():
+                    task.exception()  # retrieved, so asyncio does not warn about it
+            await self._release_all()
 
 
 def setup(cbpi):

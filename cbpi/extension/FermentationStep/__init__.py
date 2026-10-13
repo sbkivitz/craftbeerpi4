@@ -74,7 +74,8 @@ class FermenterNotificationStep(CBPiFermentationStep):
         await self.push_update()
 
     async def on_stop(self):
-        await self.timer.stop()
+        if self.timer is not None:
+            await self.timer.stop()
         self.summary = ""
         await self.push_update()
 
@@ -146,26 +147,19 @@ class FermenterTargetTempStep(CBPiFermentationStep):
         await self.push_update()
 
     async def on_stop(self):
-        await self.timer.stop()
+        if self.timer is not None:
+            await self.timer.stop()
         self.summary = ""
         if self.AutoMode == True:
             await self.setAutoMode(False)
         await self.push_update()
 
     async def run(self):
-        while not self.reading_usable(
-            self.get_sensor_value(self.props.get("Sensor", None)).get("value")
-        ):
-            await asyncio.sleep(1)
-        self.starttemp = self.get_sensor_value(self.props.get("Sensor", None)).get(
-            "value"
-        )
+        self.starttemp = await self.first_usable_reading(self.props.get("Sensor", None))
         if self.fermenter.target_temp >= self.starttemp:
             logging.info("warmup")
             while self.running == True:
-                sensor_value = self.get_sensor_value(
-                    self.props.get("Sensor", None)
-                ).get("value")
+                sensor_value = self.current_reading(self.props.get("Sensor", None))
                 if (
                     self.target_reached(sensor_value, self.fermenter.target_temp)
                     and self.timer.is_running is not True
@@ -176,9 +170,7 @@ class FermenterTargetTempStep(CBPiFermentationStep):
         elif self.fermenter.target_temp <= self.starttemp:
             logging.info("Cooldown")
             while self.running == True:
-                sensor_value = self.get_sensor_value(
-                    self.props.get("Sensor", None)
-                ).get("value")
+                sensor_value = self.current_reading(self.props.get("Sensor", None))
                 if (
                     self.cooled_to(sensor_value, self.fermenter.target_temp)
                     and self.timer.is_running is not True
@@ -342,7 +334,8 @@ class FermenterStep(CBPiFermentationStep):
         await self.push_update()
 
     async def on_stop(self):
-        await self.timer.stop()
+        if self.timer is not None:
+            await self.timer.stop()
         self.summary = ""
         if self.AutoMode == True:
             await self.setAutoMode(False)
@@ -362,21 +355,13 @@ class FermenterStep(CBPiFermentationStep):
         self.timer.is_running == False
 
     async def run(self):
-        while not self.reading_usable(
-            self.get_sensor_value(self.props.get("Sensor", None)).get("value")
-        ):
-            await asyncio.sleep(1)
-        self.starttemp = self.get_sensor_value(self.props.get("Sensor", None)).get(
-            "value"
-        )
+        self.starttemp = await self.first_usable_reading(self.props.get("Sensor", None))
 
         if self.fermenter.target_temp >= self.starttemp:
             logging.info("warmup")
             while self.running == True:
                 await asyncio.sleep(1)
-                sensor_value = self.get_sensor_value(
-                    self.props.get("Sensor", None)
-                ).get("value")
+                sensor_value = self.current_reading(self.props.get("Sensor", None))
                 if (
                     self.target_reached(sensor_value, self.fermenter.target_temp)
                     and self.timer.is_running is not True
@@ -399,9 +384,7 @@ class FermenterStep(CBPiFermentationStep):
             logging.info("cooldown")
             while self.running == True:
                 await asyncio.sleep(1)
-                sensor_value = self.get_sensor_value(
-                    self.props.get("Sensor", None)
-                ).get("value")
+                sensor_value = self.current_reading(self.props.get("Sensor", None))
                 if (
                     self.cooled_to(sensor_value, self.fermenter.target_temp)
                     and self.timer.is_running is not True
@@ -502,13 +485,7 @@ class FermenterRampTempStep(CBPiFermentationStep):
         self.target_temp = round(float(self.props.get("Temp", 0)) * 10) / 10
         logging.info(self.target_temp)
         self.fermenter.target_pressure = float(self.props.get("Pressure", 0))
-        while not self.reading_usable(
-            self.get_sensor_value(self.props.get("Sensor", None)).get("value")
-        ):
-            await asyncio.sleep(1)
-        self.starttemp = self.get_sensor_value(self.props.get("Sensor", None)).get(
-            "value"
-        )
+        self.starttemp = await self.first_usable_reading(self.props.get("Sensor", None))
 
         self.current_target_temp = self.starttemp
         if self.fermenter is not None:
@@ -527,7 +504,8 @@ class FermenterRampTempStep(CBPiFermentationStep):
         await self.push_update()
 
     async def on_stop(self):
-        await self.timer.stop()
+        if self.timer is not None:
+            await self.timer.stop()
         self.summary = ""
         if self.AutoMode == True:
             await self.setAutoMode(False)
@@ -573,9 +551,7 @@ class FermenterRampTempStep(CBPiFermentationStep):
             while self.running == True:
                 if self.current_target_temp != self.target_temp:
                     await self.calc_target_temp()
-                sensor_value = self.get_sensor_value(
-                    self.props.get("Sensor", None)
-                ).get("value")
+                sensor_value = self.current_reading(self.props.get("Sensor", None))
                 if (
                     self.target_reached(sensor_value, self.target_temp)
                     and self.timer.is_running is not True
@@ -588,9 +564,7 @@ class FermenterRampTempStep(CBPiFermentationStep):
             while self.running == True:
                 if self.current_target_temp != self.target_temp:
                     await self.calc_target_temp()
-                sensor_value = self.get_sensor_value(
-                    self.props.get("Sensor", None)
-                ).get("value")
+                sensor_value = self.current_reading(self.props.get("Sensor", None))
                 if (
                     self.cooled_to(sensor_value, self.target_temp)
                     and self.timer.is_running is not True

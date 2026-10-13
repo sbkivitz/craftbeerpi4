@@ -570,6 +570,31 @@ class CBPiFermentationStep(_TargetArrival, CBPiBase):
         self.update_key = "fermenterstepupdate"
 
     def _done(self, task):
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            # The profile is now stuck on this step: ACTIVE, with no task, no
+            # timer and no next step. That was one log line, so an unattended
+            # schedule simply stopped (DEFECTS F13). The fermenter's logic still
+            # holds the current target - the beer is safe - but somebody has to
+            # know the schedule is not moving.
+            self.logger.error("Fermentation step %s failed: %s", self.name, error,
+                              exc_info=error)
+            try:
+                from cbpi.api.dataclasses import NotificationType
+
+                self.cbpi.notify(
+                    "{}: {}".format(getattr(self.fermenter, "name", None) or "Fermenter",
+                                    self.name),
+                    "Step failed ({}: {}). The profile is stopped on this step; "
+                    "temperature control holds the current target.".format(
+                        type(error).__name__, error),
+                    NotificationType.ERROR,
+                )
+            except Exception as e:  # noqa: BLE001
+                self.logger.error("Could not notify about step %s: %s", self.name, e)
+            return
         if self._done_callback is not None:
             try:
                 result = task.result()
@@ -579,6 +604,35 @@ class CBPiFermentationStep(_TargetArrival, CBPiBase):
                 self._done_callback(self, result, fermenter)
             except Exception as e:
                 self.logger.error(e)
+
+    def current_reading(self, sensor_id):
+        """The sensor's latest value, or None - never raises.
+
+        get_sensor_value() returns None for a sensor that is missing, deleted or
+        failing, and every fermentation step read it as
+        get_sensor_value(id).get("value"): an AttributeError that ended the
+        step, leaving the profile ACTIVE on a dead step (DEFECTS F13). None is
+        what reading_usable(), target_reached() and cooled_to() already treat
+        as "not yet", so a step now waits for the probe to come back.
+        """
+        try:
+            state = self.get_sensor_value(sensor_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return state.get("value") if isinstance(state, dict) else None
+
+    async def first_usable_reading(self, sensor_id):
+        """Wait for a reading a step can start from, and return THAT reading.
+
+        The steps waited for a usable value, then read the sensor a second time
+        for their starting temperature - a read that could be None by then, and
+        `target >= None` raised.
+        """
+        while True:
+            value = self.current_reading(sensor_id)
+            if self.reading_usable(value):
+                return float(value)
+            await asyncio.sleep(1)
 
     async def start(self):
         self.logger.info("Start {}".format(self.name))

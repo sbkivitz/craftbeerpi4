@@ -21,6 +21,7 @@ from aiohttp_swagger import setup_swagger
 from cbpi import __codename__, __version__
 from cbpi.api.dataclasses import NotificationType
 from cbpi.api.exceptions import CBPiException
+from cbpi.api.sd_notify import Heartbeat
 from cbpi.controller.actor_controller import ActorController
 from cbpi.controller.config_controller import ConfigController
 from cbpi.controller.dashboard_controller import DashboardController
@@ -369,6 +370,12 @@ class CraftBeerPi:
 
 
         self._swagger_setup()
+
+        # Last, once everything is up: arm systemd's watchdog only for a server
+        # that has finished starting (see cbpi/api/sd_notify.py).
+        self.heartbeat = Heartbeat()
+        self.heartbeat.start()
+        self.app.on_shutdown.append(self.heartbeat.stop)
 
         return self.app
 
