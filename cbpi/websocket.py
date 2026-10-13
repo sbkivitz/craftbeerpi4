@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import weakref
 from collections import defaultdict
@@ -26,12 +27,24 @@ class CBPiWebSocket:
         # if self.cbpi.config.static.get("ws_push_all", False):
         self.cbpi.bus.register("#", self.listen)
 
+    # Seconds to say goodbye to every open page, all together. aiohttp waits up
+    # to ten seconds per page for its reply, one page after another - two
+    # unresponsive browsers outlasted the whole stop systemd allows (DEFECTS
+    # F33). A page that has not answered by then is simply disconnected.
+    CLOSE_BUDGET = 2
+
     async def close_all(self, app=None):
-        for ws in list(self._clients):
-            try:
-                await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutdown")
-            except Exception as e:  # noqa: BLE001 - one bad socket must not keep the rest open
-                self.logger.debug("closing a websocket on shutdown failed: %s", e)
+        closing = [asyncio.ensure_future(
+            ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutdown"))
+            for ws in list(self._clients)]
+        if not closing:
+            return
+        done, pending = await asyncio.wait(closing, timeout=self.CLOSE_BUDGET)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            if not task.cancelled() and task.exception() is not None:
+                self.logger.debug("closing a websocket on shutdown failed: %s", task.exception())
 
     async def listen(self, topic, **kwargs):
         data = dict(topic=topic, data=dict(**kwargs))

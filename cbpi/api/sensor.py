@@ -29,6 +29,13 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
         # several sensor implementations swallow a read error and keep republishing
         # their last value, so a disconnected probe still looks healthy.
         self.last_update = None
+        # The same moment on the monotonic clock, which is what a reading's age
+        # is measured on. Wall-clock ages jump with the clock: NTP setting a Pi
+        # without a real-time clock forward after boot made every reading look
+        # hours old, and a step back made a dead probe's last value look fresh
+        # (DEFECTS F29).
+        self.last_update_monotonic = None
+        self.last_update_paired = None
 
     def init(self):
         pass
@@ -67,6 +74,11 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
         # Stamped before the send so a failure to reach clients does not make an
         # otherwise good reading look stale.
         self.last_update = time.time()
+        self.last_update_monotonic = time.monotonic()
+        # Which last_update the monotonic stamp belongs to. Code that sets
+        # last_update itself - a plugin, a test aging a reading - must not be
+        # contradicted by a monotonic stamp from an earlier reading.
+        self.last_update_paired = self.last_update
         if self.temprange != 0:
             self.inrange = self.checkrange(value)
         else:

@@ -70,11 +70,22 @@ def assess(state, what="temperature", label="", unit=None, celsius=FERMENTER_C,
     if value is None:
         return None, ("value", "{} sensor{} reads {!r}, not a number".format(name, who, raw))
     age = finite(state.get("age"))
-    if age is None:
-        return None, ("unproven", "{} sensor{} has not reported a reading yet".format(name, who))
     limit = finite(state.get("max_age")) or default_max_age
+    if age is None:
+        # The third element is how long this may last before it is worth an
+        # alert: a sensor's first publish can be a whole interval after start-up
+        # (OneWire skips its first cycle until the bus has read), and alerting
+        # on every boot teaches the brewer to ignore alerts. Control is held
+        # off meanwhile all the same.
+        return None, ("unproven", "{} sensor{} has not reported a reading yet".format(name, who),
+                      limit)
     if age > limit:
         return None, ("stale", "{} sensor{} has not updated for {:.0f}s".format(name, who, age))
+    if age < -1.0:
+        # A reading from the future: its time came from a clock that has since
+        # moved back. Not evidence of anything (DEFECTS F29).
+        return None, ("stale", "{} sensor{} reading is timestamped {:.0f}s in the future - "
+                               "the clock moved".format(name, who, -age))
     if celsius is not None:
         low, high = bounds(unit or "C", celsius)
         if not low <= value <= high:

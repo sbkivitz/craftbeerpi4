@@ -46,6 +46,12 @@ STARTUP_BUDGET_SEC = 300
 # Beats per watchdog period. Three leaves room for two missed beats.
 BEATS_PER_PERIOD = 3
 
+# Attempts to arm the start-up deadline, a second apart, until one is sent.
+# Each delivery restarts systemd's timer, so retrying for long would stretch
+# the very budget it sets; one attempt alone could leave start-up unwatched
+# for good if that datagram was lost (DEFECTS F36).
+STARTUP_ARM_ATTEMPTS = 10
+
 
 def socket_address(path):
     """The address to send to: a leading '@' is the abstract namespace."""
@@ -85,6 +91,7 @@ class Heartbeat:
         self.task = None
         self.beats = 0
         self.period = None
+        self._arming = None
 
     def _systemd_period(self):
         """WatchdogSec= from the unit, if systemd set one for this process."""
@@ -98,15 +105,37 @@ class Heartbeat:
             return None
 
     def begin_startup(self):
-        """Arm the watchdog for start-up, without beating: a start-up that hangs is restarted."""
+        """Arm the watchdog for start-up, without beating: a start-up that hangs is restarted.
+
+        True once the arming message is sent. If it cannot be, it is retried a
+        second apart, a few times, from a task.
+        """
         if not self._environ.get("NOTIFY_SOCKET"):
             return False
-        self._send("STATUS=CraftBeerPi starting\nWATCHDOG_USEC={}".format(
-            int(self.startup_sec * 1e6)))
-        return True
+        message = "STATUS=CraftBeerPi starting\nWATCHDOG_USEC={}".format(
+            int(self.startup_sec * 1e6))
+        if self._send(message):
+            return True
+        logger.warning("systemd: could not arm the start-up deadline - retrying")
+        try:
+            self._arming = asyncio.get_running_loop().create_task(self._arm_until_sent(message))
+        except RuntimeError:  # no running loop to retry from
+            self._arming = None
+        return False
+
+    async def _arm_until_sent(self, message):
+        for _ in range(STARTUP_ARM_ATTEMPTS - 1):
+            await asyncio.sleep(1)
+            if self._send(message):
+                return True
+        logger.error("systemd: the start-up deadline could not be armed - a start-up "
+                     "that hangs will not be restarted")
+        return False
 
     def start(self):
         """Begin, if systemd is listening. Returns the beating task, or None."""
+        if self._arming is not None and not self._arming.done():
+            self._arming.cancel()
         if not self._environ.get("NOTIFY_SOCKET"):
             logger.info("No systemd notify socket - running without a watchdog")
             return None
