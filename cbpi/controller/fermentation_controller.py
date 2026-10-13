@@ -95,6 +95,19 @@ class FermentationController:
                     role, actor_id, getattr(fermenter, "name", "?"), e,
                 )
 
+    async def _stop_logic(self, fermenter):
+        """Stop a fermenter's temperature logic, so nothing re-energizes what is switched off next."""
+        instance = getattr(fermenter, "instance", None)
+        if instance is None:
+            return
+        try:
+            await instance.stop()
+        except Exception as e:  # noqa: BLE001 - the actors are switched off regardless
+            self.logger.error(
+                "Failed to stop the logic of fermenter %s: %s",
+                getattr(fermenter, "name", "?"), e,
+            )
+
     async def _stop_steps(self, fermenter):
         for step in fermenter.steps:
             try:
@@ -109,6 +122,10 @@ class FermentationController:
         if fermenterid == None:
             for fermenter in self.data:
                 self.logger.info("Shutdown {}".format(fermenter.name))
+                # The logic first. A logic still ticking re-commanded the
+                # cooler a second after _deenergize switched it off, and the
+                # process then exited with it on (DEFECTS F10).
+                await self._stop_logic(fermenter)
                 await self._stop_steps(fermenter)
                 # After the steps, so a step cannot re-command an actor this
                 # has just switched off.
@@ -344,6 +361,14 @@ class FermentationController:
 
     async def delete(self, id: str):
         item = self._find_by_id(id)
+        if item is not None:
+            # Stop everything driving its actors before forgetting it. Deleting
+            # a running fermenter used to leave its logic going - with nothing
+            # in the interface to switch it off - commanding the heater and
+            # cooler of a fermenter that no longer existed (DEFECTS F10).
+            await self._stop_logic(item)
+            await self._stop_steps(item)
+            await self._deenergize(item)
         self.data = list(filter(lambda item: item.id != id, self.data))
         self.save()
         self.push_update()
@@ -528,11 +553,26 @@ class FermentationController:
         except Exception as e:
             self.logger.error(e)
 
+    @staticmethod
+    def _logic_alive(instance):
+        """Is this logic still in charge - running, or waiting to restart itself?"""
+        task = getattr(instance, "task", None)
+        if task is not None:
+            return not task.done()
+        return getattr(instance, "running", False) is True
+
     async def start_logic(self, id):
+        item = None
         try:
             item = self._find_by_id(id)
+            if item is None:
+                logging.warning("Cannot start the logic of unknown fermenter %s", id)
+                return
             logging.info("{} Start Id {} ".format(item.name, id))
-            if item.instance is not None and item.instance.running is True:
+            # The task, not the `running` flag. A logic waiting out its restart
+            # delay has `running` False and a live task, and a second instance
+            # started beside it would drive the same actors (DEFECTS F8).
+            if item.instance is not None and self._logic_alive(item.instance):
                 logging.warning("{} already running {}".format(item.name, id))
                 return
             if item.type is None:
@@ -550,7 +590,7 @@ class FermentationController:
             logging.info("{} started {}".format(item.name, id))
 
         except Exception as e:
-            logging.error("{} Cant start {} - {}".format(item.name, id, e))
+            logging.error("{} Cant start {} - {}".format(getattr(item, "name", id), id, e))
 
     async def toggle(self, id):
 

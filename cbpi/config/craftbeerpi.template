@@ -1,13 +1,25 @@
 [Unit]
 Description=Craftbeer Pi
 After=mosquitto.service influxdb.service
+# Never give up restarting. With the default limit, five quick failures left
+# the server down for good - and a fermenter with it, uncontrolled.
+StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=/home/{{ user }}
 ExecStartPre=/bin/sleep 5
 ExecStart={{ path }} start
-KillSignal=SIGKILL
+# Back after a crash, an out-of-memory kill or a watchdog timeout.
+Restart=always
+RestartSec=5
+# SIGTERM, the default, rather than SIGKILL: the server's shutdown switches
+# every actor off on the way out. SIGKILL left GPIO outputs as they were, an
+# element or pump energized with no process behind it. Anything still running
+# after TimeoutStopSec is killed anyway.
 TimeoutStopSec=15
+# Lets the server report that it is alive. It arms a watchdog once it has
+# started, and systemd restarts a server whose event loop stops answering.
+NotifyAccess=main
 
 [Install]
 WantedBy=multi-user.target
