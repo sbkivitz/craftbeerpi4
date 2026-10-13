@@ -17,6 +17,27 @@ class ActorController(BasicController):
         # instance attribute rather than a class one so two controllers cannot
         # share it - see _on_accepts_output.
         self._on_signature_cache = {}
+        # The moment shutdown begins, not at cleanup. aiohttp runs on_cleanup
+        # only after waiting for open requests to finish, and systemd's
+        # SIGKILL could arrive before it - leaving every element and pump as
+        # it was (DEFECTS F22).
+        self._shutting_down = False
+        self.cbpi.app.on_shutdown.append(self.shutdown_begins)
+
+    async def shutdown_begins(self, app=None):
+        """Refuse every further switch-on, and switch everything off now.
+
+        Each actor bounded on its own, so one driver that hangs cannot keep
+        the rest energized until the process is killed.
+        """
+        self._shutting_down = True
+        for item in self.data:
+            if item.instance is None:
+                continue
+            try:
+                await asyncio.wait_for(item.instance.off(), 5)
+            except Exception as e:  # noqa: BLE001 - every actor gets its turn
+                logging.error("Failed to switch off actor %s as shutdown began: %r", item.id, e)
 
     def _on_accepts_output(self, instance):
         """Does this driver's on() take `output` as well as `power`?
@@ -248,6 +269,9 @@ class ActorController(BasicController):
         return None
 
     async def on(self, id, power=None, output=None):
+        if getattr(self, "_shutting_down", False):
+            logging.info("Not switching on actor %s: the server is shutting down", id)
+            return False
         try:
             item = self.find_by_id(id)
             # Remember which of the two the caller actually asked for. Power and

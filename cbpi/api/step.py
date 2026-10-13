@@ -6,6 +6,7 @@ from abc import abstractmethod
 
 import cbpi
 from cbpi.api import clock
+from cbpi.api import readings
 from cbpi.api.base import CBPiBase
 
 __all__ = ["StepResult", "StepState", "StepMove", "CBPiStep", "CBPiFermentationStep"]
@@ -606,20 +607,26 @@ class CBPiFermentationStep(_TargetArrival, CBPiBase):
                 self.logger.error(e)
 
     def current_reading(self, sensor_id):
-        """The sensor's latest value, or None - never raises.
+        """The sensor's latest value if control may act on it, else None - never raises.
 
         get_sensor_value() returns None for a sensor that is missing, deleted or
         failing, and every fermentation step read it as
         get_sensor_value(id).get("value"): an AttributeError that ended the
         step, leaving the profile ACTIVE on a dead step (DEFECTS F13). None is
-        what reading_usable(), target_reached() and cooled_to() already treat
-        as "not yet", so a step now waits for the probe to come back.
+        what target_reached() and cooled_to() already treat as "not yet".
+
+        Judged exactly as the fermenter logic judges it (cbpi.api.readings):
+        finite, proven fresh, and a temperature a fermenter can have. A ramp
+        that took a DS18B20's 85 C power-on value as its starting point went on
+        commanding targets from it after the probe recovered, and the logic
+        heated a beer that was being cold-crashed (F15).
         """
         try:
             state = self.get_sensor_value(sensor_id)
         except Exception:  # noqa: BLE001
             return None
-        return state.get("value") if isinstance(state, dict) else None
+        value, _ = readings.assess(state, unit=readings.temp_unit(self.cbpi))
+        return value
 
     async def first_usable_reading(self, sensor_id):
         """Wait for a reading a step can start from, and return THAT reading.
@@ -630,8 +637,8 @@ class CBPiFermentationStep(_TargetArrival, CBPiBase):
         """
         while True:
             value = self.current_reading(sensor_id)
-            if self.reading_usable(value):
-                return float(value)
+            if value is not None:
+                return value
             await asyncio.sleep(1)
 
     async def start(self):
