@@ -27,6 +27,22 @@ class SensorController(BasicController):
             props=data.get("props", []),
         )
 
+    @staticmethod
+    def sample_age(instance):
+        """Seconds since this sensor's last reading, or None if it has none.
+
+        On the monotonic clock when the reading was stamped by push_update, so
+        a clock change cannot age or rejuvenate a reading (DEFECTS F29). On the
+        wall clock otherwise - including when last_update has been set by
+        anything else since, which then knows better than the stamp.
+        """
+        last_update = getattr(instance, "last_update", None)
+        stamp = getattr(instance, "last_update_monotonic", None)
+        if stamp is not None and last_update is not None \
+                and getattr(instance, "last_update_paired", None) == last_update:
+            return time.monotonic() - stamp
+        return None if last_update is None else time.time() - last_update
+
     def get_sensor_value(self, id):
         if id is None:
             return None
@@ -39,9 +55,7 @@ class SensorController(BasicController):
             state = dict(state)
             last_update = getattr(instance, "last_update", None)
             state.setdefault("timestamp", last_update)
-            state.setdefault(
-                "age", None if last_update is None else time.time() - last_update
-            )
+            state.setdefault("age", self.sample_age(instance))
             # How old this particular sensor's reading is allowed to get, so a
             # consumer does not have to know anything about publish intervals.
             state.setdefault("max_age", self.expected_max_age(id))
@@ -106,9 +120,9 @@ class SensorController(BasicController):
         if max_age is None:
             max_age = self.expected_max_age(id)
         try:
-            last_update = getattr(self.find_by_id(id).instance, "last_update", None)
+            age = self.sample_age(self.find_by_id(id).instance)
         except Exception:
             return False
-        if last_update is None:
+        if age is None:
             return False
-        return (time.time() - last_update) <= max_age
+        return age <= max_age

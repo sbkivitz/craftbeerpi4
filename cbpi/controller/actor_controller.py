@@ -3,6 +3,7 @@ import inspect
 import logging
 
 from cbpi.api.dataclasses import Actor, Props
+from cbpi.api.tasks import cancellation_is_real
 from cbpi.controller.basic_controller2 import BasicController
 from tabulate import tabulate
 
@@ -22,22 +23,45 @@ class ActorController(BasicController):
         # SIGKILL could arrive before it - leaving every element and pump as
         # it was (DEFECTS F22).
         self._shutting_down = False
-        self.cbpi.app.on_shutdown.append(self.shutdown_begins)
+        # FIRST of the on_shutdown hooks, whatever was constructed before it.
+        # Closing the interface's websockets ran ahead of this and could wait
+        # ten seconds per unresponsive browser - long enough for systemd's
+        # SIGKILL to arrive with everything still on (DEFECTS F33).
+        self.cbpi.app.on_shutdown.insert(0, self.shutdown_begins)
+
+    # Seconds the switch-off sweep at shutdown may take, all actors together.
+    SHUTDOWN_OFF_BUDGET = 5
 
     async def shutdown_begins(self, app=None):
         """Refuse every further switch-on, and switch everything off now.
 
-        Each actor bounded on its own, so one driver that hangs cannot keep
-        the rest energized until the process is killed.
+        All at once, each in a task of its own, within one budget: a driver
+        that hangs cannot hold up the rest, and one whose await raises
+        CancelledError cannot abort the sweep - or every shutdown hook after
+        this one, which is what an uncaught one did (DEFECTS F34).
         """
         self._shutting_down = True
-        for item in self.data:
-            if item.instance is None:
-                continue
+        drivers = [(item.id, item.instance) for item in self.data if item.instance is not None]
+        if not drivers:
+            return
+
+        async def off(actor_id, driver):
             try:
-                await asyncio.wait_for(item.instance.off(), 5)
+                await driver.off()
+            except asyncio.CancelledError:
+                if cancellation_is_real():
+                    raise
+                logging.error("Switching off actor %s as shutdown began was cancelled", actor_id)
             except Exception as e:  # noqa: BLE001 - every actor gets its turn
-                logging.error("Failed to switch off actor %s as shutdown began: %r", item.id, e)
+                logging.error("Failed to switch off actor %s as shutdown began: %r", actor_id, e)
+
+        sweeps = {asyncio.ensure_future(off(actor_id, driver)): actor_id
+                  for actor_id, driver in drivers}
+        _, pending = await asyncio.wait(sweeps, timeout=self.SHUTDOWN_OFF_BUDGET)
+        for task in pending:
+            logging.error("Actor %s did not switch off within %ss of shutdown",
+                          sweeps[task], self.SHUTDOWN_OFF_BUDGET)
+            task.cancel()
 
     def _on_accepts_output(self, instance):
         """Does this driver's on() take `output` as well as `power`?
@@ -331,6 +355,15 @@ class ActorController(BasicController):
                             await item.instance.on(power, output)
                         else:
                             await item.instance.on(power)
+                        if getattr(self, "_shutting_down", False):
+                            # Shutdown began while this was switching on, and
+                            # its sweep may already have passed this actor: a
+                            # switch-on still in flight landed after it
+                            # (DEFECTS F35). Undo it.
+                            logging.info("Actor %s: shutdown began during its switch-on - "
+                                         "switching it off again", id)
+                            await item.instance.off()
+                            return False
 
                 if blocking is not None:
                     message = (

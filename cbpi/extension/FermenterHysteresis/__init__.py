@@ -5,7 +5,7 @@ import time
 from cbpi.api import *
 from cbpi.api import readings
 from cbpi.api.dataclasses import NotificationType
-from cbpi.api.fermenter_logic import bounded
+from cbpi.api.tasks import bounded
 from cbpi.api.readings import finite
 from cbpi.api.step import StepState
 from cbpi.controller.fermentation_controller import FermentationController
@@ -137,6 +137,10 @@ class _GuardedHysteresis:
         self._tick_error = None
         self._valve_seen = None
         self._venting = False
+        # actor id -> the role it last held here. Kept beyond this run, like
+        # owned_actors: a heater reassigned away is still a heater until it
+        # has been seen off (DEFECTS F32).
+        self.__dict__.setdefault("_roles", {})
         self._missing_ticks = 0
         self.heater = self.cooler = None
         self.valve = None
@@ -278,14 +282,24 @@ class _GuardedHysteresis:
         so the cooler was started beside a heater that was still running
         (DEFECTS F17).
         """
-        if on:
-            # Owned before it is energized, so no failure from here on can
-            # leave it running with nobody responsible for it (F19).
-            self.owned_actors.add(actor_id)
+        if not on:
+            # The base class's switch-off: bounded, and judged by the actor's
+            # driver - a missing actor is not an off one (DEFECTS F31).
+            done = await self._off_bounded(actor_id)
+            if done:
+                self._clear_alert(("stuck", actor_id), "{} switched off".format(actor_id))
+                self._alerts.pop(("unresponsive", actor_id), None)
+            else:
+                self._raise_alert(("stuck", actor_id),
+                                  ("stuck", "{} does not switch off".format(actor_id)),
+                                  "retrying every second")
+            return done
+        # Owned before it is energized, so no failure from here on can leave
+        # it running with nobody responsible for it (F19).
+        self.owned_actors.add(actor_id)
+        self._driver(actor_id)
         try:
-            if not on:
-                await bounded(self.actor_off(actor_id), self.ACTOR_TIMEOUT)
-            elif self.USES_MAX_POWER:
+            if self.USES_MAX_POWER:
                 await bounded(self.actor_on(actor_id, power, power), self.ACTOR_TIMEOUT)
             else:
                 await bounded(self.actor_on(actor_id), self.ACTOR_TIMEOUT)
@@ -301,18 +315,7 @@ class _GuardedHysteresis:
         except Exception as e:  # noqa: BLE001
             logging.error("Fermenter %s: switching %s %s failed: %r",
                           self._fermenter_name(), actor_id, "on" if on else "off", e)
-        actor = self._find_actor(actor_id)
-        if not on:
-            done = not self._is_on(actor)
-            if done:
-                self._clear_alert(("stuck", actor_id), "{} switched off".format(actor_id))
-                self._alerts.pop(("unresponsive", actor_id), None)
-            else:
-                self._raise_alert(("stuck", actor_id),
-                                  ("stuck", "{} does not switch off".format(actor_id)),
-                                  "retrying every second")
-            return done
-        done = self._is_on(actor)
+        done = self._actor_on(actor_id) is True
         if done:
             self._clear_alert(("unresponsive", actor_id), "{} switches on again".format(actor_id))
         else:
@@ -320,6 +323,16 @@ class _GuardedHysteresis:
                               ("unresponsive", "{} does not switch on".format(actor_id)),
                               "retrying every second")
         return done
+
+    def _role_actors(self, role):
+        """Every actor this logic owns that last held `role` here."""
+        roles = self._roles
+        assigned = {"heater": self.heater, "cooler": self.cooler}.get(role)
+        found = {a for a in self.owned_actors if roles.get(a) == role}
+        return found | ({assigned} if assigned else set())
+
+    def _any_on(self, role):
+        return any(self._actor_on(a) is True for a in self._role_actors(role))
 
     async def _retire(self, current):
         """Switch off every actor this logic owned that is no longer assigned to it.
@@ -350,7 +363,9 @@ class _GuardedHysteresis:
         return "{} actor".format(name)
 
     def _raise_alert(self, key, problem, consequence):
-        kind, text = problem
+        # (kind, text), or (kind, text, seconds it may last before an alert).
+        kind, text = problem[0], problem[1]
+        notify_after = max(self.FAULT_NOTIFY_AFTER, problem[2] if len(problem) > 2 else 0)
         alert = self._alerts.get(key)
         if alert is None or alert["kind"] != kind:
             # INFO, not WARNING: with NOTIFY_ON_ERROR every warning is a
@@ -363,7 +378,7 @@ class _GuardedHysteresis:
         alert["text"] = text
         now = time.monotonic()
         due = alert["notified_at"] is None or now - alert["notified_at"] >= self.FAULT_REMIND_EVERY
-        if alert["ticks"] >= self.FAULT_NOTIFY_AFTER and due:
+        if alert["ticks"] >= notify_after and due:
             alert["notified_at"] = now
             message = "{} - {}".format(text, consequence)
             logging.error("Fermenter %s: %s", self._fermenter_name(), message)
@@ -389,7 +404,7 @@ class _GuardedHysteresis:
         for actor_id in [a for a in targets if a]:
             # Unconditionally on entry - the state flag may be the thing that
             # is wrong - and then whenever something has switched it back on.
-            if entering or self._is_on(self._find_actor(actor_id)):
+            if entering or self._actor_on(actor_id) is not False:
                 await self._switch(actor_id, False)
         self._raise_alert("control", problem, "heating and cooling are off until it is fixed")
 
@@ -400,7 +415,7 @@ class _GuardedHysteresis:
         fallback - and a lookup that misses once is not proof of a deletion.
         """
         for actor_id in [a for a in self.owned_actors | {self.heater, self.cooler} if a]:
-            if self._missing_ticks == 0 or self._is_on(self._find_actor(actor_id)):
+            if self._missing_ticks == 0 or self._actor_on(actor_id) is not False:
                 await self._switch(actor_id, False)
         self._missing_ticks += 1
         if self._missing_ticks < self.FAULT_NOTIFY_AFTER:
@@ -430,6 +445,11 @@ class _GuardedHysteresis:
         self.heater, self.cooler = heater, cooler
         current = self._assigned_actors(fermenter)
         self.owned_actors |= current
+        for role in self.ROLES:
+            actor_id = getattr(fermenter, role, None)
+            if actor_id:
+                self._roles[actor_id] = role
+                self._driver(actor_id)
         await self._retire(current)
 
         if heater is not None and heater == cooler:
@@ -448,33 +468,35 @@ class _GuardedHysteresis:
         cooler_actor = self._actor(cooler, "cooler")
         heater_on = self._is_on(heater_actor)
         cooler_on = self._is_on(cooler_actor)
-        if heater_on and cooler_on:
-            # Both running - switched by hand, or left so by an earlier
-            # configuration. Never leave them fighting: both off, and the rule
-            # decides afresh next tick.
-            logging.info("Fermenter %s: heater and cooler were both on - switching both off",
+        if self._any_on("heater") and self._any_on("cooler"):
+            # Heating and cooling at once - switched by hand, or left so by an
+            # earlier configuration, or a former heater or cooler that has not
+            # switched off. Never leave them fighting: all of them off, and
+            # the rule decides afresh next tick.
+            logging.info("Fermenter %s: heating and cooling were both on - switching all off",
                          self._fermenter_name())
-            await self._switch(heater, False)
-            await self._switch(cooler, False)
+            for actor_id in self._role_actors("heater") | self._role_actors("cooler"):
+                await self._switch(actor_id, False)
             return
 
         # The rule itself is unchanged - the same comparisons, in the same
         # order, against the state read at the top of the tick. What is new is
-        # that neither actor is started while the other is running, judged
-        # from what the other actor reports NOW, after any switch-off above
-        # (DEFECTS F11, F17).
+        # that neither side is started while any actor of the other is
+        # running - the assigned one or a former one still owned - judged
+        # from what the actors report NOW, after any switch-off above
+        # (DEFECTS F11, F17, F32).
         if heater_actor is not None:
             if reading + h_on <= target and not heater_on:
-                if self._is_on(cooler_actor):
-                    self._defer("heater", "the cooler is still running")
+                if self._any_on("cooler"):
+                    self._defer("heater", "a cooler is still running")
                 else:
                     await self._switch(heater, True, self._max_power(props, "HeaterMaxPower"))
             if reading + h_off >= target and heater_on:
                 await self._switch(heater, False)
         if cooler_actor is not None:
             if reading >= c_on + target and not cooler_on:
-                if self._is_on(heater_actor):
-                    self._defer("cooler", "the heater is still running")
+                if self._any_on("heater"):
+                    self._defer("cooler", "a heater is still running")
                 else:
                     await self._switch(cooler, True, self._max_power(props, "CoolerMaxPower"))
             if reading <= c_off + target and cooler_on:
@@ -639,7 +661,7 @@ class FermenterSpundingHysteresis(_GuardedHysteresis, CBPiFermenterLogic):
 
     async def _close_valve(self, valve=None):
         valve = valve or self.valve
-        if valve and self._is_on(self._find_actor(valve)):
+        if valve and self._actor_on(valve) is not False:
             await self._switch(valve, False)
 
     async def _pressure_tick(self):
