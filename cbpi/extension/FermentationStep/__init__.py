@@ -153,7 +153,9 @@ class FermenterTargetTempStep(CBPiFermentationStep):
         await self.push_update()
 
     async def run(self):
-        while self.get_sensor_value(self.props.get("Sensor", None)).get("value") > 900:
+        while not self.reading_usable(
+            self.get_sensor_value(self.props.get("Sensor", None)).get("value")
+        ):
             await asyncio.sleep(1)
         self.starttemp = self.get_sensor_value(self.props.get("Sensor", None)).get(
             "value"
@@ -360,7 +362,9 @@ class FermenterStep(CBPiFermentationStep):
         self.timer.is_running == False
 
     async def run(self):
-        while self.get_sensor_value(self.props.get("Sensor", None)).get("value") > 900:
+        while not self.reading_usable(
+            self.get_sensor_value(self.props.get("Sensor", None)).get("value")
+        ):
             await asyncio.sleep(1)
         self.starttemp = self.get_sensor_value(self.props.get("Sensor", None)).get(
             "value"
@@ -498,7 +502,9 @@ class FermenterRampTempStep(CBPiFermentationStep):
         self.target_temp = round(float(self.props.get("Temp", 0)) * 10) / 10
         logging.info(self.target_temp)
         self.fermenter.target_pressure = float(self.props.get("Pressure", 0))
-        while self.get_sensor_value(self.props.get("Sensor", None)).get("value") > 900:
+        while not self.reading_usable(
+            self.get_sensor_value(self.props.get("Sensor", None)).get("value")
+        ):
             await asyncio.sleep(1)
         self.starttemp = self.get_sensor_value(self.props.get("Sensor", None)).get(
             "value"
