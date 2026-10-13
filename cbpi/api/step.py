@@ -38,7 +38,16 @@ class StepMove(Enum):
     DOWN = 1
 
 
-class CBPiStep(CBPiBase):
+class _TargetArrival:
+    """Arrival within instrument tolerance, for brewing AND fermentation steps.
+
+    These lived on CBPiStep alone. 9785ed0 changed three fermentation call
+    sites to use them, but CBPiFermentationStep does not derive from CBPiStep -
+    so every fermentation step that had to WARM the beer, and every ramp, died
+    on its first comparison with an AttributeError, leaving the step ACTIVE on
+    a dead task: no timer, no next step, one log line (DEFECTS F1). Shared
+    here so neither base can be left without them again.
+    """
 
     def target_reached(self, sensor_value, target):
         """Has the vessel arrived at `target`, within instrument tolerance?
@@ -81,6 +90,9 @@ class CBPiStep(CBPiBase):
         except Exception:  # noqa: BLE001
             unit = "C"
         return 0.5 if str(unit).upper().startswith("F") else 0.3
+
+
+class CBPiStep(_TargetArrival, CBPiBase):
 
     def _float_prop(self, name, default):
         """A numeric property, without truncating the fraction away.
@@ -498,7 +510,7 @@ class CBPiStep(CBPiBase):
         )
 
 
-class CBPiFermentationStep(CBPiBase):
+class CBPiFermentationStep(_TargetArrival, CBPiBase):
 
     def __init__(self, cbpi, fermenter, step, props, on_done) -> None:
         self.fermenter = fermenter
