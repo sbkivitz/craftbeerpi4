@@ -83,6 +83,25 @@ class _TargetArrival:
             return False
         return value >= goal - self._target_tolerance()
 
+    def cooled_to(self, sensor_value, target):
+        """Has the vessel come DOWN to `target`, within instrument tolerance?
+
+        target_reached()'s mirror, for cooling. The fermentation steps' cooling
+        branches compared `sensor_value <= target` exactly, and a fermenter's
+        cooler is meant to switch off ABOVE its target - CoolerOffsetOff - so a
+        well-tuned fermenter hovers a few tenths over the setpoint and never
+        reads it. The step waited forever: a cold crash that never finished, a
+        cold hold that never began (DEFECTS F3).
+        """
+        try:
+            value = float(sensor_value)
+            goal = float(target)
+        except (TypeError, ValueError):
+            return False
+        if value != value or goal != goal:  # NaN never arrives
+            return False
+        return value <= goal + self._target_tolerance()
+
     def _target_tolerance(self):
         """How close counts as arrived, in the configured unit."""
         try:

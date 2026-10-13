@@ -33,6 +33,11 @@ class FermentationController:
         self.data = []
         self.types = {}
         self.steptypes = {}
+        # Fermenters whose profile was RUNNING when the server last stopped.
+        # load() turns an active step into STOP so nothing runs before it is
+        # asked to - but a step the brewer paused is STOP too, and AutoStart
+        # must resume the first and never the second (DEFECTS F2, F4).
+        self.interrupted = set()
         self.cbpi.app.on_cleanup.append(self.shutdown)
 
     async def init(self):
@@ -140,6 +145,7 @@ class FermentationController:
         status = StepState(item.get("status", "I"))
         if status == StepState.ACTIVE:
             status = StepState("S")
+            self.interrupted.add(getattr(fermenter, "id", None))
         type = item.get("type")
 
         try:
