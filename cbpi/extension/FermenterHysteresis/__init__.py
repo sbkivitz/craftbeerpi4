@@ -2,50 +2,54 @@ import asyncio
 import logging
 
 from cbpi.api import *
+from cbpi.api.step import StepState
 from cbpi.controller.fermentation_controller import FermentationController
 
 class FermenterAutostart(CBPiExtension):
+    """Bring every AutoStart fermenter back under temperature control on boot.
+
+    AutoStart is a property of the fermenter LOGIC ("Autostart Fermenter on
+    cbpi start"), but this started only the step profile: controller.start()
+    resumes or begins a step and never starts the logic, which came on only if
+    that step happened to say AutoMode Yes. So a fermenter with no steps - a
+    glycol reservoir, a plain hold - had no temperature control after a reboot,
+    and neither did one whose steps said AutoMode No, the setting that avoids
+    AutoMode's end-of-step shutoff. And a profile nobody had started was
+    started. Found by the fermenter twin: after a restart both logics were
+    off and a freshly built profile was running (DEFECTS F2).
+
+    Now, for each fermenter whose logic says AutoStart Yes:
+      - the logic is started if it is not running;
+      - a profile that was running when the server stopped is resumed (load()
+        marks its active step STOP), and a profile nobody started is left
+        alone.
+
+    It runs as an on_startup initializer, after every controller has loaded.
+    The constructor runs while plugins load, before sensors and actors exist,
+    and the task it used to launch raced their initialisation.
+    """
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
-        self._task = asyncio.create_task(self.run())
         self.controller: FermentationController = cbpi.fermenter
+        self.cbpi.register_on_startup(self)
 
+    @on_startup("fermenter_autostart", order=100)
     async def run(self):
         logging.info("Starting Fermenter Autorun")
-        # get all kettles
-        try:
-            self.fermenter = self.controller.get_state()
-            for id in self.fermenter["data"]:
-                try:
-                    self.autostart = id["props"]["AutoStart"]
-                    if self.autostart == "Yes":
-                        fermenter_id = id["id"]
-                        logging.info(
-                            "Enabling Autostart for Fermenter {}".format(fermenter_id)
-                        )
-                        self.fermenter = self.cbpi.fermenter._find_by_id(fermenter_id)
-                        try:
-                            if (
-                                self.fermenter.instance is None
-                                or self.fermenter.instance.state == False
-                            ):
-                                await self.cbpi.fermenter.start(self.fermenter.id)
-                                logging.info(
-                                    "Successfully switched on Ferenterlogic for Fermenter {}".format(
-                                        self.fermenter.id
-                                    )
-                                )
-                        except Exception as e:
-                            logging.error(
-                                "Failed to switch on FermenterLogic {} {}".format(
-                                    self.fermenter.id, e
-                                )
-                            )
-                except:
-                    pass
-        except:
-            pass
+        for item in list(self.controller.data):
+            try:
+                if item.props is None or item.props.get("AutoStart", "No") != "Yes":
+                    continue
+                if item.instance is None or not item.instance.state:
+                    await self.controller.start_logic(item.id)
+                    logging.info("Autostart: temperature control on for %s", item.name)
+                if self.controller._find_by_status(item.steps, StepState.STOP) is not None:
+                    await self.controller.start(item.id)
+                    logging.info("Autostart: resumed the profile of %s", item.name)
+            except Exception as e:  # noqa: BLE001 - one fermenter must not stop the rest
+                logging.error("Autostart failed for fermenter %s: %s",
+                              getattr(item, "name", "?"), e)
 
 @parameters(
     [
