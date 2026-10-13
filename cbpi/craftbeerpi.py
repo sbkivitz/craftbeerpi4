@@ -349,6 +349,11 @@ class CraftBeerPi:
 
     async def init_serivces(self):
 
+        # First: a start-up that never finishes is restarted by systemd
+        # (cbpi/api/sd_notify.py). Without this nothing watched start-up.
+        self.heartbeat = Heartbeat()
+        self.heartbeat.begin_startup()
+
         self._print_logo()
 
         await self.job.init()
@@ -371,18 +376,22 @@ class CraftBeerPi:
 
         self._swagger_setup()
 
-        # Last, once everything is up: arm systemd's watchdog only for a server
-        # that has finished starting (see cbpi/api/sd_notify.py).
-        self.heartbeat = Heartbeat()
-        self.heartbeat.start()
+        # Ready - and the watchdog's running period armed - only once
+        # everything is up: the last on_startup hook, after aiohttp's own.
+        self.app.on_startup.append(self.heartbeat.on_startup)
         self.app.on_shutdown.append(self.heartbeat.stop)
 
         return self.app
 
+    # Seconds aiohttp waits for open requests when stopping, before its
+    # cleanup. Its default, 60, outlasted systemd's TimeoutStopSec (15), so
+    # the cleanup that saves state never ran on a stop (DEFECTS F22).
+    SHUTDOWN_TIMEOUT = 5
+
     def start(self):
         port=self.static_config.get("port",8000)
         if not self.testport(port):
-            web.run_app(self.init_serivces(), port=port)
+            web.run_app(self.init_serivces(), port=port, shutdown_timeout=self.SHUTDOWN_TIMEOUT)
         else:
             logging.error("Port {} is already in use! Please check, if server is already running (e.g. in automode)".format(port))
             exit(1)

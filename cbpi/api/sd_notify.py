@@ -11,13 +11,17 @@ message to the unix socket named by $NOTIFY_SOCKET (a leading "@" names an
 abstract socket). With no $NOTIFY_SOCKET - Windows, a terminal, a unit
 without NotifyAccess= - it does nothing at all.
 
-The watchdog is ARMED from here, after start-up has finished, by sending
-WATCHDOG_USEC= (systemd's own service.c turns that into the timeout, with or
-without WatchdogSec= in the unit). The unit only needs NotifyAccess=main.
-That order fails safe both ways: a slow start is never killed for not having
-started beating yet, and a server that does not run this never gets a
-watchdog that would kill it for silence. WatchdogSec= in the unit, if
-present, wins.
+The watchdog is ARMED from here rather than by WatchdogSec= in the unit, by
+sending WATCHDOG_USEC= (systemd's own service.c turns that into the timeout).
+The unit only needs NotifyAccess=main. In two phases:
+
+  start-up  WATCHDOG_USEC=<STARTUP_BUDGET_SEC> and no beats, so a start-up
+            that never finishes is killed and restarted;
+  running   READY=1, then WATCHDOG=1 with the running period restated on
+            every beat, so one lost datagram cannot leave it unarmed.
+
+A server that does not run this never gets a watchdog that would kill it for
+silence. WatchdogSec= in the unit, if present, sets the running period.
 """
 
 import asyncio
@@ -32,6 +36,12 @@ logger = logging.getLogger(__name__)
 # this is for a loop that has stopped, not one that is busy - a Pi writing to
 # a slow SD card can stall for seconds at a time.
 DEFAULT_WATCHDOG_SEC = 120
+
+# Seconds start-up may take before systemd restarts the server. Without it, a
+# start-up that never finished - an initializer waiting forever - left a server
+# that never came up and a watchdog that was never armed (DEFECTS F26). A Pi
+# starts this in well under a minute.
+STARTUP_BUDGET_SEC = 300
 
 # Beats per watchdog period. Three leaves room for two missed beats.
 BEATS_PER_PERIOD = 3
@@ -63,16 +73,18 @@ def notify(message, environ=None):
 
 
 class Heartbeat:
-    """READY=1 once started, then WATCHDOG=1 for as long as the event loop turns."""
+    """A start-up deadline, then READY=1 and WATCHDOG=1 for as long as the event loop turns."""
 
     def __init__(self, send=notify, environ=None, watchdog_sec=DEFAULT_WATCHDOG_SEC,
-                 clock=time.monotonic):
+                 clock=time.monotonic, startup_sec=STARTUP_BUDGET_SEC):
         self._send = send
         self._environ = os.environ if environ is None else environ
         self.watchdog_sec = watchdog_sec
+        self.startup_sec = startup_sec
         self._clock = clock
         self.task = None
         self.beats = 0
+        self.period = None
 
     def _systemd_period(self):
         """WatchdogSec= from the unit, if systemd set one for this process."""
@@ -85,22 +97,37 @@ class Heartbeat:
         except ValueError:
             return None
 
+    def begin_startup(self):
+        """Arm the watchdog for start-up, without beating: a start-up that hangs is restarted."""
+        if not self._environ.get("NOTIFY_SOCKET"):
+            return False
+        self._send("STATUS=CraftBeerPi starting\nWATCHDOG_USEC={}".format(
+            int(self.startup_sec * 1e6)))
+        return True
+
     def start(self):
         """Begin, if systemd is listening. Returns the beating task, or None."""
         if not self._environ.get("NOTIFY_SOCKET"):
             logger.info("No systemd notify socket - running without a watchdog")
             return None
-        period = self._systemd_period()
-        armed_here = period is None
-        if armed_here:
-            period = float(self.watchdog_sec)
+        # The unit's own WatchdogSec= wins. Restated either way, because
+        # begin_startup() replaced it with the start-up budget.
+        self.period = self._systemd_period() or float(self.watchdog_sec)
         self._send("READY=1\nSTATUS=CraftBeerPi running")
-        if armed_here:
-            self._send("WATCHDOG_USEC={}".format(int(period * 1e6)))
-        self._send("WATCHDOG=1")
-        logger.info("systemd watchdog: restarted after %.0fs without a heartbeat", period)
-        self.task = asyncio.create_task(self._beat(period / BEATS_PER_PERIOD))
+        self._send(self._beat_message())
+        logger.info("systemd watchdog: restarted after %.0fs without a heartbeat", self.period)
+        self.task = asyncio.create_task(self._beat(self.period / BEATS_PER_PERIOD))
         return self.task
+
+    async def on_startup(self, app=None):
+        """aiohttp on_startup hook: ready only once every other start-up hook has run."""
+        self.start()
+
+    def _beat_message(self):
+        # The watchdog's timeout rides along with every beat. Sent once, a
+        # lost datagram left the watchdog unarmed for good, beats and all
+        # (DEFECTS F26); restating it costs nothing.
+        return "WATCHDOG=1\nWATCHDOG_USEC={}".format(int(self.period * 1e6))
 
     async def _beat(self, interval):
         due = self._clock() + interval
@@ -109,7 +136,7 @@ class Heartbeat:
             # sent from the event loop itself, so it stops when the loop does.
             await asyncio.sleep(1)
             if self._clock() >= due:
-                self._send("WATCHDOG=1")
+                self._send(self._beat_message())
                 self.beats += 1
                 due = self._clock() + interval
 

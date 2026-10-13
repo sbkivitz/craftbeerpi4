@@ -41,7 +41,12 @@ class FermentationController:
         # the interrupted one, resuming "the first STOP step" picked the paused
         # one (F7).
         self.interrupted = {}
-        self.cbpi.app.on_cleanup.append(self.shutdown)
+        # on_shutdown, not on_cleanup. aiohttp runs on_shutdown, then waits up
+        # to its shutdown timeout for open requests - the interface's
+        # websocket is one, for as long as a browser is open - and only then
+        # runs on_cleanup. systemd's SIGKILL arrives first, so fermenter
+        # actors were never switched off on a stop (DEFECTS F22).
+        self.cbpi.app.on_shutdown.append(self.shutdown)
 
     async def init(self):
         logging.info("INIT Fermentation Controller")
@@ -118,7 +123,22 @@ class FermentationController:
                 self.logger.error(e)
 
     async def shutdown(self, app=None, fermenterid=None):
-        self.save()
+        """Stop fermenters: every one when the server stops, or one (`fermenterid`).
+
+        One fermenter is shut down only to load a new recipe onto it. That
+        stops its steps and deliberately LEAVES its temperature logic running:
+        the beer in the tank still needs holding while the profile is
+        replaced, and with AutoMode No on every step nothing else would ever
+        switch control back on. Its actors are switched off only if no logic
+        is driving them - otherwise the logic owns them, and switching them
+        off just had it switch them back on a second later (DEFECTS F25).
+        """
+        try:
+            self.save()
+        except Exception as e:  # noqa: BLE001
+            # Now an on_shutdown hook: aiohttp stops at the first one that
+            # raises, so a full SD card here would skip every stop after it.
+            self.logger.error("Could not save fermenters while shutting down: %s", e)
         if fermenterid == None:
             for fermenter in self.data:
                 self.logger.info("Shutdown {}".format(fermenter.name))
@@ -134,7 +154,9 @@ class FermentationController:
             fermenter = self._find_by_id(fermenterid)
             self.logger.info("Shutdown {}".format(fermenter.name))
             await self._stop_steps(fermenter)
-            await self._deenergize(fermenter)
+            instance = getattr(fermenter, "instance", None)
+            if instance is None or not self._logic_alive(instance):
+                await self._deenergize(fermenter)
 
     async def load(self):
         try:

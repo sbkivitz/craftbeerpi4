@@ -16,9 +16,22 @@ class CBPiWebSocket:
         self.logger = logging.getLogger(__name__)
         self.cbpi.app.add_routes([web.get("/ws", self.websocket_handler)])
         self.cbpi.bus.register_object(self)
+        # An open websocket is a request in progress for as long as the page
+        # is open, and aiohttp waits for requests in progress before running
+        # its cleanup - the minute it waited was longer than systemd allows a
+        # stop, so cleanup never ran (DEFECTS F22). Pages reconnect on their
+        # own when the server is back.
+        self.cbpi.app.on_shutdown.append(self.close_all)
 
         # if self.cbpi.config.static.get("ws_push_all", False):
         self.cbpi.bus.register("#", self.listen)
+
+    async def close_all(self, app=None):
+        for ws in list(self._clients):
+            try:
+                await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message=b"Server shutdown")
+            except Exception as e:  # noqa: BLE001 - one bad socket must not keep the rest open
+                self.logger.debug("closing a websocket on shutdown failed: %s", e)
 
     async def listen(self, topic, **kwargs):
         data = dict(topic=topic, data=dict(**kwargs))
