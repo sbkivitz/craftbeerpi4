@@ -20,9 +20,11 @@ class FermenterAutostart(CBPiExtension):
 
     Now, for each fermenter whose logic says AutoStart Yes:
       - the logic is started if it is not running;
-      - a profile that was running when the server stopped is resumed (load()
-        marks its active step STOP), and a profile nobody started is left
-        alone.
+      - a profile that was RUNNING when the server stopped is resumed. Not one
+        the brewer paused: both are persisted as STOP, so the controller
+        records which steps load() found ACTIVE (DEFECTS F4 - the first cut
+        of this fix resumed paused profiles too). A profile nobody started is
+        left alone.
 
     It runs as an on_startup initializer, after every controller has loaded.
     The constructor runs while plugins load, before sensors and actors exist,
@@ -44,7 +46,9 @@ class FermenterAutostart(CBPiExtension):
                 if item.instance is None or not item.instance.state:
                     await self.controller.start_logic(item.id)
                     logging.info("Autostart: temperature control on for %s", item.name)
-                if self.controller._find_by_status(item.steps, StepState.STOP) is not None:
+                if (item.id in getattr(self.controller, "interrupted", ())
+                        and self.controller._find_by_status(item.steps, StepState.STOP)
+                        is not None):
                     await self.controller.start(item.id)
                     logging.info("Autostart: resumed the profile of %s", item.name)
             except Exception as e:  # noqa: BLE001 - one fermenter must not stop the rest
