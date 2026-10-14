@@ -91,6 +91,7 @@ class ReadThread(threading.Thread):
         # this loop keeps its previous value when a read fails, so without this
         # there is nothing to tell a live probe from a disconnected one.
         self.last_success = None
+        self.last_success_monotonic = None
         self.failing = False
 
     def shutdown(self):
@@ -125,6 +126,10 @@ class ReadThread(threading.Thread):
                             temp = float(content.split("=")[-1]) / 1000  # temp in Celcius
                             self.value = temp
                             self.last_success = time.time()
+                            # What its age is judged by: a clock set back an
+                            # hour made an hour-old reading look fresh
+                            # (DEFECTS F45).
+                            self.last_success_monotonic = time.monotonic()
                             if self.failing:
                                 self.failing = False
                                 logging.info(
@@ -285,7 +290,12 @@ class OneWire(CBPiSensor):
         if last_success is None:
             # Thread started but has never managed a good read.
             return False
-        age = time.time() - last_success
+        stamp = getattr(self.t, "last_success_monotonic", None)
+        if isinstance(stamp, (int, float)):
+            age = time.monotonic() - stamp
+        else:
+            # A reader that stamps only the wall clock.
+            age = time.time() - last_success
         if age > max(self.MAX_READ_AGE, self.interval * 3):
             if not getattr(self, "_stale_logged", False):
                 self._stale_logged = True

@@ -5,7 +5,9 @@ import logging
 import os
 import os.path
 import pathlib
+import shutil
 import sys
+import time
 from abc import abstractmethod
 from os import listdir
 from os.path import isfile, join
@@ -13,8 +15,8 @@ from os.path import isfile, join
 import cbpi
 import shortuuid
 import yaml
-from cbpi.api.dataclasses import Fermenter, FermenterStep, Props, Step
-from cbpi.api.persist import atomic_write_json
+from cbpi.api.dataclasses import Fermenter, FermenterStep, NotificationType, Props, Step
+from cbpi.api.persist import atomic_write_json, quarantine
 from cbpi.controller.basic_controller2 import BasicController
 from cbpi.api.decorator import normalize_action_parameters, resolve_action
 from tabulate import tabulate
@@ -41,6 +43,8 @@ class FermentationController:
         # the interrupted one, resuming "the first STOP step" picked the paused
         # one (F7).
         self.interrupted = {}
+        # Fermenters whose recipe is being replaced right now (see toggle).
+        self._replacing = set()
         # on_shutdown, not on_cleanup. aiohttp runs on_shutdown, then waits up
         # to its shutdown timeout for open requests - the interface's
         # websocket is one, for as long as a browser is open - and only then
@@ -129,9 +133,12 @@ class FermentationController:
         stops its steps and deliberately LEAVES its temperature logic running:
         the beer in the tank still needs holding while the profile is
         replaced, and with AutoMode No on every step nothing else would ever
-        switch control back on. Its actors are switched off only if no logic
-        is driving them - otherwise the logic owns them, and switching them
-        off just had it switch them back on a second later (DEFECTS F25).
+        switch control back on. A step on AutoMode Yes switches the logic off
+        as it stops, so that is refused while the recipe is replaced, and the
+        logic restarted if it stopped anyway (DEFECTS F44). Its actors are
+        switched off only if no logic is driving them - otherwise the logic
+        owns them, and switching them off just had it switch them back on a
+        second later (DEFECTS F25).
         """
         try:
             self.save()
@@ -153,27 +160,96 @@ class FermentationController:
         else:
             fermenter = self._find_by_id(fermenterid)
             self.logger.info("Shutdown {}".format(fermenter.name))
+            was_alive = self._logic_alive_for(fermenter)
             await self._stop_steps(fermenter)
-            instance = getattr(fermenter, "instance", None)
-            if instance is None or not self._logic_alive(instance):
+            if was_alive and not self._logic_alive_for(fermenter):
+                # Stopped by a step's own cleanup, some way toggle() did not
+                # see. It was holding the beer, and nothing else would switch
+                # it on again (DEFECTS F44).
+                self.logger.warning("%s: temperature control stopped while its recipe was "
+                                    "replaced - switching it on again", fermenter.name)
+                await self.start_logic(fermenterid)
+            if not self._logic_alive_for(fermenter):
                 await self._deenergize(fermenter)
 
-    async def load(self):
-        try:
-            with open(self.path) as json_file:
-                data = json.load(json_file)
+    def _logic_alive_for(self, fermenter):
+        instance = getattr(fermenter, "instance", None)
+        return instance is not None and self._logic_alive(instance)
 
-                for i in data["data"]:
-                    self.data.append(self._create(i))
-        except Exception:
-            logging.warning("Invalid fermenter_data.json file - Creating empty file")
-            os.remove(self.path)
-            data = {"data": []}
-            destfile = self.cbpi.config_folder.get_file_path("fermenter_data.json")
-            with open(destfile, "w") as f:
-                json.dump(data, f, indent=4, sort_keys=True)
-            for i in data["data"]:
-                self.data.append(self._create(i))
+    async def load(self):
+        data, problem = self._read(self.path)
+        if problem is not None:
+            # Kept, not deleted: it is the only copy of every fermenter and
+            # profile, and it was deleted and replaced with an empty one -
+            # silently - so an unattended tank came back from a power cut with
+            # no fermenter and nothing controlling it (DEFECTS F38).
+            kept = quarantine(self.path)
+            data, backup_problem = self._read(self.path + self.BACKUP_SUFFIX)
+            if backup_problem is None:
+                self._alarm("fermenter_data.json could not be read ({}). Restored the copy "
+                            "saved with the last change; the unreadable file is kept as {}."
+                            .format(problem, kept))
+            else:
+                data = {"data": []}
+                self._alarm("fermenter_data.json could not be read ({}), and neither could "
+                            "its backup ({}). Starting with no fermenters; the unreadable "
+                            "file is kept as {}.".format(problem, backup_problem, kept))
+            atomic_write_json(self.path, data, sort_keys=True)
+        left_out = []
+        for entry in data["data"]:
+            fermenter = self._create(entry)
+            if fermenter is None:
+                left_out.append(entry)
+            else:
+                self.data.append(fermenter)
+        if left_out:
+            # The next save would drop them for good: the file as it was is kept.
+            kept = self._copy_aside(self.path)
+            names = ", ".join(str(e.get("name", e.get("id", "?")) if isinstance(e, dict) else e)
+                              for e in left_out)
+            self._alarm("{} fermenter(s) could not be loaded and are left out: {}. The file "
+                        "as it was is kept as {}.".format(len(left_out), names, kept))
+        elif problem is None:
+            self._write_backup(data)
+
+    # The last fermenter_data.json saved, kept beside it.
+    BACKUP_SUFFIX = ".bak"
+
+    @staticmethod
+    def _read(path):
+        """(data, None) for a readable fermenter file, else (None, why not)."""
+        try:
+            with open(path) as json_file:
+                data = json.load(json_file)
+            if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                return None, "no fermenter list in it"
+            return data, None
+        except FileNotFoundError:
+            return None, "missing"
+        except Exception as e:  # noqa: BLE001
+            return None, "{}: {}".format(type(e).__name__, e)
+
+    def _write_backup(self, data):
+        try:
+            atomic_write_json(self.path + self.BACKUP_SUFFIX, data, sort_keys=True)
+        except Exception as e:  # noqa: BLE001 - the backup must never break a save
+            self.logger.warning("Could not write the fermenter backup: %s", e)
+
+    @staticmethod
+    def _copy_aside(path):
+        target = "{}.unloadable-{}".format(path, time.strftime("%Y%m%d-%H%M%S"))
+        try:
+            shutil.copy2(path, target)
+            return target
+        except OSError:
+            return None
+
+    def _alarm(self, message):
+        self.logger.error(message)
+        try:
+            self.cbpi.notify("Fermenters", message, NotificationType.ERROR)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _create_step(self, fermenter, item):
         id = item.get("id")
@@ -398,6 +474,7 @@ class FermentationController:
     def save(self):
         data = dict(data=list(map(lambda item: item.to_dict(), self.data)))
         atomic_write_json(self.path, data, sort_keys=True)
+        self._write_backup(data)
 
     def create_step(self, id, item):
         try:
@@ -621,6 +698,13 @@ class FermentationController:
 
             if item.instance is None or item.instance.state == False:
                 await self.start_logic(id)
+            elif id in getattr(self, "_replacing", ()):
+                # A step stopping because its recipe is being replaced. With
+                # AutoMode Yes its on_stop switches control off - and with the
+                # new recipe's steps on AutoMode No, nothing ever switched it
+                # on again: no control, and nobody told (DEFECTS F44).
+                logging.info("%s: recipe being replaced - temperature control stays on",
+                             item.name)
             else:
                 await item.instance.stop()
             self.push_update()
@@ -790,10 +874,14 @@ class FermentationController:
             yaml.dump(data, file)
 
     async def load_recipe(self, data, fermenterid, name):
+        replacing = self.__dict__.setdefault("_replacing", set())
+        replacing.add(fermenterid)
         try:
             await self.shutdown(None, fermenterid)
         except:
             pass
+        finally:
+            replacing.discard(fermenterid)
         fermenter = self._find_by_id(fermenterid)
 
         def add_runtime_data(item):

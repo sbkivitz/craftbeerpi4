@@ -67,18 +67,20 @@ def assess(state, what="temperature", label="", unit=None, celsius=FERMENTER_C,
         return None, ("silent", "{} sensor{} is not reporting".format(name, who))
     raw = state.get("value")
     value = finite(raw)
-    if value is None:
-        return None, ("value", "{} sensor{} reads {!r}, not a number".format(name, who, raw))
     age = finite(state.get("age"))
     limit = finite(state.get("max_age")) or default_max_age
     if age is None:
-        # The third element is how long this may last before it is worth an
-        # alert: a sensor's first publish can be a whole interval after start-up
-        # (OneWire skips its first cycle until the bus has read), and alerting
-        # on every boot teaches the brewer to ignore alerts. Control is held
-        # off meanwhile all the same.
+        # Never published, whatever its placeholder value - OneWire's is
+        # None, and judging that first raised the boot-time alarm F27 was
+        # meant to remove (DEFECTS F49). The third element is how long this
+        # may last before it is worth an alert: a sensor's first publish can
+        # be a whole interval after start-up (OneWire skips its first cycle
+        # until the bus has read), and alerting on every boot teaches the
+        # brewer to ignore alerts. Control is held off meanwhile all the same.
         return None, ("unproven", "{} sensor{} has not reported a reading yet".format(name, who),
                       limit)
+    if value is None:
+        return None, ("value", "{} sensor{} reads {!r}, not a number".format(name, who, raw))
     if age > limit:
         return None, ("stale", "{} sensor{} has not updated for {:.0f}s".format(name, who, age))
     if age < -1.0:

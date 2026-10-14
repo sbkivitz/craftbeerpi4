@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import time
+from collections import OrderedDict
 from datetime import datetime
 from email import message
 
@@ -55,15 +57,24 @@ class NotificationController:
         except Exception as e:
             pass
 
+    # Seconds before the same log message raises a notification again. With
+    # NOTIFY_ON_ERROR on, a fault that logs every control pass sent a
+    # notification every second - to the phone, through any listener - for as
+    # long as it lasted (DEFECTS F39).
+    LOG_NOTIFY_REPEAT_EVERY = 3600
+    LOG_NOTIFY_REMEMBERED = 200
+
     def notify_log_event(self, record):
         NOTIFY_ON_ERROR = self.cbpi.config.get("NOTIFY_ON_ERROR", "No")
-        if NOTIFY_ON_ERROR == "Yes":
+        if NOTIFY_ON_ERROR == "Yes" and record.levelno > 20:
             try:
+                # The message, not its template: str(record.msg) sent
+                # "Actor %s reports still ON..." with the actor left out.
+                message = record.getMessage()
+            except Exception:  # noqa: BLE001
                 message = str(record.msg)
-            except:
-                message = record.msg
             try:
-                if record.levelno > 20:
+                if self._log_notification_due(record.levelno, message):
                     # on log events higher then INFO we want to notify all clients
                     type = NotificationType.WARNING
                     if record.levelno > 30:
@@ -73,6 +84,19 @@ class NotificationController:
                     )
             except Exception as e:
                 pass
+        return True
+
+    def _log_notification_due(self, level, message):
+        sent = self.__dict__.setdefault("_log_notified", OrderedDict())
+        key = (level, message)
+        now = time.monotonic()
+        last = sent.get(key)
+        if last is not None and now - last < self.LOG_NOTIFY_REPEAT_EVERY:
+            return False
+        sent[key] = now
+        sent.move_to_end(key)
+        while len(sent) > self.LOG_NOTIFY_REMEMBERED:
+            sent.popitem(last=False)
         return True
 
     def get_state(self):

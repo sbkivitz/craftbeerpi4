@@ -5,7 +5,6 @@ import time
 from cbpi.api import *
 from cbpi.api import readings
 from cbpi.api.dataclasses import NotificationType
-from cbpi.api.tasks import bounded
 from cbpi.api.readings import finite
 from cbpi.api.step import StepState
 from cbpi.controller.fermentation_controller import FermentationController
@@ -99,7 +98,9 @@ class _GuardedHysteresis:
 
     Every command is checked against what the actor then reports. An actor
     that will not switch off is retried every tick and reported, and the
-    other one is not started while it runs (F17).
+    other one is not started while one runs that could be switched off
+    (F17) - but one stuck on does not hold the other side off: cooling
+    against a heater that cannot be stopped is the protection (F37).
     """
 
     # Consecutive bad ticks before anyone is told. At one tick a second this
@@ -141,6 +142,9 @@ class _GuardedHysteresis:
         # owned_actors: a heater reassigned away is still a heater until it
         # has been seen off (DEFECTS F32).
         self.__dict__.setdefault("_roles", {})
+        # Actors whose last switch-off left them on. Kept beyond this run too:
+        # a restart does not unstick a relay (DEFECTS F37).
+        self.__dict__.setdefault("_stuck", set())
         self._missing_ticks = 0
         self.heater = self.cooler = None
         self.valve = None
@@ -287,12 +291,15 @@ class _GuardedHysteresis:
             # driver - a missing actor is not an off one (DEFECTS F31).
             done = await self._off_bounded(actor_id)
             if done:
+                self._stuck.discard(actor_id)
                 self._clear_alert(("stuck", actor_id), "{} switched off".format(actor_id))
                 self._alerts.pop(("unresponsive", actor_id), None)
             else:
+                self._stuck.add(actor_id)
                 self._raise_alert(("stuck", actor_id),
                                   ("stuck", "{} does not switch off".format(actor_id)),
-                                  "retrying every second")
+                                  "retrying every second, and not holding the other "
+                                  "side off for it")
             return done
         # Owned before it is energized, so no failure from here on can leave
         # it running with nobody responsible for it (F19).
@@ -300,13 +307,12 @@ class _GuardedHysteresis:
         self._driver(actor_id)
         try:
             if self.USES_MAX_POWER:
-                await bounded(self.actor_on(actor_id, power, power), self.ACTOR_TIMEOUT)
+                await self._command(actor_id, "on", lambda: self.actor_on(actor_id, power, power))
             else:
-                await bounded(self.actor_on(actor_id), self.ACTOR_TIMEOUT)
-        except asyncio.TimeoutError:
-            logging.error("Fermenter %s: switching %s %s did not finish within %ss",
-                          self._fermenter_name(), actor_id, "on" if on else "off",
-                          self.ACTOR_TIMEOUT)
+                await self._command(actor_id, "on", lambda: self.actor_on(actor_id))
+        except asyncio.TimeoutError as e:
+            logging.error("Fermenter %s: switching %s on did not finish: %s",
+                          self._fermenter_name(), actor_id, e)
         except asyncio.CancelledError:
             if self._cancelled_by_request():
                 raise
@@ -332,7 +338,23 @@ class _GuardedHysteresis:
         return found | ({assigned} if assigned else set())
 
     def _any_on(self, role):
-        return any(self._actor_on(a) is True for a in self._role_actors(role))
+        """Is an actor of `role` running that control could switch off?
+
+        One that will not switch off does not count (DEFECTS F37). Keeping
+        the other side off exists so heating and cooling never run against
+        each other by mistake; against a heater stuck on, the cooler running
+        is the protection, not the mistake. Counting it held the glycol off
+        while one welded relay - or one lost MQTT message - cooked the beer.
+        """
+        return any(self._actor_on(a) is True and a not in self._stuck
+                   for a in self._role_actors(role))
+
+    def _review_stuck(self):
+        """Forget, and say so, an actor that would not switch off but is off now."""
+        for actor_id in list(self._stuck):
+            if self._actor_on(actor_id) in (False, None):
+                self._stuck.discard(actor_id)
+                self._clear_alert(("stuck", actor_id), "{} is off now".format(actor_id))
 
     async def _retire(self, current):
         """Switch off every actor this logic owned that is no longer assigned to it.
@@ -451,6 +473,7 @@ class _GuardedHysteresis:
                 self._roles[actor_id] = role
                 self._driver(actor_id)
         await self._retire(current)
+        self._review_stuck()
 
         if heater is not None and heater == cooler:
             await self._suspend(("config", "The same actor is set as both heater and cooler"))
@@ -472,7 +495,9 @@ class _GuardedHysteresis:
             # Heating and cooling at once - switched by hand, or left so by an
             # earlier configuration, or a former heater or cooler that has not
             # switched off. Never leave them fighting: all of them off, and
-            # the rule decides afresh next tick.
+            # the rule decides afresh next tick. Not when one of them is stuck
+            # on: then the other is counteracting it, and that is the point
+            # (DEFECTS F37).
             logging.info("Fermenter %s: heating and cooling were both on - switching all off",
                          self._fermenter_name())
             for actor_id in self._role_actors("heater") | self._role_actors("cooler"):
@@ -481,10 +506,11 @@ class _GuardedHysteresis:
 
         # The rule itself is unchanged - the same comparisons, in the same
         # order, against the state read at the top of the tick. What is new is
-        # that neither side is started while any actor of the other is
-        # running - the assigned one or a former one still owned - judged
-        # from what the actors report NOW, after any switch-off above
-        # (DEFECTS F11, F17, F32).
+        # that neither side is started while an actor of the other is running
+        # that can be switched off - the assigned one or a former one still
+        # owned - judged from what the actors report NOW, after any switch-off
+        # above (DEFECTS F11, F17, F32). One that cannot does not hold the
+        # other side off (F37).
         if heater_actor is not None:
             if reading + h_on <= target and not heater_on:
                 if self._any_on("cooler"):
