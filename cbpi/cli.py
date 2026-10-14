@@ -6,6 +6,7 @@ from zipfile import ZipFile
 
 import requests
 from cbpi import __codename__, __version__
+from cbpi.api import log_repeats
 from cbpi.configFolder import ConfigFolder
 from cbpi.craftbeerpi import CraftBeerPi
 from cbpi.utils.utils import load_config
@@ -691,7 +692,11 @@ def main(context, config_folder_path, logs_folder_path, debug_log_level):
             handler.setFormatter(formatter)
         except Exception as e:
             logging.critical(e, exc_info=True)
-    
+
+    # Every handler, whichever set it up: a lasting fault must not flood the
+    # log it will be diagnosed from (DEFECTS F40).
+    log_repeats.install(logger)
+
     cbpi_cli = CraftBeerPiCli(config)
     context.obj = cbpi_cli
 

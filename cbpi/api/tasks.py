@@ -19,6 +19,53 @@ async def bounded(awaitable, seconds):
         return await awaitable
 
 
+def _retrieve(task):
+    # An abandoned task's exception is never awaited by anyone; reading it
+    # here keeps asyncio from logging "Task exception was never retrieved".
+    if not task.cancelled():
+        task.exception()
+
+
+def spawn(factory, holder=None):
+    """factory() in a task of its own; `holder`, a set, keeps it while it runs."""
+    task = asyncio.ensure_future(factory())
+    task.add_done_callback(_retrieve)
+    if holder is not None:
+        holder.add(task)
+        task.add_done_callback(holder.discard)
+    return task
+
+
+async def wait_within(task, seconds):
+    """`task`'s result, or TimeoutError once `seconds` have passed - whatever it does.
+
+    bounded() cancels at its deadline and then waits for the awaitable to
+    finish: for ever, if the awaitable catches the cancellation and carries
+    on. A driver with a bare `except:` around a retry loop does exactly that,
+    and the fermenter loop that called it stopped there - no control, no
+    alert (DEFECTS F46). This stops waiting at the deadline: the task is
+    cancelled and left to end on its own.
+
+    If the caller is cancelled first, so is the task, and it gets what is
+    left of its time to unwind before the cancellation goes on - so the
+    cleanup that follows does not race a cooperative driver's own.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    try:
+        done, _ = await asyncio.wait({task}, timeout=seconds)
+    except asyncio.CancelledError:
+        task.cancel()
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.wait({task}, timeout=remaining)
+        raise
+    if not done:
+        task.cancel()
+        raise asyncio.TimeoutError("still running after {}s".format(seconds))
+    return task.result()
+
+
 def cancellation_is_real():
     """Is the CancelledError being handled a cancellation of the CURRENT task?
 

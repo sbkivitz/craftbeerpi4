@@ -3,7 +3,7 @@ import inspect
 import logging
 
 from cbpi.api.dataclasses import Actor, Props
-from cbpi.api.tasks import cancellation_is_real
+from cbpi.api.tasks import cancellation_is_real, spawn, wait_within
 from cbpi.controller.basic_controller2 import BasicController
 from tabulate import tabulate
 
@@ -62,6 +62,72 @@ class ActorController(BasicController):
             logging.error("Actor %s did not switch off within %ss of shutdown",
                           sweeps[task], self.SHUTDOWN_OFF_BUDGET)
             task.cancel()
+
+    def _undo_on_later(self, actor_id, driver):
+        """Switch off, in a task of its own, a driver whose switch-on was cut short at shutdown.
+
+        Its own task: the one that was switching it on is being cancelled, and
+        an await in it would be cancelled too.
+        """
+        async def undo():
+            try:
+                await wait_within(spawn(driver.off), self.SHUTDOWN_OFF_BUDGET)
+                logging.info("Actor %s: its switch-on was cut short as shutdown began - "
+                             "switched off", actor_id)
+            except Exception as e:  # noqa: BLE001
+                logging.error("Actor %s: could not switch off a switch-on cut short at "
+                              "shutdown: %r", actor_id, e)
+
+        undoing = getattr(self, "_undoing", None)
+        if undoing is None:
+            undoing = self._undoing = set()
+        spawn(undo, undoing)
+
+    # Seconds an actor that is being edited or deleted gets to switch off.
+    REPLACE_OFF_TIMEOUT = 5
+
+    async def _off_before_replacing(self, id, what):
+        """Switch an actor off before its driver is replaced or discarded.
+
+        stop() ends the driver's task, and only a driver whose on_stop drives
+        its output low - the GPIO actor - is then off. An MQTT or HTTP relay
+        that was on stayed on, its replacement reported off, and nothing ever
+        switched the relay off again (DEFECTS F43).
+        """
+        item = self.find_by_id(id)
+        driver = getattr(item, "instance", None)
+        if driver is None:
+            return
+        try:
+            await wait_within(spawn(driver.off), self.REPLACE_OFF_TIMEOUT)
+        except asyncio.CancelledError:
+            if cancellation_is_real():
+                raise
+            logging.error("Switching off actor %s before it was %s was cancelled", id, what)
+        except Exception as e:  # noqa: BLE001 - the edit goes ahead; the brewer is told
+            logging.error("Could not switch off actor %s before it was %s: %r", id, what, e)
+        try:
+            still_on = driver.state is True
+        except Exception:  # noqa: BLE001
+            still_on = True
+        if still_on:
+            message = "'{}' was {} while on and did not switch off - check its output".format(
+                getattr(item, "name", id), what)
+            logging.error(message)
+            try:
+                from cbpi.api.dataclasses import NotificationType
+
+                self.cbpi.notify("Actor", message, NotificationType.ERROR)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def update(self, item):
+        await self._off_before_replacing(item.id, "edited")
+        return await super().update(item)
+
+    async def delete(self, id):
+        await self._off_before_replacing(id, "deleted")
+        return await super().delete(id)
 
     def _on_accepts_output(self, instance):
         """Does this driver's on() take `output` as well as `power`?
@@ -351,10 +417,21 @@ class ActorController(BasicController):
                         # No try/except around this. A driver that fails to
                         # energize must surface that failure, not be asked a
                         # second time with different arguments.
-                        if self._on_accepts_output(item.instance):
-                            await item.instance.on(power, output)
-                        else:
-                            await item.instance.on(power)
+                        driver = item.instance
+                        try:
+                            if self._on_accepts_output(driver):
+                                await driver.on(power, output)
+                            else:
+                                await driver.on(power)
+                        except BaseException:
+                            # Raised or cancelled after shutdown began - the
+                            # request cancelled while the relay had switched
+                            # and the driver waited for its acknowledgement.
+                            # The output may be on, and nothing after this
+                            # would ever switch it off (DEFECTS F41).
+                            if getattr(self, "_shutting_down", False):
+                                self._undo_on_later(id, driver)
+                            raise
                         if getattr(self, "_shutting_down", False):
                             # Shutdown began while this was switching on, and
                             # its sweep may already have passed this actor: a
@@ -362,7 +439,7 @@ class ActorController(BasicController):
                             # (DEFECTS F35). Undo it.
                             logging.info("Actor %s: shutdown began during its switch-on - "
                                          "switching it off again", id)
-                            await item.instance.off()
+                            await driver.off()
                             return False
 
                 if blocking is not None:

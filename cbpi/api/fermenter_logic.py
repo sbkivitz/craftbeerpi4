@@ -5,7 +5,29 @@ from abc import ABCMeta
 
 from cbpi.api.base import CBPiBase
 from cbpi.api.extension import CBPiExtension
-from cbpi.api.tasks import bounded, cancellation_is_real
+from cbpi.api.tasks import bounded, cancellation_is_real, spawn, wait_within  # noqa: F401 - bounded: re-exported, as before
+
+
+class _Unknown:
+    __slots__ = ()
+
+    def __repr__(self):
+        return "UNKNOWN"
+
+
+# An actor whose driver is there but whose state cannot be read: neither on
+# nor off. Read as off, it let ownership lapse and cleared its alert while it
+# may still have been running (DEFECTS F42).
+UNKNOWN = _Unknown()
+
+
+class _Command:
+    """An actor command in flight, and whether a later switch-off replaced it."""
+
+    __slots__ = ("kind", "task", "superseded")
+
+    def __init__(self, kind, task):
+        self.kind, self.task, self.superseded = kind, task, False
 
 
 class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
@@ -41,17 +63,25 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
     RESTART_NOTIFY_EVERY = 3600
 
     # Longest one actor command may take before it is abandoned. A driver
-    # that hangs must not hang the logic, its recovery or its shutdown.
+    # that hangs must not hang the logic, its recovery or its shutdown - and
+    # a command runs in a task of its own so that this holds even for one
+    # that ignores being cancelled (DEFECTS F46).
     ACTOR_TIMEOUT = 10
 
     # Longest on_start / on_stop may take.
     HOOK_TIMEOUT = 30
 
+    # Longest stop() waits for the logic's task to end once it is cancelled;
+    # None means HOOK_TIMEOUT + 4 * ACTOR_TIMEOUT, room for its own on_stop
+    # and switch-offs. Past it the task is not cooperating, and its actors
+    # are switched off without it (DEFECTS F46).
+    STOP_TIMEOUT = None
+
     ROLES = ("heater", "cooler", "valve")
 
     # Defaults for anything __init__ sets, so a subclass that defines its own
     # __init__ without calling this one still runs - as one did before these
-    # existed. The two sets come from __getattr__ below: a mutable class
+    # existed. The sets and dicts come from __getattr__ below: a mutable class
     # attribute would be one set shared by every fermenter.
     state = False
     running = False
@@ -64,12 +94,13 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
 
     def __getattr__(self, name):
         # Reached only when normal lookup fails.
-        if name in ("owned_actors", "_own_tasks"):
+        if name in ("owned_actors", "_own_tasks", "_command_tasks"):
             value = set()
             setattr(self, name, value)
             return value
-        if name == "_drivers":
-            # actor id -> the driver last seen for it (see _driver).
+        if name in ("_drivers", "_inflight"):
+            # actor id -> the driver last seen for it (see _driver), and
+            # actor id -> its command in flight (see _command).
             value = {}
             setattr(self, name, value)
             return value
@@ -146,7 +177,7 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
                 self.running = True
                 on_stop_owed = True
                 try:
-                    await bounded(self.on_start(), self.HOOK_TIMEOUT)
+                    await self._within(self.on_start, self.HOOK_TIMEOUT)
                     self.cancel_reason = await self.run()
                 except asyncio.CancelledError as e:
                     if self._cancelled_by_request():
@@ -154,8 +185,11 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
                     failure = e
                 except Exception as e:  # noqa: BLE001 - recovered from below
                     failure = e
-                on_stop_owed = False
                 await self._hook_quietly(self.on_stop)
+                # Paid only once it has run to the end: a stop arriving while
+                # it was awaiting cut it short, and it was never run again
+                # (DEFECTS F47).
+                on_stop_owed = False
                 if self.stop_requested:
                     break
 
@@ -171,6 +205,7 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
             # once this task is done; one from inside - the logic stopping
             # itself - has nobody else to do it (DEFECTS F30).
             if self._stopping is None:
+                await self._end_children()
                 await self._clean_up("Temperature control stopped")
         except asyncio.CancelledError:
             if on_stop_owed:
@@ -181,6 +216,7 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
                 # this logic's actors off.
                 logging.warning("Fermenter %s: temperature control was cancelled",
                                 self._fermenter_name())
+                await self._end_children()
                 await self._deenergize()
             raise
         finally:
@@ -189,15 +225,44 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
             self.running = False
             self.state = False
 
+    async def _within(self, factory, seconds):
+        """factory() in a task of the logic's own, for at most `seconds` whatever it does.
+
+        Its own task so that the deadline holds against code that catches the
+        cancellation and carries on (DEFECTS F46); one the logic counts as its
+        own, so a hook or driver that calls stop() is still recognised as the
+        logic stopping itself (F23).
+        """
+        return await wait_within(spawn(factory, self._command_tasks), seconds)
+
     async def _hook_quietly(self, hook):
         try:
-            await bounded(hook(), self.HOOK_TIMEOUT)
+            await self._within(hook, self.HOOK_TIMEOUT)
         except asyncio.CancelledError:
             if self._cancelled_by_request():
                 raise
             logging.error("Fermenter logic %s: %s was cancelled", self.id, hook.__name__)
         except Exception as e:  # noqa: BLE001 - a failing hook must not stop recovery
             logging.error("Fermenter logic %s: %s failed: %r", self.id, hook.__name__, e)
+
+    async def _end_children(self):
+        """Cancel the logic's own tasks - spunding's loops, a plugin's - and wait, bounded.
+
+        Not left to run() or to a plugin's on_stop: a stop that arrived while
+        on_stop was awaiting cut it short before it cancelled its loop, and
+        that loop switched the pump back on after cleanup had switched it off
+        (DEFECTS F47).
+        """
+        current = asyncio.current_task()
+        children = [t for t in self._own_tasks if t is not current and not t.done()]
+        for task in children:
+            task.cancel()
+        if not children:
+            return
+        _, pending = await asyncio.wait(children, timeout=self.ACTOR_TIMEOUT)
+        if pending:
+            logging.error("Fermenter %s: %d task(s) of its temperature control did not end "
+                          "when cancelled", self._fermenter_name(), len(pending))
 
     async def _wait_to_restart(self, delay):
         """Sleep `delay` wall-clock seconds; False if stopped meanwhile."""
@@ -235,10 +300,11 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
         return self._drivers.get(actor_id), False
 
     def _actor_on(self, actor_id):
-        """True or False from the actor's driver; None if this logic never saw one.
+        """True or False from the actor's driver; UNKNOWN if it cannot be read; None if
+        this logic never saw a driver for it.
 
         None is "not ours to worry about": a logic only energizes an actor
-        through a driver it has seen.
+        through a driver it has seen. UNKNOWN is not off (DEFECTS F42).
         """
         driver, _ = self._driver(actor_id)
         if driver is None:
@@ -246,7 +312,41 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
         try:
             return driver.state is True
         except Exception:  # noqa: BLE001
-            return None
+            return UNKNOWN
+
+    async def _command(self, actor_id, kind, factory):
+        """Run one actor command, "on" or "off", for at most ACTOR_TIMEOUT.
+
+        In a task of its own: abandoned at the deadline rather than waited
+        for, so a driver that never answers - even one that swallows the
+        cancellation - cannot stop the loop that would report it (DEFECTS
+        F46). One command per actor at a time, so a dead driver does not
+        collect a new task every tick; but a switch-off always goes out,
+        replacing a switch-on still pending.
+        """
+        pending = self._inflight.get(actor_id)
+        if pending is not None and not pending.task.done():
+            if kind == "on" or pending.kind == "off":
+                raise asyncio.TimeoutError("its previous switch-{} has not finished".format(
+                    pending.kind))
+            pending.superseded = True
+            pending.task.cancel()
+        task = spawn(factory, self._command_tasks)
+        command = self._inflight[actor_id] = _Command(kind, task)
+        if kind == "on":
+            task.add_done_callback(lambda _t: self._on_landed(actor_id, command))
+        return await wait_within(task, self.ACTOR_TIMEOUT)
+
+    def _on_landed(self, actor_id, command):
+        """A switch-on that was replaced by a switch-off, or outlived its logic, may still land."""
+        task = command.task
+        if task.cancelled() or task.exception() is not None:
+            return
+        if command.superseded or self.stop_requested:
+            logging.warning("Fermenter %s: switching %s on finished after it had been "
+                            "given up on - switching it off again",
+                            self._fermenter_name(), actor_id)
+            spawn(lambda: self._off_bounded(actor_id), self._command_tasks)
 
     async def _off_bounded(self, actor_id):
         """Switch one actor off; True once its driver reports off, or it never had one."""
@@ -255,13 +355,13 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
             return True
         try:
             if live:
-                await bounded(self.actor_off(actor_id), self.ACTOR_TIMEOUT)
+                await self._command(actor_id, "off", lambda: self.actor_off(actor_id))
             else:
                 # Not in the actor list: command the driver it had directly.
-                await bounded(driver.off(), self.ACTOR_TIMEOUT)
-        except asyncio.TimeoutError:
-            logging.error("Fermenter %s: switching %s off did not finish within %ss",
-                          self._fermenter_name(), actor_id, self.ACTOR_TIMEOUT)
+                await self._command(actor_id, "off", driver.off)
+        except asyncio.TimeoutError as e:
+            logging.error("Fermenter %s: switching %s off did not finish: %s",
+                          self._fermenter_name(), actor_id, e)
         except asyncio.CancelledError:
             if self._cancelled_by_request():
                 raise
@@ -270,7 +370,8 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
         except Exception as e:  # noqa: BLE001
             logging.error("Fermenter %s: switching %s off failed: %r",
                           self._fermenter_name(), actor_id, e)
-        return self._actor_on(actor_id) is not True
+        state = self._actor_on(actor_id)
+        return state is False or state is None
 
     async def _deenergize(self):
         """Every actor this logic is or was responsible for, off. Returns those still on.
@@ -342,7 +443,8 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
 
     def _in_own_task(self):
         current = asyncio.current_task()
-        return current is not None and (current is self.task or current in self._own_tasks)
+        return current is not None and (current is self.task or current in self._own_tasks
+                                        or current in self._command_tasks)
 
     async def stop(self):
         self.stop_requested = True
@@ -364,11 +466,27 @@ class CBPiFermenterLogic(CBPiBase, metaclass=ABCMeta):
         finally:
             self.state = False
 
+    def _stop_timeout(self):
+        if self.STOP_TIMEOUT is not None:
+            return self.STOP_TIMEOUT
+        return self.HOOK_TIMEOUT + 4 * self.ACTOR_TIMEOUT
+
     async def _stop_and_clean(self):
         task = self.task
         if task is not None and not task.done():
             task.cancel()
-            await asyncio.wait({task})
+            # Bounded: a run() that catches the cancellation and carries on
+            # left stop() - the switch, a deleted fermenter, shutdown - waiting
+            # for ever (DEFECTS F46).
+            await asyncio.wait({task}, timeout=self._stop_timeout())
+            if not task.done():
+                logging.error("Fermenter %s: temperature control did not stop within %ss - "
+                              "switching its actors off without it",
+                              self._fermenter_name(), self._stop_timeout())
+                self._notify("{} temperature control".format(self._fermenter_name()),
+                             "Did not stop when asked - its actors are being switched off, "
+                             "but it may switch them on again. Restart the server.", "ERROR")
+        await self._end_children()
         # Always, after the task: a task cancelled before its first turn never
         # ran any cleanup at all (DEFECTS F18), and one whose cleanup was cut
         # short left an actor on.
