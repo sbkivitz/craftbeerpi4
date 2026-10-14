@@ -6,7 +6,10 @@ After=mosquitto.service influxdb.service
 WorkingDirectory=/home/{{ user }}
 ExecStartPre=/bin/sleep 5
 ExecStart={{ path }} start
-KillSignal=SIGKILL
+# SIGTERM: the shutdown it runs switches every actor off. SIGKILL left the
+# outputs as they were - an element or pump energized, with no process
+# behind it. A stop that hangs is still killed after TimeoutStopSec.
+KillSignal=SIGTERM
 TimeoutStopSec=15
 
 [Install]
