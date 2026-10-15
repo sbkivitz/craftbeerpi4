@@ -85,6 +85,57 @@ class CBPiWebSocket:
 
             self.cbpi.app.loop.create_task(send_data(ws, data))
 
+    def _snapshot(self):
+        """Everything a page shows, as the messages a change would broadcast.
+
+        A page loads its state once, from GET /system/, and afterwards hears
+        only changes. Reconnecting after the server went away fetched nothing
+        but the actors (the interface asks /actor/ws_update), so a page kept
+        whatever it had loaded with: after a restart the dashboard showed a
+        kettle still on automatic while the restarted server had every logic
+        off. Seen 15 Oct on the 8000 sim - a boil kettle on "auto" sat unheated
+        for 37 minutes, its heater correctly shown off beside it.
+
+        So a page is told the current state the moment it connects, in the
+        topics and shapes of the broadcasts that follow, and needs nothing new
+        to understand it. Each part is built on its own: a controller that
+        cannot answer costs that part, never the connection.
+        """
+        messages = []
+
+        def add(topic, build):
+            try:
+                messages.append(dict(topic=topic, data=build()))
+            except Exception as e:  # noqa: BLE001
+                self.logger.debug("snapshot: no %s - %s", topic, e)
+
+        def items(name):
+            def build():
+                controller = getattr(self.cbpi, name)
+                data = [item.to_dict() for item in controller.data]
+                if getattr(controller, "sorting", False):
+                    data.sort(key=lambda x: str(x.get("name") or "").upper())
+                return data
+            return build
+
+        add("configupdate", lambda: self.cbpi.config.get_state())
+        add("kettleupdate", items("kettle"))
+        add("fermenterupdate", items("fermenter"))
+        add("fermenterstepupdate", lambda: self.cbpi.fermenter.get_fermenter_steps())
+        add("actorupdate", items("actor"))
+        add("sensorupdate", items("sensor"))
+        add("mash_profile_update", lambda: self.cbpi.step.get_state())
+        add("notificationupdate", lambda: self.cbpi.notification.get_state())
+        return messages
+
+    async def _send_snapshot(self, ws):
+        for message in self._snapshot():
+            try:
+                await ws.send_json(data=message, dumps=json_dumps)
+            except Exception as e:  # noqa: BLE001 - the page has gone; the loop below sees it
+                self.logger.debug("snapshot to a new page failed: %s", e)
+                return
+
     async def websocket_handler(self, request):
 
         ws = web.WebSocketResponse()
@@ -107,6 +158,7 @@ class CBPiWebSocket:
 
         try:
             await ws.send_json(data=dict(topic="connection/success"))
+            await self._send_snapshot(ws)
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
 
