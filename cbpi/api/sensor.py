@@ -40,8 +40,14 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
     def init(self):
         pass
 
-    def log_data(self, value):
-        self.cbpi.log.log_data(self.id, value)
+    def log_data(self, value, timestamp=None):
+        """Log a reading; `timestamp` is when it was taken, in cbpi.api.clock time.
+
+        Omitted, it is now. A simulated sensor that integrates several model
+        steps in one wake passes each step's own simulated time, so no step's
+        sample is lost and none is stamped at the wrong moment.
+        """
+        self.cbpi.log.log_data(self.id, value, timestamp)
 
     def get_state(self):
         pass

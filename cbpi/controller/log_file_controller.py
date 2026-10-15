@@ -3,6 +3,7 @@ import base64
 import datetime
 import glob
 import logging
+import math
 import os
 import zipfile
 from logging.handlers import RotatingFileHandler
@@ -13,6 +14,7 @@ from time import localtime, strftime
 import pandas as pd
 import shortuuid
 from cbpi.api import *
+from cbpi.api import clock as sim_clock
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from urllib3 import PoolManager, Timeout
@@ -50,14 +52,14 @@ class LogController:
                 method(self.cbpi, sensor_id, value, formatted_time, name)
             )
 
-    def log_data(self, id: str, value: str) -> None:
+    def log_data(self, id: str, value: str, timestamp=None) -> None:
         # all plugin targets:
         if self.sensor_data_listeners:  # true if there are listners
             try:
                 sensor = self.cbpi.sensor.find_by_id(id)
                 if sensor is not None:
                     name = sensor.name.replace(" ", "_")
-                    self._emit(id, value, name)
+                    self._emit(id, value, name, timestamp)
             except Exception as e:
                 logging.error("sensor logging listener exception: {}".format(e))
 
@@ -85,7 +87,7 @@ class LogController:
         except Exception as e:  # noqa: BLE001 - telemetry never breaks control
             logging.error("control logging listener exception: {}".format(e))
 
-    def _emit(self, id, value, name):
+    def _emit(self, id, value, name, timestamp=None):
         """Hand a reading to every log target, stamped to the millisecond.
 
         Timestamps were "%Y-%m-%d %H:%M:%S", which is fine when readings arrive
@@ -101,9 +103,25 @@ class LogController:
         the duplicate rows are pure waste: sixty times the disk for no extra
         information.
 
+        The stamp is SIMULATED time: cbpi.api.clock, which on real hardware is
+        time.time() itself, so nothing changes there. Stamped with real time,
+        an accelerated run squeezed its x-axis by the time scale - a simulated
+        hour of mash charted across one real minute. `timestamp`, in the same
+        clock, is when the reading was taken, if that was not now.
+
         Readers accept both formats, so existing logs still load.
         """
-        formatted_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        when = None
+        if timestamp is not None:
+            try:
+                when = float(timestamp)
+            except (TypeError, ValueError):
+                when = None
+            if when is not None and not math.isfinite(when):
+                when = None
+        if when is None:
+            when = sim_clock.now()
+        formatted_time = datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         asyncio.create_task(
             self._call_sensor_data_listeners(id, value, formatted_time, name)
         )
@@ -148,16 +166,18 @@ class LogController:
         wall-clock is the finest thing worth seeing. That is reasonable for a
         six hour brew day and wrong for everything shorter.
 
-        It is badly wrong for an accelerated simulation. Log rows are stamped
-        with real time, so at SIM_TIME_SCALE=60 an hour-long mash happens in
-        one real minute and lands in a single 60s bucket - the whole step
-        becomes one point. Worse, the bucket is reduced with .max(), so the
-        dip when grain goes in is not merely coarse, it is invisible: the peak
-        wins. A chart that cannot show a dough-in dip or a stalled ramp is not
-        worth reading, and those are the two things it is read for.
+        It was badly wrong for an accelerated simulation while log rows were
+        stamped with real time: at SIM_TIME_SCALE=60 an hour-long mash
+        happened in one real minute and landed in a single 60s bucket - the
+        whole step became one point. Rows now carry simulated time (_emit), so
+        that hour spans an hour; the span still decides the bucket, because
+        the bucket is reduced with .max(), and a bucket too coarse for its
+        span makes the dip when grain goes in not merely coarse but invisible.
+        A chart that cannot show a dough-in dip or a stalled ramp is not worth
+        reading, and those are the two things it is read for.
 
-        Deriving the rate from the span fixes both, and needs no plugin, no
-        configuration and no knowledge of the time scale here.
+        Deriving the rate from the span needs no plugin, no configuration and
+        no knowledge of the time scale here.
         """
         try:
             if len(index) < 2:
