@@ -59,15 +59,18 @@ class FermentationController:
         pass
 
     def check_fermenter_file(self):
-        if (
-            os.path.exists(self.cbpi.config_folder.get_file_path("fermenter_data.json"))
-            is False
-        ):
-            logging.warning("Missing fermenter_data.json file. INIT empty file")
-            data = {"data": []}
-            destfile = self.cbpi.config_folder.get_file_path("fermenter_data.json")
-            with open(destfile, "w") as f:
-                json.dump(data, f, indent=4, sort_keys=True)
+        if os.path.exists(self.path) is False:
+            if os.path.exists(self.path + self.BACKUP_SUFFIX):
+                # The backup is the last saved copy of every fermenter. An empty
+                # file written here was read by load() as valid and copied over
+                # that backup, so a missing fermenter_data.json cost both, at
+                # startup, without a word (DEFECTS F50). load() restores it.
+                logging.warning("Missing fermenter_data.json file. Restoring its backup")
+            else:
+                logging.warning("Missing fermenter_data.json file. INIT empty file")
+                data = {"data": []}
+                with open(self.path, "w") as f:
+                    json.dump(data, f, indent=4, sort_keys=True)
 
         pathlib.Path(self.cbpi.config_folder.get_file_path("fermenterrecipes")).mkdir(
             parents=True, exist_ok=True
@@ -185,15 +188,17 @@ class FermentationController:
             # no fermenter and nothing controlling it (DEFECTS F38).
             kept = quarantine(self.path)
             data, backup_problem = self._read(self.path + self.BACKUP_SUFFIX)
+            # A missing file is not an unreadable one: there is nothing to keep.
+            lost = ("fermenter_data.json was missing" if problem == "missing" else
+                    "fermenter_data.json could not be read ({})".format(problem))
+            aside = "; the unreadable file is kept as {}".format(kept) if kept else ""
             if backup_problem is None:
-                self._alarm("fermenter_data.json could not be read ({}). Restored the copy "
-                            "saved with the last change; the unreadable file is kept as {}."
-                            .format(problem, kept))
+                self._alarm("{}. Restored the copy saved with the last change{}."
+                            .format(lost, aside))
             else:
                 data = {"data": []}
-                self._alarm("fermenter_data.json could not be read ({}), and neither could "
-                            "its backup ({}). Starting with no fermenters; the unreadable "
-                            "file is kept as {}.".format(problem, backup_problem, kept))
+                self._alarm("{}, and its backup could not be read either ({}). Starting "
+                            "with no fermenters{}.".format(lost, backup_problem, aside))
             atomic_write_json(self.path, data, sort_keys=True)
         left_out = []
         for entry in data["data"]:
