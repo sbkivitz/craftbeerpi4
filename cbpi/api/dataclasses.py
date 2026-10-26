@@ -151,6 +151,9 @@ class Kettle:
     sensor: Sensor = None
     type: str = None
     target_temp: float = 0
+    # The settings each OTHER logic last had on this kettle, by logic name.
+    # The active logic's settings are `props`. See KettleController.update.
+    props_by_type: dict = field(default_factory=dict)
 
     def __str__(self):
         return "name={} props={} temp={}".format(
@@ -175,6 +178,11 @@ class Kettle:
             sensor=self.sensor,
             type=self.type,
             props=self.props.to_dict(),
+            props_by_type={
+                logic: dict(settings)
+                for logic, settings in (self.props_by_type or {}).items()
+                if isinstance(settings, dict)
+            },
         )
 
 
