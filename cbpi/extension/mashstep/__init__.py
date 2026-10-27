@@ -200,6 +200,14 @@ class MashInStep(CBPiStep):
         self._set_grain_present(False)
         if self.AutoMode == True:
             await self.setAutoMode(True)
+            # Again, now that the logic is on. Switching it on builds a new
+            # instance (BasicController.start), so the flag set above landed
+            # on the old one, or on none - and the new one started believing
+            # the tun held grain. Found 27 Oct: MashIn_Pump_Within did nothing
+            # on the sim, and MashIn_DeltaTemp had never widened a mash-in band
+            # in a profile since it was added. The first call stays for a
+            # logic that was already running, which setAutoMode leaves alone.
+            self._set_grain_present(False)
         self.summary = "Waiting for Target Temp"
         if self.cbpi.kettle is not None and self.timer is None:
             self.timer = Timer(
