@@ -514,6 +514,18 @@ class CBPiStep(_TargetArrival, CBPiBase):
     async def reset(self):
         pass
 
+    async def on_props_saved(self):
+        """Called when the brewer has saved this step's settings.
+
+        After the step is added to the profile or edited in the mash profile
+        editor and written to disk, on the instance built from what was saved -
+        so self.props is what the brewer just chose. Not called when a profile
+        is loaded or a recipe imported, nor when a running step records its own
+        progress. A step that wants to tell the brewer something about their
+        settings the moment they choose them, rather than at brew time, does it
+        here. Whatever it raises is logged and never undoes the save.
+        """
+
     async def on_props_update(self, props):
         self.props = {**self.props, **props}
 
