@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import inspect
 import json
 import logging
 import os
@@ -186,7 +187,26 @@ class StepController:
             item.instance = None
         self.profile.append(item)
         await self.save()
+        await self._props_saved(item)
         return item
+
+    async def _props_saved(self, item):
+        """Let the step act on settings the brewer has just saved.
+
+        See CBPiStep.on_props_saved. A hook that fails is logged, and the save
+        it follows stands: the settings are on disk either way.
+        """
+        hook = getattr(item.instance, "on_props_saved", None)
+        if hook is None:
+            return
+        try:
+            result = hook()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as e:  # noqa: BLE001
+            logging.warning(
+                "Step '%s' could not act on its saved settings: %s", item.name, e
+            )
 
     async def update(self, item: Step):
 
@@ -203,6 +223,7 @@ class StepController:
             map(lambda old: item if old.id == item.id else old, self.profile)
         )
         await self.save()
+        await self._props_saved(item)
         return item
 
     async def save(self):

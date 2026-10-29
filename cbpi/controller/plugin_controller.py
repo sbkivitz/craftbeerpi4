@@ -140,6 +140,26 @@ class PluginController:
             self.c = clazz(self.cbpi)
 
     def _parse_property_object(self, p):
+        result = self._parse_property_fields(p)
+        # Emitted only when declared, so every property written before these
+        # existed is described exactly as it was.
+        if result is not None:
+            for extra in ("show_if", "display_label"):
+                value = getattr(p, extra, None)
+                if value:
+                    result[extra] = value
+        return result
+
+    def _parse_property_fields(self, p):
+        # Date and Time are Texts underneath, so they are told apart first.
+        if isinstance(p, (Property.Date, Property.Time)):
+            return {
+                "label": p.label,
+                "type": "date" if isinstance(p, Property.Date) else "time",
+                "configurable": p.configurable,
+                "default_value": p.default_value,
+                "description": p.description,
+            }
         if isinstance(p, Property.Number):
             # min/max/step/unit are optional and may be absent entirely on a
             # Property.Number built by an older plugin or constructed by hand,
@@ -166,13 +186,18 @@ class PluginController:
                 "description": p.description,
             }
         elif isinstance(p, Property.Select):
-            return {
+            result = {
                 "label": p.label,
                 "type": "select",
                 "configurable": True,
                 "options": p.options,
                 "description": p.description,
             }
+            # Only when declared - so a select without one is described as it
+            # always was - for a new step's form to start from it.
+            if getattr(p, "default_value", None) is not None:
+                result["default_value"] = p.default_value
+            return result
         elif isinstance(p, Property.Actor):
             return {
                 "label": p.label,
