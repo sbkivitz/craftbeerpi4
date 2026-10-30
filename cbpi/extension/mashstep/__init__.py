@@ -987,17 +987,23 @@ class BoilStep(CBPiStep):
     async def run(self):
         if self.first_wort_hop_flag == False and self.first_wort_hop == "Yes":
             self.first_wort_hop_flag = True
+            # Sticky, like the other hop alerts: with an action the interface
+            # holds it until answered instead of dismissing it after five
+            # seconds - and it is raised alongside the wort-transfer prompt,
+            # exactly when hands are busy.
             if self.first_wort_hop_text is not None and self.first_wort_hop_text != "":
                 self.cbpi.notify(
                     "First Wort Hop Addition!",
                     "Please add %s for first wort" % self.first_wort_hop_text,
-                    NotificationType.INFO,
+                    NotificationType.WARNING,
+                    action=[NotificationAction("Added")],
                 )
             else:
                 self.cbpi.notify(
                     "First Wort Hop Addition!",
                     "Please add hops for first wort",
-                    NotificationType.INFO,
+                    NotificationType.WARNING,
+                    action=[NotificationAction("Added")],
                 )
 
         while self.running == True:
