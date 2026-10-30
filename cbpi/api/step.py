@@ -190,6 +190,16 @@ class CBPiStep(_TargetArrival, CBPiBase):
     # runtime bookkeeping, not something a user configures.
     ELAPSED_PROP = "_elapsed_seconds"
 
+    # Props keys that let a step carry on by itself when a restart interrupts
+    # it: until when, in seconds on the brewing clock (cbpi.api.clock.now()),
+    # and the name of the step that allowed it. Without them a step that was
+    # running when the server stopped waits for the brewer ("Resume brew?").
+    # Written by StepController.allow_resume() - for a step that has made a
+    # promise about time, such as BrewStart's "hot water by 07:00" - and
+    # cleared by a reset. Underscored: runtime bookkeeping, like ELAPSED_PROP.
+    RESUME_UNTIL_PROP = "_resume_until"
+    RESUME_BY_PROP = "_resume_by"
+
     # How often elapsed time is written, in BREWING seconds. Every second would
     # mean a JSON write per second for the length of a brew, which is needless SD
     # card wear; thirty bounds what a power cut can lose to half a minute against
