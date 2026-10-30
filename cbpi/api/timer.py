@@ -106,21 +106,42 @@ class Timer(object):
 
     async def add(self, seconds):
         """Extend the rest, whether or not it is currently counting down."""
-        if self.is_running:
+        if self.is_running and self._deadline is not None:
             self._deadline += seconds
             self.end_time = int(round(self._deadline, 0))
             self.count = max(0, int(round(self._deadline - clock.now(), 0)))
         else:
-            # Not started, or already stopped. Extending what it will run for
-            # next time is the only meaning available.
+            # Not started, stopped, or started but not yet begun - the deadline
+            # exists once _job() runs, the loop turn after start(). Extending
+            # what it will run is the only meaning available.
             self._timemout = max(0.0, float(self._timemout) + seconds)
             if self.end_time is not None:
                 self.end_time = self.end_time + seconds
 
     def start(self):
         self._started = True
+        # Set by _job() as it begins. Cleared here so that, in the moment
+        # between, a restarted timer reports what it will run rather than the
+        # deadline of its last run (see seconds_left).
+        self._deadline = None
         self._task = asyncio.create_task(self._job())
         self._task.add_done_callback(self.done)
+
+    def seconds_left(self):
+        """Brewing seconds still to run.
+
+        To the deadline while counting down; all of what it will run when not
+        yet begun, or stopped part-way; none once finished. This, not a step's
+        configured length, is what an estimate of when the step ends has to be
+        built from: after a power cut the timer is built from what was left
+        (CBPiStep.remaining_for), and time can be added to it.
+        """
+        task = self._task
+        if task is not None and task.done() and not task.cancelled():
+            return 0.0
+        if self._task_alive() and self._deadline is not None:
+            return max(0.0, self._deadline - clock.now())
+        return max(0.0, float(self._timemout))
 
     async def stop(self):
         if self._task and self._task.done() is False:

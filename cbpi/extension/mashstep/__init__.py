@@ -19,6 +19,19 @@ from cbpi.api.timer import Timer
 from voluptuous.schema_builder import message
 
 
+def _completion_time(timer):
+    """Wall-clock HH:MM at which a timer that has just started reaches zero.
+
+    From what the timer will actually run. These notifications added the
+    step's configured length, so a rest resumed after a power cut with forty
+    minutes left announced an end twenty minutes late (DEFECTS M20). Divided
+    by the clock's scale so a simulated brew day names a time on the clock it
+    is watched by; on a rig the scale is 1.
+    """
+    seconds = timer.seconds_left() / clock.scale()
+    return datetime.fromtimestamp(time.time() + seconds).strftime("%H:%M")
+
+
 @parameters(
     [
         Property.Text(
@@ -485,13 +498,10 @@ class MashStep(CBPiStep):
             ):
                 self.timer.start()
                 self.timer.is_running = True
-                estimated_completion_time = datetime.fromtimestamp(
-                    time.time() + (self._int_prop("Timer", 0)) * 60
-                )
                 self.cbpi.notify(
                     self.name,
                     "Timer started. Estimated completion: {}".format(
-                        estimated_completion_time.strftime("%H:%M")
+                        _completion_time(self.timer)
                     ),
                     NotificationType.INFO,
                 )
@@ -1040,13 +1050,10 @@ class BoilStep(CBPiStep):
                 ):
                     self.timer.start()
                     self.timer.is_running = True
-                    estimated_completion_time = datetime.fromtimestamp(
-                        time.time() + (self._int_prop("Timer", 0)) * 60
-                    )
                     self.cbpi.notify(
                         self.name,
                         "Timer started automatically. Estimated completion: {}".format(
-                            estimated_completion_time.strftime("%H:%M")
+                            _completion_time(self.timer)
                         ),
                         NotificationType.INFO,
                     )
@@ -1078,13 +1085,10 @@ class BoilStep(CBPiStep):
             ):
                 self.timer.start()
                 self.timer.is_running = True
-                estimated_completion_time = datetime.fromtimestamp(
-                    time.time() + (self._int_prop("Timer", 0)) * 60
-                )
                 self.cbpi.notify(
                     self.name,
                     "Timer started. Estimated completion: {}".format(
-                        estimated_completion_time.strftime("%H:%M")
+                        _completion_time(self.timer)
                     ),
                     NotificationType.INFO,
                 )
