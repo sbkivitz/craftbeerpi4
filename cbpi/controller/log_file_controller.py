@@ -2,6 +2,7 @@ import asyncio
 import base64
 import datetime
 import glob
+import io
 import logging
 import math
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 from datetime import datetime
 from time import localtime, strftime
 
+import numpy as np
 import pandas as pd
 import shortuuid
 from cbpi.api import *
@@ -197,6 +199,152 @@ class LogController:
             return "{}s".format(int(seconds))
         return "{}ms".format(max(100, int(seconds * 1000)))
 
+    # A step back in a log's timestamps bigger than this is the clock being
+    # changed, not two readings racing each other.
+    CLOCK_BACK_TOLERANCE_S = 2.0
+
+    # How long a clock that went back may run before it is put right, measured
+    # on that clock. NTP set the rig's clock 2 min 9 s after it booted from the
+    # 25 Oct power cut (DEFECTS C17).
+    CLOCK_FIX_WITHIN_S = 900.0
+
+    def _log_files_oldest_first(self, name):
+        """A sensor's log files in the order they were written.
+
+        The rotating handler renames sensor_X.log to .log.1, .log.1 to .log.2
+        and so on, so the highest number is the oldest. glob returns them in
+        whatever order the file system likes. That did not matter while the
+        rows were simply sorted by time; it does now, because a clock that went
+        back can only be recognised in the order the rows were written - and a
+        power cut can put the step back in one file and the correction in the
+        next.
+        """
+        prefix = "sensor_{}.log".format(name)
+        files = []
+        for path in glob.glob(os.path.join(self.logsFolderPath, glob.escape(prefix) + "*")):
+            suffix = os.path.basename(path)[len(prefix):]
+            if suffix == "":
+                files.append((0, path))
+            elif suffix.startswith(".") and suffix[1:].isdigit():
+                files.append((int(suffix[1:]), path))
+        return [path for _, path in sorted(files, reverse=True)]
+
+    @staticmethod
+    def _read_log_file(path, column):
+        """One log file's rows, in the order written: DateTime and the value.
+
+        Survives what a power cut leaves in a file (DEFECTS C17). NUL bytes
+        where the file had grown but the data never reached the card - 372 of
+        them on 25 Oct, in front of the first row written after the restart -
+        are removed, so that row reads again; before, its time was unreadable.
+        A line that is not two fields is skipped rather than failing the whole
+        chart. A row whose time or value cannot be read is kept as NaT / NaN for
+        the caller to drop: its time still says something about the clock.
+        """
+        with open(path, "rb") as f:
+            raw = f.read().replace(b"\x00", b"")
+        if not raw.strip():
+            return pd.DataFrame({"DateTime": pd.Series(dtype="datetime64[ns]"),
+                                 column: pd.Series(dtype="float64")})
+        df = pd.read_csv(io.BytesIO(raw), names=["DateTime", column], header=None,
+                         dtype=str, on_bad_lines="skip", skip_blank_lines=True)
+        # format="mixed" so logs written before timestamps gained milliseconds
+        # still parse alongside new ones.
+        df["DateTime"] = pd.to_datetime(df["DateTime"], format="mixed", errors="coerce")
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df
+
+    def _misstamped(self, times):
+        """Which rows were stamped by a clock that went back and was then put right.
+
+        `times` are the rows' DateTimes in the order they were written. Returns
+        a boolean array, True for the rows to leave out.
+
+        A Raspberry Pi has no clock that runs without power. After a power cut
+        it boots with the time it last saved, the server starts and logs, and a
+        minute or two later NTP sets the real time. On 25 Oct the rig's HLT log
+        ran 10:02:34, then 10:01:01 ... 10:03:09 for 129 rows, then 11:42:14:
+        readings taken at about 11:40-11:42 were stamped 10:01-10:03, and the
+        chart drew the HLT at 114 F at 10:02:56, where it had been about 120.
+
+        So a step back of more than CLOCK_BACK_TOLERANCE_S, followed within
+        CLOCK_FIX_WITHIN_S on the slow clock by a step forward that makes up at
+        least as much as was lost and lands past every earlier row, marks the
+        rows between as misstamped. The forward step is never smaller than the
+        backward one: the slow clock is behind by the outage as well. A step is
+        judged after taking off the sensor's usual interval between readings,
+        so a once-a-minute probe's ordinary 60 s does not pass for the fix.
+        When no such step comes - daylight saving ending, or NTP pulling a fast
+        clock back - the clock that went back was right, and every row is kept.
+
+        Left out rather than restamped: their true time is known only to about
+        a reading interval, and a chart missing two minutes is honest where one
+        with two guessed minutes is not.
+        """
+        n = len(times)
+        drop = np.zeros(n, dtype=bool)
+        if n < 2:
+            return drop
+        s = (pd.to_datetime(times).to_numpy(dtype="datetime64[ns]")
+             .astype("int64") / 1e9)
+        tol = self.CLOCK_BACK_TOLERANCE_S
+
+        def next_step_back(start, latest):
+            if start >= n:
+                return None
+            run = np.maximum.accumulate(np.concatenate(([latest], s[start:])))
+            behind = np.nonzero(run[:-1] - s[start:] > tol)[0]
+            if behind.size == 0:
+                return None
+            k = int(behind[0])
+            return start + k, float(run[k])
+
+        found = next_step_back(0, -np.inf)
+        if found is None:
+            return drop  # nearly every log: the clock never went back
+        steps = np.diff(s)
+        positive = steps[steps > 0]
+        usual = float(np.median(positive)) if positive.size else 0.0
+
+        while found is not None:
+            i, latest = found
+            lost = latest - s[i]
+            fixed_at = None
+            for k in range(i + 1, n):
+                if (s[k] - s[k - 1]) - usual >= lost - tol and s[k] > latest:
+                    fixed_at = k
+                    break
+                if s[k] - s[i] > self.CLOCK_FIX_WITHIN_S:
+                    break
+            if fixed_at is None:
+                # The clock that went back was right: keep its rows, and judge
+                # what follows by it.
+                found = next_step_back(i + 1, s[i])
+            else:
+                drop[i:fixed_at] = True
+                found = next_step_back(fixed_at, latest)
+        return drop
+
+    def _read_sensor_log(self, name, column):
+        """Every reading in a sensor's logs, indexed by time and sorted, with
+        the rows a power cut misstamped left out (see _misstamped)."""
+        frames = [self._read_log_file(path, column)
+                  for path in self._log_files_oldest_first(name)]
+        frames = [f for f in frames if not f.empty]
+        if not frames:
+            return pd.DataFrame({column: pd.Series(dtype="float64")},
+                                index=pd.DatetimeIndex([], name="DateTime"))
+        df = pd.concat(frames, ignore_index=True)
+        df = df.dropna(subset=["DateTime"])
+        misstamped = self._misstamped(df["DateTime"])
+        if misstamped.any():
+            # Debug, not warning: a dashboard chart asks every ten seconds.
+            self.logger.debug(
+                "Log %s: left out %d rows stamped by a clock that was later put right",
+                name, int(misstamped.sum()))
+            df = df[~misstamped]
+        return df.set_index("DateTime").sort_index()
+
     async def get_data(self, names, sample_rate=None):
         logging.info("Start Log for {}".format(names))
         """
@@ -219,49 +367,36 @@ class LogController:
         for name in names:
             # Buffered readings are not on disk yet, and this reads the files.
             await self._flush_datalogger(name)
-            # get all log names
-            all_filenames = glob.glob(
-                os.path.join(self.logsFolderPath, f"sensor_{name}.log*")
-            )
-            # concat all logs
-            df = pd.concat(
-                [
-                    pd.read_csv(
-                        f, parse_dates=True, names=["DateTime", name], header=None
-                    )
-                    for f in all_filenames
-                ]
-            )
+            series = self._read_sensor_log(name, name)[name]
             logging.info("Read all files for {}".format(names))
-            # format="mixed" so logs written before timestamps gained
-            # milliseconds still parse alongside new ones.
-            df["DateTime"] = pd.to_datetime(df["DateTime"], format="mixed")
-            df.set_index("DateTime", inplace=True)
 
             # resample if rate provided
             rate = sample_rate
             if rate is None:
-                rate = self._sample_rate_for(df.index)
+                rate = self._sample_rate_for(series.index)
             if rate is not None:
-                df = df[name].resample(rate).max()
+                series = series.resample(rate).max()
             logging.info("Sampled now for {}".format(names))
-            df = df.dropna()
+            series = series.dropna()
             # take every nth row so that total number of rows does not exceed max_rows * 2
             max_rows = 500
-            total_rows = df.shape[0]
+            total_rows = series.shape[0]
             if (total_rows > 0) and (total_rows > max_rows):
                 nth = int(total_rows / max_rows)
                 if nth > 1:
-                    df = df.iloc[::nth]
+                    series = series.iloc[::nth]
 
+            frame = series.to_frame(name)
             if result is None:
-                result = df
+                result = frame
             else:
                 result = pd.merge(
-                    result, df, how="outer", left_index=True, right_index=True
+                    result, frame, how="outer", left_index=True, right_index=True
                 )
 
-        data = {"time": df.index.tolist()}
+        # The merged index: with several sensors, the last sensor's own index
+        # was sent as the times of every series, so the lists did not line up.
+        data = {"time": result.index.tolist()}
 
         if len(names) > 1:
             for name in names:
@@ -269,35 +404,19 @@ class LogController:
                     result[name].interpolate(limit_direction="both", limit=10).tolist()
                 )
         else:
-            data[name] = result.interpolate().tolist()
+            data[name] = result[name].interpolate().tolist()
 
         logging.info("Send Log for {}".format(names))
 
         return data
 
     async def get_data2(self, ids) -> dict:
-        timestamp_format = "%Y-%m-%d %H:%M:%S"
         result = dict()
         for id in ids:
             try:
-                all_filenames = glob.glob(
-                    os.path.join(self.logsFolderPath, f"sensor_{id}.log*")
-                )
-                df = pd.concat(
-                    [
-                        pd.read_csv(
-                            f,
-                            parse_dates=["DateTime"],
-                            names=["DateTime", "Values"],
-                            header=None,
-                        )
-                        for f in all_filenames
-                    ]
-                )
-                # format="mixed" so logs written before timestamps gained
-                # milliseconds still parse alongside new ones.
-                df["DateTime"] = pd.to_datetime(df["DateTime"], format="mixed")
-                df.set_index("DateTime", inplace=True)
+                df = self._read_sensor_log(id, "Values")
+                if df.empty:
+                    continue  # no log: left out, as before
                 df = df.resample("60s").max()
                 df = df.dropna()
                 result[id] = {
