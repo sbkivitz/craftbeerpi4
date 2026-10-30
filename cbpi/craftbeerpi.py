@@ -132,6 +132,39 @@ async def _ui_cache_headers(request, handler):
     return response
 
 
+def _send_static_files_in_fresh_chunks():
+    """Where the OS has no sendfile, serve files in chunks that cannot change.
+
+    aiohttp's FileResponse hands a file to loop.sendfile(). Without
+    os.sendfile - on Windows - asyncio falls back to reading each 16 KB block
+    into ONE reused bytearray and passing it to transport.write(). Since
+    Python 3.12 the selector transport queues what it cannot send at once by
+    reference, not as a copy (python/cpython#160321), so the next block
+    overwrites data still waiting to go. A browser that reads slower than the
+    server writes - one busy parsing - received the 6 MB interface bundle at
+    the right length with stretches of it from further on in the file,
+    failed to parse it ("Unexpected token"), and showed a black page until
+    reloaded (DEFECTS O1). Six slow readers at once: 18 of 18 downloads
+    damaged. aiohttp's own fallback, which this switches on, reads a new bytes
+    object per chunk; 0 of 36 damaged.
+
+    Linux - the Pi - has os.sendfile: the kernel sends the file with no buffer
+    in between, so nothing changes there.
+    """
+    if hasattr(os, "sendfile"):
+        return
+    try:
+        from aiohttp import web_fileresponse
+    except ImportError:
+        return
+    if hasattr(web_fileresponse, "NOSENDFILE"):
+        web_fileresponse.NOSENDFILE = True
+    else:
+        logging.getLogger(__name__).warning(
+            "This aiohttp has no NOSENDFILE switch: interface files may reach "
+            "browsers damaged on this platform (DEFECTS O1)")
+
+
 class CraftBeerPi:
 
     def __init__(self, configFolder):
@@ -139,6 +172,7 @@ class CraftBeerPi:
         operationsystem= sys.platform
         if operationsystem.startswith('win'):
             set_event_loop_policy(WindowsSelectorEventLoopPolicy())
+        _send_static_files_in_fresh_chunks()
 
         self.path = os.sep.join(os.path.abspath(__file__).split(os.sep)[:-1])  # The path to the package dir
         
