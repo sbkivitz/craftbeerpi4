@@ -27,9 +27,18 @@ def _completion_time(timer):
     minutes left announced an end twenty minutes late (DEFECTS M20). Divided
     by the clock's scale so a simulated brew day names a time on the clock it
     is watched by; on a rig the scale is 1.
+
+    Never raises. It runs inside the step's run() loop, just after the timer
+    starts, and an exception here ended the step: an end past what the
+    calendar holds raised OSError on Windows, and so did any timer without
+    seconds_left() (DEFECTS M23). A courtesy must not cost the rest.
     """
-    seconds = timer.seconds_left() / clock.scale()
-    return datetime.fromtimestamp(time.time() + seconds).strftime("%H:%M")
+    try:
+        seconds = timer.seconds_left() / clock.scale()
+        return datetime.fromtimestamp(time.time() + seconds).strftime("%H:%M")
+    except Exception as e:  # noqa: BLE001
+        logging.warning("Could not work out when the step ends: %s", e)
+        return "unknown"
 
 
 @parameters(
