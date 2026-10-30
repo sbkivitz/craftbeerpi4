@@ -80,8 +80,13 @@ class JobController(object):
             ]:
                 name = method.__getattribute__("name")
                 interval = method.__getattribute__("interval")
+                # The app is the server's: the controller has no `app` of its
+                # own, so `self.app` raised AttributeError the first time any
+                # plugin used @background_task, and took the server's startup
+                # down with it. Nothing in core or the rig's plugins uses it,
+                # which is how that went unseen.
                 job = await scheduler.spawn(
-                    job_loop(self.app, name, interval, method), name, "background"
+                    job_loop(self.cbpi.app, name, interval, method), name, "background"
                 )
 
         self.cbpi.app.on_startup.append(spawn_job)
