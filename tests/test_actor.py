@@ -79,5 +79,25 @@ class ActorTestCase(CraftBeerPiTestCase):
         assert resp.status == 500
 
     async def test_actor_action(self):
-        resp = await self.client.post(path="/actor/1/action", json=dict(name="myAction", parameter=dict(name="Manuel")))
-        assert resp.status == 200
+        # A declared action on a real actor runs, and says so. DummyActor's
+        # helloWorld ("SAY HELLO") sends a notification - the proof it ran.
+        actor = self.cbpi.actor.find_by_id("3CUJte4bkxDMFCtLX8eqsX")
+        with mock.patch.object(self.cbpi, "notify") as notify:
+            resp = await self.client.post(path="/actor/3CUJte4bkxDMFCtLX8eqsX/action",
+                                          json=dict(action="helloWorld", parameter={}))
+        assert resp.status == 200, "a declared action should run"
+        assert [c.args[:2] for c in notify.call_args_list if c.args[:1] == ("HELLO",)] \
+            == [("HELLO", "WOOHO")], "and it should actually have run"
+
+        # Upstream answered 200 to these too, having logged that nothing ran -
+        # so the dashboard showed a refused action as applied. This fork
+        # answers 400. The test asserted 200 for a missing actor and an
+        # undeclared action until 30 Oct: it was asserting the bug.
+        resp = await self.client.post(path="/actor/1/action",
+                                      json=dict(name="myAction", parameter=dict(name="Manuel")))
+        assert resp.status == 400, "an actor that does not exist cannot run an action"
+
+        resp = await self.client.post(path="/actor/3CUJte4bkxDMFCtLX8eqsX/action",
+                                      json=dict(action="on", parameter={}))
+        assert resp.status == 400, "a method that is not a declared action must be refused"
+        assert actor.instance.state is False, "and must not have run"
