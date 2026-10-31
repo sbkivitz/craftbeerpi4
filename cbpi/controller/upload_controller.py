@@ -57,6 +57,16 @@ class UploadController:
     # fallback, it is a second configuration. One definition, unit-aware.
     DEFAULT_BOIL_TEMP = {"C": 99, "F": 212}
     DEFAULT_COOLDOWN_TEMP = {"C": 20, "F": 68}
+    # What to cool to before whirlpool hops go in, when the recipe gives no
+    # temperature for them - which a BeerXML file cannot: the format has no
+    # temperature on a hop, so BeerSmith's Steep/Whirlpool hops arrive with a
+    # steep time and nothing else. The setting is steps_whirlpool_temp; these are
+    # the numbers every import used before it existed, so nothing changes until
+    # someone sets it.
+    DEFAULT_WHIRLPOOL_TEMP = {"C": 80, "F": 176}
+
+    #: Minutes of whirlpool when the recipe gives no steep time.
+    DEFAULT_WHIRLPOOL_MINUTES = 15
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
@@ -1038,6 +1048,7 @@ class UploadController:
 
                 # Boil step including hop alarms and alarm for first wort hops -> Automode is set tu yes
                 Hops , Whirlpool = self.getBoilAlerts(hops, miscs, "xml")
+                whirlpool_additions = self.getWhirlpoolAdditions(hops)
                 step_kettle = self.boilid
                 step_type = self.boil if self.boil != "" else "BoilStep"
                 step_time = str(int(boil_time))
@@ -1110,17 +1121,21 @@ class UploadController:
                         }
                         await self.create_step(step_string)
 
+                    hops_text = self._whirlpool_hops_text(whirlpool_additions)
                     if self.cooldown.find("Cooldown") != -1:
-                        notification = "Target Whirlpool temperature reached. Please add Whirlpool hops." 
+                        notification = "Target whirlpool temperature reached. Please add {}.".format(hops_text)
                         autonext = "No"
-                    else: 
-                        notification= f"Cool down to {step_temp} {self.TEMP_UNIT}. Then add Whirlpool hops."
+                    else:
+                        notification = "Cool down to {} {}. Then add {}.".format(
+                            self._format_temp(step_temp), self.TEMP_UNIT, hops_text)
                         autonext = "No"
                     step_string = {
                         "name": "Whirlpool Hop",
                         "props": {
                             "AutoNext": autonext,
-                            "Kettle": self.id,
+                            # The boil kettle holds the wort. The step only
+                            # notifies, so this is what the profile shows it on.
+                            "Kettle": self.boilid,
                             "Notification": notification,
                         },
                         "status_text": "",
@@ -1129,7 +1144,11 @@ class UploadController:
                     }
                     await self.create_step(step_string)
 
-                await self.create_Whirlpool_Cooldown()
+                # The stand runs for the recipe's longest steep time, 15 minutes
+                # when it gives none - always 15 until 4.7.7.post22.
+                await self.create_Whirlpool_Cooldown(
+                    str(self._whirlpool_minutes(whirlpool_additions))
+                )
 
                 self.cbpi.notify("BeerXML Recipe created ", name, NotificationType.INFO)
             else:
@@ -1500,7 +1519,7 @@ class UploadController:
                 use = hop.find("USE").text
                 ## Hops which are not used in the boil step should not cause alerts
                 if use == "Boil":
-                    alerts.append([float(hop.find("TIME").text), hop.find("NAME").text])
+                    alerts.append([float(hop.find("TIME").text), self._xml_addition_label(hop)])
                 elif use == "Aroma":
                     try:
                         if self.TEMP_UNIT == "C":
@@ -1508,7 +1527,7 @@ class UploadController:
                         else:
                             temp = round(9.0 / 5.0 * float(hop.find("TEMP").text) + 32, 2)
                     except:
-                        temp = 80 if self.TEMP_UNIT == "C" else 176
+                        temp = self._whirlpool_default()
                     whirlpool.append([temp, hop.find("NAME").text])
 
             elif recipe_type == "bf":
@@ -1522,14 +1541,14 @@ class UploadController:
                         else:
                             temp = round(9.0 / 5.0 * float(hop["temp"]) + 32, 2)
                     except:
-                        temp = 80 if self.TEMP_UNIT == "C" else 176
+                        temp = self._whirlpool_default()
                     whirlpool.append([temp, hop["name"]])
 
             elif recipe_type == "kbh":
                 if hop[2] != 5:
                     alerts.append([float(hop[0]), hop[1]])
                 if hop[2] == 5:
-                    temp = 80 if self.TEMP_UNIT == "C" else 176
+                    temp = self._whirlpool_default()
                     whirlpool.append([temp, hop[1]])
 
             elif recipe_type == "json":
@@ -1578,6 +1597,109 @@ class UploadController:
             whirlpool_temp = []
         logging.info("Whirlpool Temp: {}".format(whirlpool_temp))
         return hop_alerts, whirlpool_temp
+
+    def _xml_amount(self, element):
+        """How much of a BeerXML addition, in the brewer's units, or None.
+
+        BeerSmith writes the amount as it displays it (DISPLAY_AMOUNT, "6.00 oz"),
+        which is used as written. Otherwise AMOUNT is kilograms, by the BeerXML
+        definition: shown in ounces on a Fahrenheit system and grams on a Celsius
+        one, the nearest thing here to a unit preference for weights.
+        """
+        shown = element.find("DISPLAY_AMOUNT")
+        if shown is not None and shown.text and shown.text.strip():
+            return shown.text.strip()
+        try:
+            kg = float(element.find("AMOUNT").text)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not math.isfinite(kg) or kg <= 0:
+            return None
+        if self.TEMP_UNIT == "F":
+            return "{:.2f} oz".format(kg * 35.27396195)
+        grams = kg * 1000.0
+        return "{:.0f} g".format(grams) if grams >= 10 else "{:.1f} g".format(grams)
+
+    def _xml_addition_label(self, element):
+        """'6.00 oz Willamette': what a hop prompt names, amount first.
+
+        The prompts used to name the hop alone. On brew day, with the recipe
+        sheet somewhere else, the amount is the part you need.
+        """
+        name = element.find("NAME").text
+        amount = self._xml_amount(element)
+        return "{} {}".format(amount, name) if amount else name
+
+    def getWhirlpoolAdditions(self, hops):
+        """BeerXML hops added after the boil: [(label, steep minutes), ...].
+
+        "Aroma" is BeerXML's only word for a hop added after the boil, and it is
+        what BeerSmith writes for its Steep/Whirlpool use, with the steep time
+        in TIME. In recipe order.
+        """
+        additions = []
+        for hop in hops:
+            use = hop.find("USE")
+            if use is None or use.text != "Aroma":
+                continue
+            try:
+                minutes = float(hop.find("TIME").text)
+            except (AttributeError, TypeError, ValueError):
+                minutes = 0.0
+            if not math.isfinite(minutes) or minutes < 0:
+                minutes = 0.0
+            additions.append((self._xml_addition_label(hop), minutes))
+        return additions
+
+    def _whirlpool_default(self):
+        """Whirlpool temperature when the recipe gives none: the setting."""
+        fallback = self.DEFAULT_WHIRLPOOL_TEMP.get(getattr(self, "TEMP_UNIT", "C"), 80)
+        try:
+            value = float(getattr(self, "WhirlpoolTemp", fallback))
+        except (TypeError, ValueError):
+            return fallback
+        return value if math.isfinite(value) else fallback
+
+    def _whirlpool_minutes(self, additions):
+        """Length of the stand: the longest steep time, or the default."""
+        longest = max((minutes for _, minutes in additions), default=0.0)
+        if longest > 0:
+            return max(1, int(round(longest)))
+        return self.DEFAULT_WHIRLPOOL_MINUTES
+
+    @staticmethod
+    def _whirlpool_hops_text(additions):
+        """What to add, and when: '1.50 oz Calypso', or with a second addition
+        '1.50 oz Calypso now, then 1.00 oz Citra with 10 minutes left'.
+
+        The stand runs as long as the longest steep time, so a hop with a
+        shorter one goes in that many minutes before it ends.
+        """
+        if not additions:
+            return "Whirlpool hops"
+        ordered = sorted(additions, key=lambda a: -a[1])
+        longest = ordered[0][1]
+        first = [label for label, minutes in ordered if minutes >= longest]
+        text = " and ".join(first)
+        later = []
+        for label, minutes in ordered:
+            if minutes >= longest:
+                continue
+            whole = int(round(minutes))
+            if whole > 0:
+                later.append("{} with {} minute{} left".format(
+                    label, whole, "" if whole == 1 else "s"))
+            else:
+                later.append("{} at the end".format(label))
+        if later:
+            text += " now, then " + ", then ".join(later)
+        return text
+
+    @staticmethod
+    def _format_temp(value):
+        """170.0 -> '170', 170.62 -> '170.6'."""
+        text = "{:.1f}".format(float(value))
+        return text[:-2] if text.endswith(".0") else text
 
     def getGrainMass(self, recipe):
         """Total grain bill in kg, from a BeerXML recipe element.
@@ -1630,7 +1752,7 @@ class UploadController:
                 if use != "First Wort":
                     continue
                 alert = "Yes"
-                names.append(hop.find("NAME").text)
+                names.append(self._xml_addition_label(hop))
         elif recipe_type == "bf":
             for hop in hops:
                 if hop["use"] == "First Wort":
@@ -1719,6 +1841,10 @@ class UploadController:
             self.DEFAULT_COOLDOWN_TEMP.get(self.TEMP_UNIT, 20),
         )
         self.CoolDownActor = self.cbpi.config.get("steps_cooldown_actor", None)
+        self.WhirlpoolTemp = self.cbpi.config.get(
+            "steps_whirlpool_temp",
+            self.DEFAULT_WHIRLPOOL_TEMP.get(self.TEMP_UNIT, 80),
+        )
         # get default Kettle from Settings
         self.id = self.cbpi.config.get("MASH_TUN", None)
         self.boilid = self.cbpi.config.get("BoilKettle", None)
@@ -1753,6 +1879,7 @@ class UploadController:
             "cooldown": str(self.cooldown),
             "boiltemp": str(self.BoilTemp),
             "cooldowntemp": str(self.CoolDownTemp),
+            "whirlpooltemp": str(self.WhirlpoolTemp),
             "cooldownactor": self.CoolDownActor,
             "temp_unit": str(self.TEMP_UNIT),
             "AutoMode": str(self.AutoMode),
