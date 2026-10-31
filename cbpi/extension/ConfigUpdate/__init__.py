@@ -39,11 +39,13 @@ class ConfigUpdate(CBPiExtension):
         TEMP_UNIT = self.cbpi.config.get("TEMP_UNIT", "C")
         default_boil_temp = 99 if TEMP_UNIT == "C" else 212
         default_cool_temp = 20 if TEMP_UNIT == "C" else 68
+        default_whirlpool_temp = 80 if TEMP_UNIT == "C" else 176
         boil_temp = self.cbpi.config.get("steps_boil_temp", None)
         cooldown_sensor = self.cbpi.config.get("steps_cooldown_sensor", None)
         cooldown_actor = self.cbpi.config.get("steps_cooldown_actor", None)
         boil_actor = self.cbpi.config.get("steps_boil_actor", None)
         cooldown_temp = self.cbpi.config.get("steps_cooldown_temp", None)
+        whirlpool_temp = self.cbpi.config.get("steps_whirlpool_temp", None)
         mashin_step = self.cbpi.config.get("steps_mashin", None)
         mash_step = self.cbpi.config.get("steps_mash", None)
         mashout_step = self.cbpi.config.get("steps_mashout", None)
@@ -196,6 +198,33 @@ class ConfigUpdate(CBPiExtension):
                     cooldown_temp,
                     type=ConfigType.NUMBER,
                     description="Cooldown temp will send notification when this temeprature is reached",
+                    source="steps",
+                )
+
+        whirlpool_description = (
+            "Whirlpool temperature for recipe creation: cool the wort to this "
+            "before the whirlpool hops go in, when the recipe gives none "
+            "(BeerXML files never do)"
+        )
+        if whirlpool_temp is None:
+            logger.info("INIT Whirlpool Temp Setting")
+            try:
+                await self.cbpi.config.add(
+                    "steps_whirlpool_temp",
+                    default_whirlpool_temp,
+                    type=ConfigType.NUMBER,
+                    description=whirlpool_description,
+                    source="steps",
+                )
+            except:
+                logger.warning("Unable to update database")
+        else:
+            if CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+                await self.cbpi.config.add(
+                    "steps_whirlpool_temp",
+                    whirlpool_temp,
+                    type=ConfigType.NUMBER,
+                    description=whirlpool_description,
                     source="steps",
                 )
 
