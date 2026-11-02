@@ -71,6 +71,130 @@ class UploadController:
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.logger = logging.getLogger(__name__)
+        # One import at a time, gathered before it replaces the mash profile.
+        # See import_recipe.
+        self._import_lock = asyncio.Lock()
+        self._staging = False
+        self._staged = None
+        self._import_error = None
+
+    #: The importers, by the kind the upload endpoints name, and the word the
+    #: brewer is told.
+    IMPORTERS = {
+        "xml": ("xml_recipe_creation", "BeerXML"),
+        "kbh": ("kbh_recipe_creation", "Kleiner Brauhelfer"),
+        "json": ("json_recipe_creation", "MMuM-JSON"),
+        "bf": ("bf_recipe_creation", "Brewfather"),
+    }
+
+    async def import_recipe(self, kind, recipe_id):
+        """Make one recipe the mash profile: all of it, or none of it.
+
+        Returns (True, the recipe's name) or (False, why not).
+
+        The importers built the profile as they read the recipe. They emptied
+        the mash profile first, then added its steps one at a time through the
+        server's own /step2/ endpoint, and the request answered 200 whatever
+        happened. From the 2 Nov review of the recipe flow (DEFECTS M39):
+        - a recipe they could not read left the mash profile empty: GPT's copy
+          of Scott's file with one temperature "not-a-number";
+        - two imports at once - Create clicked twice - each emptied the profile,
+          then both added their steps: twelve steps, every rest and the boil
+          twice, and both reported success.
+
+        Now one import runs at a time. Its steps are gathered as the recipe is
+        read (create_recipe, create_step) and replace the mash profile in one
+        write, only once the whole recipe has been read. A failure says so,
+        leaves the profile as it was, and is reported to the caller.
+
+        Refused before anything is read or changed when the settings would put
+        the boil on the wrong vessel - see _import_problem.
+        """
+        method_name, label = self.IMPORTERS[kind]
+        if recipe_id is None or recipe_id == "" or recipe_id == []:
+            return self._not_imported("Choose a recipe to import first.")
+        async with self._import_lock:
+            self.get_config_values()
+            problem = self._import_problem()
+            if problem is not None:
+                return self._not_imported(problem)
+            self._staging, self._staged, self._import_error = True, None, None
+            try:
+                await getattr(self, method_name)(recipe_id)
+            except Exception as e:  # noqa: BLE001 - most importers catch their own
+                logging.exception("%s recipe import failed", label)
+                if self._import_error is None:
+                    self._import_error = str(e) or type(e).__name__
+            finally:
+                self._staging = False
+            staged, self._staged = self._staged, None
+            error = self._import_error
+            if error is None and (staged is None or not staged["steps"]):
+                error = "it gave no steps"
+            if error is not None:
+                return self._not_imported(
+                    "The {} recipe was not imported: {}.".format(label, error))
+            try:
+                await self.cbpi.step.load_recipe({
+                    "basic": {"name": staged["name"],
+                              "author": self.cbpi.config.get("AUTHOR", "John Doe")},
+                    "steps": staged["steps"],
+                })
+            except Exception as e:  # noqa: BLE001
+                logging.exception("could not write the imported recipe")
+                return self._not_imported(
+                    "The {} recipe could not be saved: {}.".format(label, e))
+            self.cbpi.notify("{} recipe imported".format(label), staged["name"],
+                             NotificationType.INFO)
+            return True, staged["name"]
+
+    def _not_imported(self, why):
+        message = "{} The mash profile is unchanged.".format(why)
+        logging.warning("Recipe not imported: %s", message)
+        self.cbpi.notify("Recipe not imported", message, NotificationType.ERROR)
+        return False, message
+
+    def _import_problem(self):
+        """Why the settings must not be imported with, or None. Read before the
+        recipe is.
+
+        A blank BoilKettle setting put the boil on the mash kettle. On a HERMS
+        that is the Mash Tun, whose logic is PID_HERMS: the Boil step drove the
+        HLT element and the pump towards 210 F, and nothing heated the boil
+        kettle (DEFECTS M40, GPT's G5). Right for a one-vessel system, so it is
+        refused only when there is more than one kettle, naming the vessel the
+        boil would have gone on.
+        """
+        if self.kettle is None:
+            return "No mash kettle is set. Choose it in Settings, MASH_TUN."
+        kettles = list(getattr(self.cbpi.kettle, "data", None) or [])
+        chosen = self.cbpi.config.get("BoilKettle", None)
+        if chosen in (None, ""):
+            if len(kettles) > 1:
+                return ("No boil kettle is set, so the boil would go on '{}', the "
+                        "mash kettle. Choose the boil kettle in Settings, BoilKettle."
+                        .format(getattr(self.kettle, "name", self.id)))
+            return None
+        if self.boilkettle is None:
+            return ("The boil kettle in Settings, BoilKettle, is not one of this "
+                    "system's kettles. Choose it again.")
+        return None
+
+    def _creation_failed(self, label, error, name=""):
+        """An importer could not finish. Inside import_recipe that is reported
+        once, there, with what it means for the mash profile."""
+        logging.error("%s: %s", label, error)
+        if self._staging:
+            if self._import_error is None:
+                self._import_error = str(error) or type(error).__name__
+            return
+        self.cbpi.notify("{}: {}".format(label, error), name, NotificationType.ERROR)
+
+    def _creation_done(self, title, name):
+        """An importer finished. Inside import_recipe the brewer is told once
+        the mash profile has been replaced, not before."""
+        if not self._staging:
+            self.cbpi.notify(title, name, NotificationType.INFO)
 
     async def get_kbh_recipes(self):
         try:
@@ -290,6 +414,7 @@ class UploadController:
     # function to create a recipe from the Kleiner Brauhelfer database
     async def kbh_recipe_creation(self, Recipe_ID):
         config = self.get_config_values()
+        name = ""
         if self.kettle is not None:
             # check if kbh database is available in the upload folder and connect to it
             self.path = self.cbpi.config_folder.get_upload_file("kbh.db")
@@ -554,23 +679,17 @@ class UploadController:
                         str(abs(whirlpool[0][0]))
                     )  # from kbh this value comes as negative but must be positive
 
-                self.cbpi.notify("KBH Recipe created", name, NotificationType.INFO)
+                self._creation_done("KBH Recipe created", name)
 
             except Exception as e:
-                self.cbpi.notify(
-                    "KBH Recipe creation failure: {}".format(e),
-                    name,
-                    NotificationType.ERROR,
-                )
-                pass
+                self._creation_failed("KBH Recipe creation failure", e, name)
             finally:
                 if conn is not None:
                     conn.close()
         else:
-            self.cbpi.notify(
+            self._creation_failed(
                 "Recipe Upload",
                 "No default Kettle defined. Please specify default Kettle in settings",
-                NotificationType.ERROR,
             )
 
     def getJsonMashin(self, id):
@@ -582,6 +701,7 @@ class UploadController:
     # function to create a recipe from a MUMM json recipe file
     async def json_recipe_creation(self, Recipe_ID):
         config = self.get_config_values()
+        name = ""
         try:
             if self.kettle is not None:
                 # check if  mmum-json file is located in upload folder and load it
@@ -891,25 +1011,18 @@ class UploadController:
 
                 await self.create_Whirlpool_Cooldown()
 
-                self.cbpi.notify(
-                    "MMuM-JSON Recipe created ", name, NotificationType.INFO
-                )
+                self._creation_done("MMuM-JSON Recipe created ", name)
             else:
-                self.cbpi.notify(
+                self._creation_failed(
                     "Recipe Upload",
                     "No default Kettle defined. Please specify default Kettle in settings",
-                    NotificationType.ERROR,
                 )
         except Exception as e:
-            self.cbpi.notify(
-                "MMuM-JSON Recipe creation failure: {}".format(e),
-                name,
-                NotificationType.ERROR,
-            )
-            self.logger.error(e)
+            self._creation_failed("MMuM-JSON Recipe creation failure", e, name)
 
     async def xml_recipe_creation(self, Recipe_ID):
         config = self.get_config_values()
+        name = ""
         try:
             if self.kettle is not None:
                 # load beerxml file located in upload folder
@@ -1150,21 +1263,14 @@ class UploadController:
                     str(self._whirlpool_minutes(whirlpool_additions))
                 )
 
-                self.cbpi.notify("BeerXML Recipe created ", name, NotificationType.INFO)
+                self._creation_done("BeerXML Recipe created ", name)
             else:
-                self.cbpi.notify(
+                self._creation_failed(
                     "Recipe Upload",
                     "No default Kettle defined. Please specify default Kettle in settings",
-                    NotificationType.ERROR,
                 )
         except Exception as e:
-            self.cbpi.notify(
-                "BeerXML Recipe creation failure: {}".format(e),
-                name,
-                NotificationType.ERROR,
-            )
-            logging.error(e)
-            pass
+            self._creation_failed("BeerXML Recipe creation failure", e, name)
 
     # XML functions to retrieve xml repice parameters (if multiple recipes are stored in one xml file, id could be used)
     def getSteps(self, id, recipe_type):
@@ -1218,6 +1324,7 @@ class UploadController:
 
             brewfather = True
             result = []
+            bf_recipe = ""
             self.bf_url = "https://api.brewfather.app/v2/recipes/" + Recipe_ID
             brewfather_user_id = self.cbpi.config.get("brewfather_user_id", None)
             if brewfather_user_id == "" or brewfather_user_id is None:
@@ -1501,14 +1608,17 @@ class UploadController:
 
                 await self.create_Whirlpool_Cooldown()
 
-                self.cbpi.notify(
-                    "Brewfather App Recipe created: ", RecipeName, NotificationType.INFO
+                self._creation_done("Brewfather App Recipe created: ", RecipeName)
+            else:
+                self._creation_failed(
+                    "Brewfather",
+                    "no recipe came back - check brewfather_user_id and "
+                    "brewfather_api_key in Settings",
                 )
         else:
-            self.cbpi.notify(
+            self._creation_failed(
                 "Recipe Upload",
                 "No default Kettle defined. Please specify default Kettle in settings",
-                NotificationType.ERROR,
             )
 
     def getBoilAlerts(self, hops, miscs, recipe_type):
@@ -1848,7 +1958,9 @@ class UploadController:
         # get default Kettle from Settings
         self.id = self.cbpi.config.get("MASH_TUN", None)
         self.boilid = self.cbpi.config.get("BoilKettle", None)
-        if self.boilid is None:
+        # Blank as well as unset: a one-vessel system boils in its mash kettle.
+        # On more than one, import_recipe refuses that (_import_problem).
+        if not self.boilid:
             self.boilid = self.id
         # If next parameter is Yes, MashIn Ste will be added before first mash step if not included in recipe
         self.addmashin = self.cbpi.config.get("AddMashInStep", "Yes")
@@ -1888,6 +2000,15 @@ class UploadController:
         return config_values
 
     async def create_recipe(self, name):
+        """Start the recipe being imported.
+
+        Inside import_recipe nothing is changed yet: the steps that follow are
+        gathered, and replace the mash profile only once the whole recipe has
+        been read (DEFECTS M39).
+        """
+        if self._staging:
+            self._staged = {"name": name, "steps": []}
+            return
         # Create recipe in recipe Book with name of first recipe in xml file
         self.recipeID = await self.cbpi.recipe.create(name)
         # send recipe to mash profile
@@ -1897,6 +2018,13 @@ class UploadController:
 
     # function to create json to be send to api to add a step to the current mash profile. Currently all properties are send to each step which does not cuase an issue
     async def create_step(self, step_string):
+        if self._staging:
+            if self._staged is None:
+                raise RuntimeError("a step came before its recipe")
+            # As the /step2/ endpoint would have received it: through JSON, which
+            # also refuses anything that could not be saved.
+            self._staged["steps"].append(json.loads(json.dumps(step_string)))
+            return
         # get server port from settings and define url for api calls -> adding steps
         self.port = str(self.cbpi.static_config.get("port", 8000))
         self.url = "http://127.0.0.1:" + self.port + "/step2/"
