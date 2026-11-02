@@ -44,6 +44,7 @@ class ConfigUpdate(CBPiExtension):
         cooldown_sensor = self.cbpi.config.get("steps_cooldown_sensor", None)
         cooldown_actor = self.cbpi.config.get("steps_cooldown_actor", None)
         boil_actor = self.cbpi.config.get("steps_boil_actor", None)
+        boil_lid_alert = self.cbpi.config.get("steps_boil_lid_alert", None)
         cooldown_temp = self.cbpi.config.get("steps_cooldown_temp", None)
         whirlpool_temp = self.cbpi.config.get("steps_whirlpool_temp", None)
         mashin_step = self.cbpi.config.get("steps_mashin", None)
@@ -176,6 +177,34 @@ class ConfigUpdate(CBPiExtension):
                     boil_actor,
                     type=ConfigType.ACTOR,
                     description="Actor that can be toggled with lid alert to activate exhaust or steam condensor (default: None)",
+                    source="steps",
+                )
+
+        # What the boil step's lid alert says. Added in 4.7.7.post23 for a rig
+        # with a steam condenser, whose lid stays on for the whole boil.
+        lid_alert_description = (
+            "What the boil step says as the wort nears boiling, when its LidAlert "
+            "is Yes. With a steam condenser on the lid, say to turn it on instead."
+        )
+        if boil_lid_alert is None:
+            logger.info("INIT Boil Lid Alert Setting")
+            try:
+                await self.cbpi.config.add(
+                    "steps_boil_lid_alert",
+                    "Please remove lid!",
+                    type=ConfigType.STRING,
+                    description=lid_alert_description,
+                    source="steps",
+                )
+            except:
+                logger.warning("Unable to update database")
+        else:
+            if CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+                await self.cbpi.config.add(
+                    "steps_boil_lid_alert",
+                    boil_lid_alert,
+                    type=ConfigType.STRING,
+                    description=lid_alert_description,
                     source="steps",
                 )
 

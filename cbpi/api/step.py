@@ -250,6 +250,11 @@ class CBPiStep(_TargetArrival, CBPiBase):
         self.summary2 = None
         self.task = None
         self.running: bool = False
+        # Whether the brewer started this step - Start, Resume, or the button
+        # on a step the profile is holding for them - rather than the profile
+        # moving on by itself. Set by StepController.start_step each time the
+        # step starts. A step that may not heat unattended (BoilStep) reads it.
+        self.started_by_brewer = False
         self.logger = logging.getLogger(__name__)
         self._elapsed_saved_at = 0.0
         self._elapsed_saved_real_at = 0.0

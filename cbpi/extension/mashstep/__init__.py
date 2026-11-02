@@ -685,7 +685,9 @@ class ActorStep(CBPiStep):
         Property.Select(
             label="LidAlert",
             options=["Yes", "No"],
-            description="Trigger Alert to remove lid if temp is close to boil",
+            description="Remind you as the wort nears boiling (95 C / 203 F). What "
+            "it says is the steps_boil_lid_alert setting: by default, to remove "
+            "the lid; with a steam condenser, say to turn it on.",
         ),
         Property.Select(
             label="AutoMode",
@@ -754,6 +756,9 @@ class ActorStep(CBPiStep):
     ]
 )
 class BoilStep(CBPiStep):
+
+    #: What the lid alert says when the steps_boil_lid_alert setting is blank.
+    DEFAULT_LID_ALERT = "Please remove lid!"
 
     @action("Start Timer", [])
     async def start_timer(self):
@@ -845,8 +850,32 @@ class BoilStep(CBPiStep):
         one press, and the cost of getting it wrong is a fire. A rig that
         genuinely runs unattended sets CONFIRM_BEFORE_BOIL to No, which is the
         same decision made explicitly rather than by default.
+
+        Since 4.7.7.post23 the profile itself stops before this step and waits
+        for the brewer to start it (wait_for_brewer), so the brewer starting it
+        is the confirmation. The question in on_start is now asked only when the
+        step starts some other way - carried on by itself after a restart.
         """
         return self.get_config_value("CONFIRM_BEFORE_BOIL", "Yes") != "No"
+
+    def wait_for_brewer(self):
+        """Why the profile should stop before this step until the brewer starts
+        it, as (message, button) - or None to start it like any other step.
+
+        Read by StepController before it moves on by itself: the boil then waits,
+        with nothing active and the dashboard free for the pumps, until the
+        brewer presses the button, Start or Next. Scott, 1 Nov: "I think it
+        should require a manual advance to boil step instead of auto-advance".
+        """
+        if not self._needs_transfer_confirmation():
+            return None
+        return (
+            "Ready to boil? Move the wort to the boil kettle first - the dashboard "
+            "is yours meanwhile. The boil kettle stays off until you press Start "
+            "the boil, or Start in the mash profile. (Set CONFIRM_BEFORE_BOIL to "
+            "No to go straight on.)",
+            "Start the boil",
+        )
 
     async def on_start(self):
 
@@ -854,6 +883,13 @@ class BoilStep(CBPiStep):
         self.lid_flag = True if self.props.get("LidAlert", "No") == "Yes" else False
         self.lid_actor_flag = True if self.lid_flag == True else False
         self.lid_actor = self.get_config_value("steps_boil_actor", None)
+        # What the lid alert says. A rig with a steam condenser keeps the lid on
+        # for the whole boil - Scott's has a Steam Slayer, 1 Nov - and needs
+        # reminding to turn the condenser on instead.
+        self.lid_alert_text = (
+            str(self.get_config_value("steps_boil_lid_alert", "") or "").strip()
+            or self.DEFAULT_LID_ALERT
+        )
         self.AutoMode = True if self.props.get("AutoMode", "No") == "Yes" else False
         self.AutoTimer = (
             True if self.cbpi.config.get("BoilAutoTimer", "No") == "Yes" else False
@@ -874,7 +910,12 @@ class BoilStep(CBPiStep):
         self.summary2 = None
 
         self.kettle = self.get_kettle(self.props.get("Kettle", None))
-        self.transfer_confirmed = not self._needs_transfer_confirmation()
+        # Started by the brewer - from a hold before the boil, or Start, or
+        # Resume - is the confirmation: they know where the wort is.
+        self.transfer_confirmed = (
+            not self._needs_transfer_confirmation()
+            or bool(getattr(self, "started_by_brewer", False))
+        )
         if self.kettle is not None:
             # Left at zero until the transfer is confirmed, so nothing heats
             # even if a kettle logic is started by hand in the meantime.
@@ -979,9 +1020,10 @@ class BoilStep(CBPiStep):
                 pass
         # Disarm. A notification stays clickable after the step that raised it
         # has stopped, so leaving this set would let an old prompt re-arm a
-        # stopped step - and a restarted boil must ask again anyway, because
-        # whatever stopped it may well have been the brewer noticing the kettle
-        # was empty.
+        # stopped step - and a boil restarted by anything but the brewer must
+        # ask again, because whatever stopped it may well have been the brewer
+        # noticing the kettle was empty. (Restarted by the brewer - Start,
+        # Resume - it does not ask: see on_start.)
         self.transfer_confirmed = False
         await self.push_update()
 
@@ -1078,12 +1120,13 @@ class BoilStep(CBPiStep):
             if self.lid_flag == True and sensor_value >= self.lid_temp:
                 # Sticky for the same reason as the hop alert: this one is the
                 # difference between lifting the lid and mopping a boilover off
-                # the floor, and it fires exactly once.
+                # the floor, and it fires exactly once. Its words are a setting
+                # (steps_boil_lid_alert), so its button says only that it is done.
                 self.cbpi.notify(
-                    "Please remove lid!",
+                    self.lid_alert_text,
                     "Reached temp close to boiling",
                     NotificationType.WARNING,
-                    action=[NotificationAction("Lid removed")],
+                    action=[NotificationAction("Done")],
                 )
                 self.lid_flag = False
 
