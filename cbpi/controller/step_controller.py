@@ -65,6 +65,15 @@ class StepController:
     RESUME_CLOCK_POLL = 5
     RESUME_SENSOR_WAIT = 30
 
+    # What a step the profile is holding for the brewer shows in the mash
+    # profile and on the dashboard while it waits (_hold_for_brewer).
+    HOLD_SUMMARY = "Waiting for you to start it"
+
+    # The step the profile is holding until the brewer starts it, or None. A
+    # class default as well as set in __init__: a controller assembled without
+    # __init__, as test_mashin_holds_temp.py builds one, crashed in reset_all.
+    _held_step_id = None
+
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.logger = logging.getLogger(__name__)
@@ -74,6 +83,9 @@ class StepController:
         self.types = {}
         self._resume_after_startup = None
         self._resume_task = None
+        # The step the profile is holding before until the brewer starts it
+        # (_hold_for_brewer), or None.
+        self._held_step_id = None
         self.cbpi.app.on_cleanup.append(self.shutdown)
 
     async def init(self):
@@ -371,6 +383,7 @@ class StepController:
             self.profile = list(map(lambda item: self.create(item), self.profile))
             if startActive is True:
                 self._recover_interrupted_step()
+                self._recover_hold()
 
         except:
             kept = quarantine(self.path)
@@ -456,7 +469,132 @@ class StepController:
         atomic_write_json(self.path, data, sort_keys=True)
         self.push_udpate()
 
-    async def start(self):
+    @staticmethod
+    def _brewer_wait(step):
+        """(message, button) if `step` must not be started by the profile moving
+        on by itself, else None.
+
+        A step says so with wait_for_brewer() - BoilStep does, unless
+        CONFIRM_BEFORE_BOIL is No. One that raises is held: not knowing whether
+        a step may heat unattended is not permission to.
+        """
+        instance = getattr(step, "instance", None)
+        check = getattr(instance, "wait_for_brewer", None)
+        if not callable(check):
+            return None
+        try:
+            wait = check()
+        except Exception as e:  # noqa: BLE001
+            logging.warning(
+                "Step '%s' could not say whether it may start by itself, so it "
+                "waits for the brewer: %s", step.name, e,
+            )
+            return ("'{}' is waiting for you to start it.".format(step.name), "Start")
+        if not wait:
+            return None
+        try:
+            message, button = wait
+        except (TypeError, ValueError):
+            message, button = wait, "Start"
+        return (str(message), str(button or "Start"))
+
+    async def _held_instead(self, step, by_brewer):
+        """Hold before `step` instead of starting it, when it waits for the
+        brewer and the brewer is not the one starting it. True if held."""
+        if by_brewer:
+            return False
+        wait = self._brewer_wait(step)
+        if not wait:
+            return False
+        self._hold_for_brewer(step, wait)
+        await self.save()
+        self.push_udpate(complete=True)
+        return True
+
+    def _hold_for_brewer(self, step, wait):
+        """Leave `step` unstarted and ask the brewer to start it.
+
+        Scott, 1 Nov, at the boil on the simulator: "I need to be able to use
+        the dashboard to operate the pump. Right now, my only option is this
+        dialog box ... I think it should require a manual advance to boil step
+        instead of auto-advance". The boil step used to start by itself the
+        moment the mash out ended, hold its element off, and ask "Is the wort
+        in the boil kettle?" - in a dialog over the whole interface, with the
+        wort pump that moves the wort behind it.
+
+        Now the profile stops before the step. Nothing is active, so nothing
+        heats and the dashboard is the brewer's. The step shows that it is
+        waiting, and a notification says why, with a button that starts it;
+        so do Start and Next. Asked again after a restart (_recover_hold).
+        """
+        message, button = wait
+        self._held_step_id = step.id
+        if step.instance is not None:
+            step.instance.summary = self.HOLD_SUMMARY
+        logging.info("Holding before '%s' until the brewer starts it", step.name)
+        held_id = step.id
+
+        async def start_held():
+            await self._start_held(held_id)
+
+        try:
+            self.cbpi.notify(
+                step.name, message, NotificationType.WARNING,
+                action=[NotificationAction(button, start_held)],
+            )
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not ask the brewer to start '%s': %s", step.name, e)
+
+    async def _start_held(self, step_id):
+        """The button on a hold: start the step it was raised for, as the brewer.
+
+        Only that step, and only while the profile still waits before it. A
+        notification stays clickable after the profile has moved on (see
+        BoilStep.confirm_transfer), and an old button must not start whatever
+        step happens to come next.
+        """
+        if (self.find_by_status(StepState.ACTIVE) is not None
+                or self.find_by_status(StepState.STOP) is not None):
+            logging.info("Ignoring an old start button: the profile has moved on")
+            return
+        waiting = self.find_by_status(StepState.INITIAL)
+        if waiting is None or waiting.id != step_id:
+            logging.info("Ignoring an old start button for step %s", step_id)
+            return
+        await self.start()
+
+    def _recover_hold(self):
+        """After a restart while the profile waited for the brewer before a step,
+        ask again: the reminder and its button did not survive the restart."""
+        if (self.find_by_status(StepState.ACTIVE) is not None
+                or self.find_by_status(StepState.STOP) is not None):
+            return
+        if self.find_by_status(StepState.DONE) is None:
+            return  # not begun, so nothing is waiting
+        waiting = self.find_by_status(StepState.INITIAL)
+        if waiting is None:
+            return
+        wait = self._brewer_wait(waiting)
+        if wait:
+            self._hold_for_brewer(waiting, wait)
+
+    def _clear_hold(self):
+        """Forget a hold - the profile was reset, cleared or replaced."""
+        held = self.find_by_id(self._held_step_id) if self._held_step_id else None
+        if (held is not None and held.instance is not None
+                and getattr(held.instance, "summary", "") == self.HOLD_SUMMARY):
+            held.instance.summary = ""
+        self._held_step_id = None
+
+    async def start(self, by_brewer=True):
+        """Start the next step - resuming a stopped one first.
+
+        `by_brewer` is True when the brewer asked (Start, Resume, Next on a
+        profile with nothing running, the button on a hold), and False when the
+        profile is moving on by itself: a step finished, or one was skipped. A
+        step that waits for the brewer (_brewer_wait - a boil) is then held
+        rather than started, so it never begins heating unattended.
+        """
 
         if self.find_by_status(StepState.ACTIVE) is not None:
             logging.error("Steps already running")
@@ -464,24 +602,28 @@ class StepController:
 
         step = self.find_by_status(StepState.STOP)
         if step is not None:
+            if await self._held_instead(step, by_brewer):
+                return
             logging.info("Resume step")
             self.cbpi.push_update(
                 topic="cbpi/notification",
                 data=dict(type="info", title="Resume", message="Calling resume step"),
             )
-            await self.start_step(step)
+            await self.start_step(step, by_brewer=by_brewer)
             await self.save()
             return
 
         step = self.find_by_status(StepState.INITIAL)
         if step is not None:
+            if await self._held_instead(step, by_brewer):
+                return
             logging.info("Start Step")
             self.cbpi.push_update(
                 topic="cbpi/notification",
                 data=dict(type="info", title="Start", message="Calling start step"),
             )
             self.push_udpate(complete=True)
-            await self.start_step(step)
+            await self.start_step(step, by_brewer=by_brewer)
             await self.save()
             return
         self.cbpi.notify(
@@ -505,7 +647,8 @@ class StepController:
     async def next(self):
         logging.info("Trigger Next")
         logging.debug("Current profile: %s", self.profile)
-        step = self.find_by_status(StepState.ACTIVE)
+        active = self.find_by_status(StepState.ACTIVE)
+        step = active
         if step is not None:
             if step.instance is not None and getattr(step.instance, "task", None):
                 await step.instance.next()
@@ -531,7 +674,16 @@ class StepController:
             if step.instance is not None:
                 step.status = StepState.DONE
                 await self.save()
-                await self.start()
+                # The step after a skipped one starts as the profile would start
+                # it, not as the brewer starting it: skipping an interrupted mash
+                # out ("Resume brew?" - Skip this step) says nothing about the
+                # boil kettle, which may still be empty.
+                await self.start(by_brewer=False)
+        elif active is None and self.find_by_status(StepState.INITIAL) is not None:
+            # Nothing running and nothing stopped: the profile is waiting before
+            # its next step - held for the brewer before a boil, or not begun.
+            # Next means go on, so start it.
+            await self.start()
         else:
             logging.info("No Step is running")
 
@@ -613,6 +765,7 @@ class StepController:
                 )
             except:
                 logging.warning("No Step Instance - Id: %s", item.id)
+        self._clear_hold()
         await self.save()
         self.push_udpate()
 
@@ -707,7 +860,8 @@ class StepController:
 
             async def wrapper():
                 await self.save()
-                await self.start()
+                # Moving on by itself: a step that waits for the brewer is held.
+                await self.start(by_brewer=False)
 
             asyncio.create_task(wrapper())
 
@@ -741,11 +895,15 @@ class StepController:
                     topic="cbpi/stepupdate/{}".format(step.id), data=(step.to_dict())
                 )
 
-    async def start_step(self, step):
+    async def start_step(self, step, by_brewer=False):
         try:
             logging.info("Try to start step %s" % step)
+            if step.instance is not None:
+                step.instance.started_by_brewer = bool(by_brewer)
             await step.instance.start()
             step.status = StepState.ACTIVE
+            if self._held_step_id == step.id:
+                self._held_step_id = None
         except Exception as e:
             self.cbpi.notify(
                 "Error",
@@ -800,6 +958,7 @@ class StepController:
         list(map(lambda item: add_runtime_data(item), data.get("steps")))
         with open(self.path, "w") as file:
             json.dump(data, file, indent=4, sort_keys=True)
+        self._held_step_id = None
         self.load()
         self.push_udpate(complete=True)
 
@@ -813,6 +972,7 @@ class StepController:
         with open(self.path, "w") as file:
             json.dump(data, file, indent=4, sort_keys=True)
 
+        self._held_step_id = None
         self.load()
         self.push_udpate(complete=True)
 
