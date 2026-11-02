@@ -49,6 +49,9 @@ def _completion_time(timer):
         Property.Select(
             label="AutoNext",
             options=["Yes", "No"],
+            # Declared, so a step made in an editor saves what the step does
+            # when it is missing: it pauses (DEFECTS M41).
+            default_value="No",
             description="Automatically move to next step (Yes) or pause after Notification (No)",
         ),
     ]
@@ -115,6 +118,10 @@ class NotificationStep(CBPiStep):
         Property.Select(
             label="AutoMode",
             options=["Yes", "No"],
+            # Declared, so a step made in an editor switches its kettle on.
+            # Missing reads as No, and a Mash In left that way heats nothing:
+            # the brew stalls (DEFECTS M41, Gemini's R2 on 2 Nov).
+            default_value="Yes",
             description="Switch Kettlelogic automatically on and off -> Yes",
         ),
         Property.Number(
@@ -134,6 +141,8 @@ class NotificationStep(CBPiStep):
         Property.Select(
             label="Stop_Pump_At_Strike",
             options=["Yes", "No"],
+            # What the step does when it is missing; declared so an editor shows it.
+            default_value="Yes",
             description="Stop the recirculation pump once strike temperature is reached, while you dough in. Grain should go into a still tun rather than be drawn into a HERMS coil that has no grain bed in front of it. It also bounds the overshoot from a fast mash-in ramp: the coil is the only path from the HLT to the mash, so stopping the pump cuts that path at once, where a heating element would coast. Measured on a 30 L rig driving the HLT flat out - overshoot +3.0 F with the pump running, -0.1 F with it stopped. The pump restarts when you press Next. Set to No if you would rather keep circulating and hold temperature during dough-in.",
         ),
     ]
@@ -467,6 +476,8 @@ class MashInStep(CBPiStep):
         Property.Select(
             label="AutoMode",
             options=["Yes", "No"],
+            # See MashInStep: a step made in an editor switches its kettle on.
+            default_value="Yes",
             description="Switch Kettlelogic automatically on and off -> Yes",
         ),
     ]
@@ -754,6 +765,8 @@ class ActorStep(CBPiStep):
         Property.Select(
             label="AutoMode",
             options=["Yes", "No"],
+            # See MashInStep: a step made in an editor switches its kettle on.
+            default_value="Yes",
             description="Switch Kettlelogic automatically on and off -> Yes",
         ),
         # Property.Select(label="AutoTimer",options=["Yes","No"], description="Start Timer automatically if Temp does not change for 5 Minutes and is above 95C/203F"),
