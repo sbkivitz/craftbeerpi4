@@ -338,78 +338,62 @@ class UploadController:
     def allowed_file(self, filename, extension):
         return "." in filename and filename.rsplit(".", 1)[1] in set([extension])
 
+    #: What an uploaded recipe file is: by its name first, then by the type the
+    #: browser sent. Browsers disagree about the type: Firefox and Safari send
+    #: application/xml for a .xml file, which was refused as "Wrong content
+    #: type" (DEFECTS C5, M45; Gemini's R9 on 2 Nov).
+    UPLOAD_KINDS = {
+        "xml": ("beer.xml", ("text/xml", "application/xml")),
+        "json": ("mmum.json", ("application/json",)),
+        "sqlite": ("kbh.db", ("application/octet-stream", "application/x-sqlite3",
+                              "application/vnd.sqlite3")),
+    }
+
+    def _upload_kind(self, filename, content_type):
+        extension = (filename or "").rsplit(".", 1)[-1].lower() if "." in (filename or "") else ""
+        if extension in self.UPLOAD_KINDS:
+            return extension
+        return next((kind for kind, (_, types) in self.UPLOAD_KINDS.items()
+                     if content_type in types), None)
+
     async def FileUpload(self, data):
+        """Keep an uploaded recipe file. Returns True if it was kept.
+
+        Reported to the caller, so the Upload page does not reload over the
+        error: it reloads on success, and this always looked like success.
+        """
         fileData = data["File"]
         filename = fileData.filename
         recipe_file = fileData.file
-        content_type = fileData.content_type
-
-        if content_type == "text/xml":
-            try:
-                beer_xml = recipe_file.read().decode("utf-8", "replace")
-                if recipe_file and self.allowed_file(filename, "xml"):
-                    self.path = self.cbpi.config_folder.get_upload_file("beer.xml")
-
-                    with open(self.path, "w") as f:
-                        f.write(beer_xml)
-                    self.cbpi.notify(
-                        "Success",
-                        "XML Recipe {} has been uploaded".format(filename),
-                        NotificationType.SUCCESS,
-                    )
-            except Exception as e:
-                self.cbpi.notify(
-                    "Error",
-                    "XML Recipe upload failed: {}".format(e),
-                    NotificationType.ERROR,
-                )
-                pass
-
-        elif content_type == "application/json":
-            try:
-                mmum_json = recipe_file.read().decode("utf-8", "replace")
-                if recipe_file and self.allowed_file(filename, "json"):
-                    self.path = self.cbpi.config_folder.get_upload_file("mmum.json")
-
-                    with open(self.path, "w") as f:
-                        f.write(mmum_json)
-                    self.cbpi.notify(
-                        "Success",
-                        "JSON Recipe {} has been uploaded".format(filename),
-                        NotificationType.SUCCESS,
-                    )
-            except Exception as e:
-                self.cbpi.notify(
-                    "Error", "JSON Recipe upload failed: {}".format(e),
-                    NotificationType.ERROR,
-                )
-                pass
-
-        elif content_type == "application/octet-stream":
-            try:
-                content = recipe_file.read()
-                if recipe_file and self.allowed_file(filename, "sqlite"):
-                    self.path = self.cbpi.config_folder.get_upload_file("kbh.db")
-
-                    with open(self.path, "wb") as f:
-                        f.write(content)
-                    self.cbpi.notify(
-                        "Success",
-                        "Kleiner Brauhelfer database has been uploaded",
-                        NotificationType.SUCCESS,
-                    )
-
-            except:
-                self.cbpi.notify(
-                    "Error",
-                    "Kleiner Brauhelfer database upload failed",
-                    NotificationType.ERROR,
-                )
-                pass
-        else:
+        kind = self._upload_kind(filename, fileData.content_type)
+        if kind is None:
             self.cbpi.notify(
-                "Error", "Wrong content type. Upload failed", NotificationType.ERROR
+                "Error",
+                "{} is not a recipe file this can read - a BeerXML .xml, an MMuM "
+                ".json or a Kleiner Brauhelfer .sqlite. Upload failed".format(filename),
+                NotificationType.ERROR,
             )
+            return False
+        target, _ = self.UPLOAD_KINDS[kind]
+        try:
+            content = recipe_file.read()
+            self.path = self.cbpi.config_folder.get_upload_file(target)
+            if kind == "sqlite":
+                with open(self.path, "wb") as f:
+                    f.write(content)
+            else:
+                with open(self.path, "w") as f:
+                    f.write(content.decode("utf-8", "replace"))
+        except Exception as e:  # noqa: BLE001
+            self.cbpi.notify("Error", "Upload of {} failed: {}".format(filename, e),
+                             NotificationType.ERROR)
+            return False
+        what = {"xml": "XML Recipe {}".format(filename),
+                "json": "JSON Recipe {}".format(filename),
+                "sqlite": "Kleiner Brauhelfer database"}[kind]
+        self.cbpi.notify("Success", "{} has been uploaded".format(what),
+                         NotificationType.SUCCESS)
+        return True
 
     # function to create a recipe from the Kleiner Brauhelfer database
     async def kbh_recipe_creation(self, Recipe_ID):
@@ -1054,7 +1038,11 @@ class UploadController:
                 for row in self.getSteps(Recipe_ID, "xml"):
                     step_name = str(row.get("name"))
                     step_timer = str(int(row.get("timer")))
-                    step_temp = str(int(row.get("temp")))
+                    # Rounded to a tenth, not cut to a whole degree: a 152.5 F
+                    # rest came in as 152, and on a Celsius server Scott's
+                    # 152 F (66.67 C) as 66 C, 150.8 F (DEFECTS C3, M44; review
+                    # item 15). Whole numbers stay as they were: "152".
+                    step_temp = self._format_temp(row.get("temp"))
                     sensor = self.kettle.sensor
                     if MashIn_Flag == True:
                         if row.get("timer") == 0:

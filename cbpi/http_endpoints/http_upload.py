@@ -30,9 +30,11 @@ class UploadHttpEndpoints:
                 description: successful operation
         """
         data = await request.post()
-        logging.error("Received file upload request with data: {}".format(data))
-        await self.controller.FileUpload(data)
-        return web.Response(status=200)
+        logging.info("Received file upload request with data: {}".format(data))
+        # 400 when it was not kept, so the Upload page - which reloads on
+        # success - leaves the error on screen (DEFECTS M45).
+        ok = await self.controller.FileUpload(data)
+        return web.Response(status=200 if ok else 400)
 
     @request_mapping(path="/kbh", method="GET", auth_required=False)
     async def get_kbh_list(self, request):
