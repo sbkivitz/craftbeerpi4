@@ -128,7 +128,7 @@ class KettleController(BasicController):
                 labels.append(label)
         return labels
 
-    async def start(self, id):
+    async def start(self, id, preset=None):
         # Two kettle logics driving one heater fight each other.
         #
         # On a HERMS it is normal and correct for two kettles to name the same
@@ -151,7 +151,7 @@ class KettleController(BasicController):
             await self._warn_if_heater_shared(id)
         except Exception as e:  # noqa: BLE001
             logging.debug("shared-heater check skipped: %s", e)
-        await super().start(id)
+        await super().start(id, preset=preset)
 
     async def _warn_if_heater_shared(self, id):
         item = self.find_by_id(id)

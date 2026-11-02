@@ -478,15 +478,22 @@ class StepController:
             # finished step went back in the queue - and start() takes the
             # first INITIAL, so it ran again after the step in hand.
             item.status = existing.status
-            # Runtime bookkeeping - underscored props, such as the time a
-            # stopped rest has run - belongs to the run, not the form. Keep
-            # whatever the incoming settings do not carry.
+            # Runtime bookkeeping - underscored props: the time a stopped rest
+            # has run, the hop reminders already given, a mash-in waiting for
+            # its malt - belongs to the run, not the form. The step form sends
+            # back the copy it loaded when it opened, which can be minutes old:
+            # taken, it would give a reminder again or run time again (DEFECTS
+            # M37). So the run's own values always win; the form's are dropped.
             if item.props is None:
                 item.props = Props()
+            incoming = item.props.to_dict() if hasattr(item.props, "to_dict") \
+                else dict(item.props)
+            for key in [k for k in incoming if str(k).startswith("_")]:
+                del item.props[key]
             previous = existing.props.to_dict() if hasattr(existing.props, "to_dict") \
                 else dict(existing.props or {})
             for key, value in previous.items():
-                if str(key).startswith("_") and key not in item.props:
+                if str(key).startswith("_"):
                     item.props[key] = value
         try:
             type_cfg = self.types.get(item.type)
@@ -823,6 +830,17 @@ class StepController:
                         item.props[key] = ""   # reads as never allowed
                     except Exception:  # noqa: BLE001
                         pass
+            # And everything else a step kept about this brew - underscored by
+            # convention, like the two above: the mash-in waiting for its malt,
+            # the boil reminders already given (DEFECTS M35, M36). Left behind,
+            # the next brew's mash-in would ask for malt in cold water.
+            try:
+                props = item.props.to_dict() if hasattr(item.props, "to_dict") \
+                    else dict(item.props or {})
+                for key in [k for k in props if str(k).startswith("_")]:
+                    del item.props[key]
+            except Exception as e:  # noqa: BLE001
+                logging.warning("Could not clear what %s kept: %s", item.id, e)
             try:
                 await item.instance.reset()
                 if hasattr(item.instance, "clear_progress"):

@@ -150,6 +150,11 @@ class MashInStep(CBPiStep):
     #: grain to touch the water.
     MAX_STRIKE_ABS_C = 82.0
 
+    #: Kept with the step once the water reaches strike and it waits for the
+    #: malt, like elapsed time, so Stop and Start - or a restart - come back to
+    #: that wait: pump held, no second heat to strike (DEFECTS M35).
+    WAITING_FOR_MALT_PROP = "_waiting_for_malt"
+
     async def NextStep(self, **kwargs):
         await self.next()
 
@@ -186,8 +191,16 @@ class MashInStep(CBPiStep):
         # HERMS, stopping it is what bounds the overshoot from a fast ramp.
         if self.props.get("Stop_Pump_At_Strike", "Yes") != "No":
             self._set_pump_hold(True)
+        # Remembered, so a Stop and Start does not forget that the malt may be
+        # going in: it restarted the pump into the grain and heated to strike
+        # again (DEFECTS M35, found by both reviewers on 2 Nov).
+        self._waiting_for_malt = True
+        await self.record(self.WAITING_FOR_MALT_PROP, True)
         self.summary = ""
         await self.push_update()
+        self._ask_for_malt()
+
+    def _ask_for_malt(self):
         self.cbpi.notify(
             self.name,
             self.props.get(
@@ -204,6 +217,10 @@ class MashInStep(CBPiStep):
         self.AutoMode = True if self.props.get("AutoMode", "No") == "Yes" else False
         self.kettle = self.get_kettle(self.props.get("Kettle", None))
         self.rest_temp = self._float_prop("Temp", 0)
+        self._waiting_for_malt = bool(self.props.get(self.WAITING_FOR_MALT_PROP, False))
+        if self._waiting_for_malt:
+            await self._resume_waiting_for_malt()
+            return
         self.strike_temp = self._strike_target(self.rest_temp)
         if self.kettle is not None:
             self.kettle.target_temp = self.strike_temp
@@ -236,6 +253,38 @@ class MashInStep(CBPiStep):
                 1, on_update=self.on_timer_update, on_done=self.on_timer_done
             )
         await self.push_update()
+
+    async def _resume_waiting_for_malt(self):
+        """Back to the wait for the malt, as the step was when it stopped (M35).
+
+        The water had reached strike: the target is the rest temperature, the
+        tun is taken to hold grain, and the pump is held if the step holds it at
+        strike - handed to the kettle logic before it runs, because a logic
+        that has been stopped starts as a new instance, and one told afterwards
+        may already have switched the pump on. Then the prompt again: a restart,
+        or another page, may not have it.
+        """
+        self.strike_temp = self.rest_temp
+        if self.kettle is not None:
+            self.kettle.target_temp = self.rest_temp
+        hold = self.props.get("Stop_Pump_At_Strike", "Yes") != "No"
+        flags = {"grain_present": True}
+        if hold:
+            flags["pump_hold"] = True
+        # On a logic still running, now; on the one started below, from the
+        # moment it exists.
+        self._set_grain_present(True)
+        if hold:
+            self._set_pump_hold(True)
+        if self.AutoMode == True:
+            await self.setAutoMode(True, preset=flags)
+        self.summary = ""
+        if self.cbpi.kettle is not None and self.timer is None:
+            self.timer = Timer(
+                1, on_update=self.on_timer_update, on_done=self.on_timer_done
+            )
+        await self.push_update()
+        self._ask_for_malt()
 
     def _float_prop(self, name, default):
         """A numeric property, without truncating the fraction away.
@@ -354,6 +403,10 @@ class MashInStep(CBPiStep):
     async def run(self):
         while self.running == True:
             await asyncio.sleep(1)
+            # Waiting for the malt: strike was reached, and nothing more
+            # happens here until the brewer presses Next (M35).
+            if getattr(self, "_waiting_for_malt", False):
+                continue
             sensor_value = self.get_sensor_value(self.props.get("Sensor", None)).get(
                 "value"
             )
@@ -375,12 +428,21 @@ class MashInStep(CBPiStep):
             1, on_update=self.on_timer_update, on_done=self.on_timer_done
         )
 
-    async def setAutoMode(self, auto_state):
+    async def setAutoMode(self, auto_state, preset=None):
+        """Switch the kettle logic on or off.
+
+        `preset`: attributes a logic started here has before it runs - see
+        KettleController.start. Used to resume a dough-in with the pump held.
+        """
         try:
             if (
                 self.kettle.instance is None or self.kettle.instance.state == False
             ) and (auto_state is True):
-                await self.cbpi.kettle.toggle(self.kettle.id)
+                if preset:
+                    await self.cbpi.kettle.start(self.kettle.id, preset=preset)
+                    await self.cbpi.kettle.push_udpate()
+                else:
+                    await self.cbpi.kettle.toggle(self.kettle.id)
             elif (
                 self.kettle.instance is not None
                 and self.kettle.instance.state == True
@@ -760,6 +822,22 @@ class BoilStep(CBPiStep):
     #: What the lid alert says when the steps_boil_lid_alert setting is blank.
     DEFAULT_LID_ALERT = "Please remove lid!"
 
+    #: The reminders already given, kept with the step like elapsed time, so
+    #: Stop and Start - or a restart - do not give them again: a paused boil
+    #: said "Please add 6.00 oz Willamette" twice (DEFECTS M36, found by both
+    #: reviewers on 2 Nov). A hop that fell due while the server was down was
+    #: never given, so it still is, late.
+    FIRST_WORT_DONE_PROP = "_first_wort_done"
+    LID_ALERT_DONE_PROP = "_lid_alert_done"
+    HOPS_DONE_PROP = "_hops_done"
+
+    def _hops_done(self):
+        done = self.props.get(self.HOPS_DONE_PROP, None) or []
+        try:
+            return sorted({int(n) for n in done})
+        except (TypeError, ValueError):
+            return []
+
     @action("Start Timer", [])
     async def start_timer(self):
         if self.timer.is_running is not True:
@@ -880,8 +958,10 @@ class BoilStep(CBPiStep):
     async def on_start(self):
 
         self.lid_temp = 95 if self.get_config_value("TEMP_UNIT", "C") == "C" else 203
-        self.lid_flag = True if self.props.get("LidAlert", "No") == "Yes" else False
-        self.lid_actor_flag = True if self.lid_flag == True else False
+        lid_on = self.props.get("LidAlert", "No") == "Yes"
+        # The lid actor follows the setting; the alert is given once a brew.
+        self.lid_actor_flag = lid_on
+        self.lid_flag = lid_on and not self.props.get(self.LID_ALERT_DONE_PROP, False)
         self.lid_actor = self.get_config_value("steps_boil_actor", None)
         # What the lid alert says. A rig with a steam condenser keeps the lid on
         # for the whole boil - Scott's has a Steam Slayer, 1 Nov - and needs
@@ -894,10 +974,11 @@ class BoilStep(CBPiStep):
         self.AutoTimer = (
             True if self.cbpi.config.get("BoilAutoTimer", "No") == "Yes" else False
         )
-        self.first_wort_hop_flag = False
+        self.first_wort_hop_flag = bool(self.props.get(self.FIRST_WORT_DONE_PROP, False))
         self.first_wort_hop = self.props.get("First_Wort", "No")
         self.first_wort_hop_text = self.props.get("First_Wort_text", None)
-        self.hops_added = ["", "", "", "", "", ""]
+        done = self._hops_done()
+        self.hops_added = [True if n in done else "" for n in range(1, 7)]
         self.remaining_seconds = None
         self.temparray = np.array([])
         self.temptimes = np.array([])
@@ -980,6 +1061,8 @@ class BoilStep(CBPiStep):
                 int(value) * 60 + 1
             ):
                 self.hops_added[number - 1] = True
+                await self.record(self.HOPS_DONE_PROP,
+                                  sorted(set(self._hops_done()) | {number}))
                 # An acknowledge action is what makes this stick. The UI arms a
                 # five second auto-dismiss only when the action list is empty
                 # (AlertProvider: `if (action?.length <= 0)`), and renders a
@@ -1038,6 +1121,7 @@ class BoilStep(CBPiStep):
     async def run(self):
         if self.first_wort_hop_flag == False and self.first_wort_hop == "Yes":
             self.first_wort_hop_flag = True
+            await self.record(self.FIRST_WORT_DONE_PROP, True)
             # Sticky, like the other hop alerts: with an action the interface
             # holds it until answered instead of dismissing it after five
             # seconds - and it is raised alongside the wort-transfer prompt,
@@ -1129,6 +1213,7 @@ class BoilStep(CBPiStep):
                     action=[NotificationAction("Done")],
                 )
                 self.lid_flag = False
+                await self.record(self.LID_ALERT_DONE_PROP, True)
 
             if self.lid_actor is not None and sensor_value >= self.lid_temp and self.lid_actor_flag:
                 if self.get_actor_state(self.lid_actor) is False:
