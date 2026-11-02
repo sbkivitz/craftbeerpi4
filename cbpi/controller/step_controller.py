@@ -442,9 +442,52 @@ class StepController:
                 "Step '%s' could not act on its saved settings: %s", item.name, e
             )
 
+    # Told to the brewer when a running step's settings are not changed.
+    EDIT_WHILE_RUNNING = (
+        "'{}' is running, so its settings were not changed. Press Stop, make "
+        "the change, then Start: it carries on with the time it had left."
+    )
+
     async def update(self, item: Step):
+        """Replace a step's settings. Returns the step as saved, or None if refused.
+
+        Not while it runs (DEFECTS M33, HC-CORE-01). This built a new instance
+        and swapped it in without stopping the running one, which went on
+        outside the profile: Stop found nothing active, an import could not
+        reach it, and its kettle logic - the HLT element and the pump - kept
+        going. Seen on 2 Nov at 100% after both.
+        """
 
         logging.info("update step")
+        existing = self.find_by_id(item.id)
+        if existing is not None and existing.status == StepState.ACTIVE:
+            logging.warning("Refused to change step '%s' while it runs", existing.name)
+            try:
+                self.cbpi.notify(
+                    existing.name,
+                    self.EDIT_WHILE_RUNNING.format(existing.name),
+                    NotificationType.WARNING,
+                    action=[NotificationAction("OK")],
+                )
+            except Exception as e:  # noqa: BLE001
+                logging.warning("Could not say why the change was refused: %s", e)
+            return None
+        if existing is not None:
+            # An edit changes a step's settings, not how far the profile has
+            # got with it. The endpoint builds every step as INITIAL, so a
+            # finished step went back in the queue - and start() takes the
+            # first INITIAL, so it ran again after the step in hand.
+            item.status = existing.status
+            # Runtime bookkeeping - underscored props, such as the time a
+            # stopped rest has run - belongs to the run, not the form. Keep
+            # whatever the incoming settings do not carry.
+            if item.props is None:
+                item.props = Props()
+            previous = existing.props.to_dict() if hasattr(existing.props, "to_dict") \
+                else dict(existing.props or {})
+            for key, value in previous.items():
+                if str(key).startswith("_") and key not in item.props:
+                    item.props[key] = value
         try:
             type_cfg = self.types.get(item.type)
             clazz = type_cfg.get("class")
@@ -452,6 +495,10 @@ class StepController:
         except Exception as e:
             logging.warning("Failed to create step instance %s - %s " % (item.id, e))
             item.instance = None
+
+        if item.instance is not None and item.id == self._held_step_id:
+            # Still held for the brewer: the new instance must say so too.
+            item.instance.summary = self.HOLD_SUMMARY
 
         self.profile = list(
             map(lambda old: item if old.id == item.id else old, self.profile)
