@@ -600,6 +600,24 @@ class StepController:
             logging.error("Steps already running")
             return
 
+        # A failed step is where the profile stopped, and the brewer's Start
+        # retries it - what the failure notice tells them to do. Until
+        # 4.7.7.post24 Start passed over it to the next step not yet started,
+        # as the brewer, so after a failed mash out the boil began heating at
+        # once with no question (DEFECTS M32). Moving on by itself, the profile
+        # never passes a failed step.
+        failed = self.find_by_status(StepState.ERROR)
+        if failed is not None:
+            if not by_brewer:
+                logging.warning(
+                    "Step '%s' failed: the profile waits for the brewer", failed.name
+                )
+                return
+            logging.info("Retry failed step %s", failed.name)
+            await self.start_step(failed, by_brewer=True)
+            await self.save()
+            return
+
         step = self.find_by_status(StepState.STOP)
         if step is not None:
             if await self._held_instead(step, by_brewer):
@@ -669,7 +687,10 @@ class StepController:
                 step.status = StepState.STOP
                 await self.save()
 
-        step = self.find_by_status(StepState.STOP)
+        # A failed step is skipped like a stopped one (DEFECTS M32). It used to
+        # fall through to the start() below, as the brewer, which passed over
+        # it and began the next step - a boil, heating with no question.
+        step = self.find_by_status(StepState.STOP) or self.find_by_status(StepState.ERROR)
         if step is not None:
             if step.instance is not None:
                 step.status = StepState.DONE
