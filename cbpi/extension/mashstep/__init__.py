@@ -615,16 +615,22 @@ class WaitStep(CBPiStep):
 
     async def on_timer_done(self, timer):
         self.summary = ""
+        # Over: its time must not carry into a later run of it.
+        self.clear_progress()
         await self.next()
 
     async def on_timer_update(self, timer, seconds):
         self.summary = Timer.format_time(seconds)
+        # Kept, like a mash rest's, so a restart carries on with what is left
+        # (DEFECTS M43, review item 14: a whirlpool stand ran its full 20
+        # minutes again after a restart).
+        await self.note_progress(seconds, self._int_prop("Timer", 0) * 60)
         await self.push_update()
 
     async def on_start(self):
         if self.timer is None:
             self.timer = Timer(
-                self._int_prop("Timer", 0) * 60,
+                self.remaining_for(self._int_prop("Timer", 0) * 60),
                 on_update=self.on_timer_update,
                 on_done=self.on_timer_done,
             )
