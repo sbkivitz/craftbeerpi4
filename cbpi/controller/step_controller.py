@@ -1046,8 +1046,10 @@ class StepController:
                     del props[key]
 
         list(map(lambda item: add_runtime_data(item), data.get("steps")))
-        with open(self.path, "w") as file:
-            json.dump(data, file, indent=4, sort_keys=True)
+        # In one write: an import or the recipe book replaces the whole profile,
+        # and a write broken part-way left an unreadable file, which load()
+        # then set aside for an empty profile (DEFECTS M39).
+        atomic_write_json(self.path, data, indent=4, sort_keys=True)
         self._held_step_id = None
         self.load()
         self.push_udpate(complete=True)
