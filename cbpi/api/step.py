@@ -258,6 +258,8 @@ class CBPiStep(_TargetArrival, CBPiBase):
         self.logger = logging.getLogger(__name__)
         self._elapsed_saved_at = 0.0
         self._elapsed_saved_real_at = 0.0
+        # The time run so far, as last seen by note_progress - written on Stop.
+        self._elapsed_now = None
         self._stall_anchor_value = None
         self._stall_anchor_at = 0.0
         self._stall_reported = False
@@ -301,6 +303,7 @@ class CBPiStep(_TargetArrival, CBPiBase):
             elapsed = max(0.0, float(total_seconds) - float(remaining_seconds))
         except (TypeError, ValueError):
             return
+        self._elapsed_now = elapsed
         brewing_now = clock.now()
         real_now = time.time()
         if brewing_now - self._elapsed_saved_at < self.ELAPSED_SAVE_INTERVAL:
@@ -321,12 +324,29 @@ class CBPiStep(_TargetArrival, CBPiBase):
         """Forget recorded progress, so the step starts fresh next time."""
         self._elapsed_saved_at = 0.0
         self._elapsed_saved_real_at = 0.0
+        self._elapsed_now = None
         self.reset_heat_watch()
         if self.ELAPSED_PROP in self.props:
             try:
                 del self.props[self.ELAPSED_PROP]
             except Exception:
                 self.props[self.ELAPSED_PROP] = 0
+
+    async def record(self, key, value):
+        """Keep a fact about this run with the step, on disk now.
+
+        For what a step has already done - reached strike, given a hop
+        reminder - so that Stop and Start, or a restart, carry on from it
+        rather than doing it again (DEFECTS M35, M36). Keys are underscored,
+        like ELAPSED_PROP: runtime bookkeeping the form does not show, cleared
+        by a reset and never carried into a recipe. Never raises.
+        """
+        self.props[key] = value
+        try:
+            await self.cbpi.step.save()
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "Could not record %s for %s: %s", key, getattr(self, "name", "?"), e)
 
     def reset_heat_watch(self):
         """Forget what the stall watch has seen so far."""
@@ -525,6 +545,19 @@ class CBPiStep(_TargetArrival, CBPiBase):
                 await self.task
         except Exception as e:
             logging.error(e)
+        # The time run so far, exactly. note_progress writes it only every
+        # thirty brewing seconds, so a Stop between two writes left up to 29
+        # seconds out - run again once the step is rebuilt (its settings
+        # changed while stopped, or a restart), and a rest stopped in its first
+        # half minute ran in full (DEFECTS M37, Gemini's R5). Whoever stops a
+        # step saves the profile afterwards: Stop and shutdown both do.
+        try:
+            elapsed = getattr(self, "_elapsed_now", None)
+            if elapsed is not None:
+                self.props[self.ELAPSED_PROP] = round(elapsed)
+        except Exception as e:  # noqa: BLE001 - never the reason a Stop fails
+            logging.warning("Could not record how far %s had got: %s",
+                            getattr(self, "name", "?"), e)
 
     async def reset(self):
         pass

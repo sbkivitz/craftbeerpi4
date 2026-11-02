@@ -166,7 +166,16 @@ class BasicController:
         except Exception as e:
             logging.error("{} Cant stop {} - {}".format(self.name, id, e))
 
-    async def start(self, id):
+    async def start(self, id, preset=None):
+        """Start the item's logic. `preset`: attributes the new logic has before it runs.
+
+        Starting builds a new logic instance, so a fact a step sets on the
+        running one - a pump held for dough-in - is gone, and setting it after
+        start() returns races the logic's own first pass, which may already
+        have switched the pump on (DEFECTS M35). Set here, before the instance
+        starts or runs, a logic that reads the attribute sees it from its first
+        moment; one that has never heard of it is unaffected.
+        """
         logging.info("{} Start Id {} ".format(self.name, id))
         try:
             item = self.find_by_id(id)
@@ -178,6 +187,8 @@ class BasicController:
                 return
             clazz = self.types[item.type]["class"]
             item.instance = clazz(self.cbpi, item.id, item.props)
+            for name, value in (preset or {}).items():
+                setattr(item.instance, name, value)
 
             await item.instance.start()
             item.instance.running = True
