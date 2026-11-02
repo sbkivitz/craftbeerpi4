@@ -831,13 +831,17 @@ class StepController:
                     except Exception:  # noqa: BLE001
                         pass
             # And everything else a step kept about this brew - underscored by
-            # convention, like the two above: the mash-in waiting for its malt,
-            # the boil reminders already given (DEFECTS M35, M36). Left behind,
-            # the next brew's mash-in would ask for malt in cold water.
+            # convention: the mash-in waiting for its malt, the boil reminders
+            # already given (DEFECTS M35, M36). Left behind, the next brew's
+            # mash-in would ask for malt in cold water. The keys cleared above
+            # are left to their own code and its fallbacks.
+            cleared_above = (CBPiStep.ELAPSED_PROP, CBPiStep.RESUME_UNTIL_PROP,
+                             CBPiStep.RESUME_BY_PROP)
             try:
                 props = item.props.to_dict() if hasattr(item.props, "to_dict") \
                     else dict(item.props or {})
-                for key in [k for k in props if str(k).startswith("_")]:
+                for key in [k for k in props
+                            if str(k).startswith("_") and k not in cleared_above]:
                     del item.props[key]
             except Exception as e:  # noqa: BLE001
                 logging.warning("Could not clear what %s kept: %s", item.id, e)
