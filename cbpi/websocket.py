@@ -126,6 +126,16 @@ class CBPiWebSocket:
         add("sensorupdate", items("sensor"))
         add("mash_profile_update", lambda: self.cbpi.step.get_state())
         add("notificationupdate", lambda: self.cbpi.notification.get_state())
+        # Prompts. First which ones still wait for an answer: a page drops any
+        # other it shows - left from before a restart, its buttons now doing
+        # nothing. Then the ones kept for every page (notify(keep=True)), shown
+        # as when they were sent: "Resume brew?" is asked while the server
+        # starts, before any page is open, and reached nobody (DEFECTS M47).
+        add("notification_waiting", lambda: self.cbpi.notification.waiting_prompts())
+        try:
+            messages.extend(self.cbpi.notification.kept_prompts())
+        except Exception as e:  # noqa: BLE001
+            self.logger.debug("snapshot: no kept prompts - %s", e)
         return messages
 
     async def _send_snapshot(self, ws):

@@ -86,6 +86,9 @@ class StepController:
         # The step the profile is holding before until the brewer starts it
         # (_hold_for_brewer), or None.
         self._held_step_id = None
+        # Prompts kept for every page until answered or no longer applying
+        # (_ask_kept): notification id -> (kind, step id, still_applies).
+        self._kept_prompts = {}
         self.cbpi.app.on_cleanup.append(self.shutdown)
 
     async def init(self):
@@ -134,6 +137,19 @@ class StepController:
         """
         interrupted = self.find_by_status(StepState.ACTIVE)
         if interrupted is None:
+            # Paused when the server stopped - by the brewer, or by an earlier
+            # restart whose question was never answered. Scott, 3 Nov: "If we
+            # were in the middle of a recipe or current boil step, then an
+            # alert should pop-up and ask if I want to resume the interrupted
+            # step." It used to come back paused with no question. Asked,
+            # never carried on by itself: someone paused it.
+            paused = self.find_by_status(StepState.STOP)
+            if paused is not None:
+                logging.warning(
+                    "Step '%s' was paused when the server stopped; asking whether "
+                    "to resume it.", paused.name,
+                )
+                self._ask_about_interrupted(paused, paused=True)
             return
 
         elapsed = self._elapsed_of(interrupted)
@@ -173,8 +189,11 @@ class StepController:
         except (TypeError, ValueError):
             return 0
 
-    def _ask_about_interrupted(self, interrupted, reason=None):
-        """The "Resume brew?" question, with why it is asked when that is news."""
+    def _ask_about_interrupted(self, interrupted, reason=None, paused=False):
+        """The "Resume brew?" question, with why it is asked when that is news.
+
+        `paused` when the step was already paused as the server stopped,
+        rather than running."""
         elapsed = self._elapsed_of(interrupted)
         if elapsed > 0:
             detail = (
@@ -189,10 +208,12 @@ class StepController:
             detail = reason + " " + detail
 
         try:
-            self.cbpi.notify(
+            self._ask_kept(
+                "resume", interrupted, lambda step: step.status == StepState.STOP,
                 "Resume brew?",
-                "'{}' was interrupted when the server stopped. {} Check your kettle "
-                "first, then choose.".format(interrupted.name, detail),
+                "'{}' was {} when the server stopped. {} Check your kettle "
+                "first, then choose.".format(
+                    interrupted.name, "paused" if paused else "interrupted", detail),
                 NotificationType.WARNING,
                 action=[
                     NotificationAction("Resume", self.resume),
@@ -201,6 +222,54 @@ class StepController:
             )
         except Exception as e:
             logging.warning("Could not ask about the interrupted step: %s", e)
+
+    def _ask_kept(self, kind, step, still_applies, title, message, type, action):
+        """Ask the brewer in a prompt kept until it is answered.
+
+        Shown on every page, open now or opened later - the phone as well as
+        the laptop - and taken down from all of them when a button is pressed
+        on one, or once `still_applies(step)` is no longer true: the brewer
+        answered some other way, with Start or Reset (_retire_prompts).
+
+        For the questions asked as the server starts after a restart - "Resume
+        brew?", the boil waiting to be started - which reached only the pages
+        open at the time, and that is none: a page cannot connect before the
+        server is up (DEFECTS M47). One prompt of a kind for a step at a time.
+        Returns the notification's id.
+        """
+        prompts = self.__dict__.setdefault("_kept_prompts", {})
+        for earlier, (k, step_id, _) in list(prompts.items()):
+            if k == kind and step_id == step.id:
+                self._retire_prompt(earlier)
+        notification_id = self.cbpi.notify(title, message, type, action=action, keep=True)
+        if notification_id is not None:
+            prompts[notification_id] = (kind, step.id, still_applies)
+        return notification_id
+
+    def _retire_prompts(self, everything=False):
+        """Take down the kept prompts that no longer apply - or, when the profile
+        is reset or replaced, all of them. Run on every save, which follows
+        every change of a step's status."""
+        prompts = self.__dict__.get("_kept_prompts") or {}
+        for notification_id, (kind, step_id, still_applies) in list(prompts.items()):
+            if not everything:
+                step = self.find_by_id(step_id)
+                try:
+                    if step is not None and still_applies(step):
+                        continue
+                except Exception as e:  # noqa: BLE001 - not knowing is not a reason to keep it
+                    logging.debug("Could not tell whether a '%s' prompt applies: %s", kind, e)
+            self._retire_prompt(notification_id)
+
+    def _retire_prompt(self, notification_id):
+        (self.__dict__.get("_kept_prompts") or {}).pop(notification_id, None)
+        retire = getattr(getattr(self.cbpi, "notification", None), "retire", None)
+        if retire is None:
+            return
+        try:
+            retire(notification_id)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not take down a prompt that no longer applies: %s", e)
 
     @staticmethod
     def _resume_until(step):
@@ -302,7 +371,8 @@ class StepController:
             else "which it may do until {}".format(self._clock_time(until))
         )
         try:
-            self.cbpi.notify(
+            self._ask_kept(
+                "carried on", step, lambda _step: True,
                 "Carried on after a restart",
                 "'{}' was running when the server stopped. The server is back, "
                 "and '{}' has carried on by itself - {}. Stop the profile if "
@@ -521,6 +591,7 @@ class StepController:
             steps=list(map(lambda item: item.to_dict(), self.profile)),
         )
         atomic_write_json(self.path, data, sort_keys=True)
+        self._retire_prompts()
         self.push_udpate()
 
     @staticmethod
@@ -579,7 +650,8 @@ class StepController:
         Now the profile stops before the step. Nothing is active, so nothing
         heats and the dashboard is the brewer's. The step shows that it is
         waiting, and a notification says why, with a button that starts it;
-        so do Start and Next. Asked again after a restart (_recover_hold).
+        so do Start and Next. Asked again after a restart (_recover_hold). The
+        notification is kept for every page until the step starts (_ask_kept).
         """
         message, button = wait
         self._held_step_id = step.id
@@ -592,7 +664,9 @@ class StepController:
             await self._start_held(held_id)
 
         try:
-            self.cbpi.notify(
+            self._ask_kept(
+                "hold", step,
+                lambda s: s.status == StepState.INITIAL and self._held_step_id == s.id,
                 step.name, message, NotificationType.WARNING,
                 action=[NotificationAction(button, start_held)],
             )
@@ -856,6 +930,8 @@ class StepController:
             except:
                 logging.warning("No Step Instance - Id: %s", item.id)
         self._clear_hold()
+        # Starting over: no question about the brew before still stands.
+        self._retire_prompts(everything=True)
         await self.save()
         self.push_udpate()
 
@@ -1052,6 +1128,7 @@ class StepController:
         atomic_write_json(self.path, data, indent=4, sort_keys=True)
         self._held_step_id = None
         self.load()
+        self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
 
     async def clear(self):
@@ -1066,6 +1143,7 @@ class StepController:
 
         self._held_step_id = None
         self.load()
+        self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
 
     async def savetobook(self):
