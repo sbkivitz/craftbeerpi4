@@ -656,11 +656,12 @@ class UploadController:
                     await self.create_step(step_string)
 
                 # create a whirlpool step with optional cooldown
+                whirlpool_temp = step_temp if Whirlpool != [] else None
                 if not whirlpool:
-                    await self.create_Whirlpool_Cooldown()
+                    await self.create_Whirlpool_Cooldown(temp=whirlpool_temp)
                 else:
                     await self.create_Whirlpool_Cooldown(
-                        str(abs(whirlpool[0][0]))
+                        str(abs(whirlpool[0][0])), temp=whirlpool_temp
                     )  # from kbh this value comes as negative but must be positive
 
                 self._creation_done("KBH Recipe created", name)
@@ -993,7 +994,8 @@ class UploadController:
 
 
 
-                await self.create_Whirlpool_Cooldown()
+                await self.create_Whirlpool_Cooldown(
+                    temp=step_temp if whirlpool_hops != [] else None)
 
                 self._creation_done("MMuM-JSON Recipe created ", name)
             else:
@@ -1248,7 +1250,8 @@ class UploadController:
                 # The stand runs for the recipe's longest steep time, 15 minutes
                 # when it gives none - always 15 until 4.7.7.post22.
                 await self.create_Whirlpool_Cooldown(
-                    str(self._whirlpool_minutes(whirlpool_additions))
+                    str(self._whirlpool_minutes(whirlpool_additions)),
+                    temp=step_temp if Whirlpool != [] else None,
                 )
 
                 self._creation_done("BeerXML Recipe created ", name)
@@ -1594,7 +1597,8 @@ class UploadController:
                     await self.create_step(step_string)
 
 
-                await self.create_Whirlpool_Cooldown()
+                await self.create_Whirlpool_Cooldown(
+                    temp=step_temp if Whirlpool != [] else None)
 
                 self._creation_done("Brewfather App Recipe created: ", RecipeName)
             else:
@@ -1864,15 +1868,22 @@ class UploadController:
 
         return [alert, " and ".join(names)]
 
-    async def create_Whirlpool_Cooldown(self, time: str = "15"):
-        # Add Waitstep as Whirlpool
+    async def create_Whirlpool_Cooldown(self, time: str = "15", temp=None):
+        # The whirlpool stand: a WhirlpoolStep, a WaitStep that knows the
+        # whirlpool temperature. If the wort cools more than 2 C / 3.6 F below
+        # it, the brewer is asked whether to heat it back and hold it (Scott, 4
+        # Nov: "whirlpool step cooled too far"). `temp` only with whirlpool hops:
+        # without them the stand only settles the trub, and nothing need ask.
         if self.cooldown != "WaiStep" and self.cooldown != "":
+            props = {"Kettle": self.boilid, "Timer": time}
+            if temp is not None:
+                props["Temp"] = self._format_temp(temp)
             step_string = {
                 "name": "Whirlpool",
-                "props": {"Kettle": self.boilid, "Timer": time},
+                "props": props,
                 "status_text": "",
                 "status": "I",
-                "type": "WaitStep",
+                "type": "WhirlpoolStep",
             }
             await self.create_step(step_string)
 
