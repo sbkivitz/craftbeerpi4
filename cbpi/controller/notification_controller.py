@@ -28,6 +28,10 @@ class NotificationController:
     # a controller.
     MAX_CALLBACK_CACHE = 100
 
+    # Sent to every page when a prompt is taken down - answered on one of
+    # them, or no longer applying (retire). With the prompt's id.
+    RETIRED_TOPIC = "notification_retired"
+
     def __init__(self, cbpi):
         """
         :param cbpi: craftbeerpi object
@@ -36,6 +40,11 @@ class NotificationController:
         self.logger = logging.getLogger(__name__)
         logging.root.addFilter(self.notify_log_event)
         self.callback_cache = {}
+        # Prompts kept until they are answered or retired (notify(keep=True)):
+        # id -> the message that showed it, shown again to every page that
+        # connects meanwhile. Only ever prompts still in callback_cache, so
+        # bounded with it.
+        self.open_prompts = {}
         self.listener = {}
         self.notifications = []
         self.update_key = "notificationupdate"
@@ -121,6 +130,13 @@ class NotificationController:
             background_tasks.add(task)
             task.add_done_callback(background_tasks.discard)
 
+    def _open(self):
+        """open_prompts, made on first use. A controller assembled without
+        __init__ - test_notification_cache_leak.py builds one with __new__ -
+        has none, and a class-level {} would be one dict shared by every
+        controller."""
+        return self.__dict__.setdefault("open_prompts", {})
+
     def notify(
         self,
         title,
@@ -128,14 +144,20 @@ class NotificationController:
         type: NotificationType = NotificationType.INFO,
         action=[],
         timeout: int = 5000,
-    ) -> None:
+        keep: bool = False,
+    ):
         """
         This is a convinience method to send notification to the client
 
         :param key: notification key
         :param message: notification message
         :param type: notification type (info,warning,danger,successs)
-        :return:
+        :param keep: for a prompt - one with buttons - keep it until a button
+            is pressed or retire() takes it down, and show it to every page
+            that opens meanwhile. Otherwise a prompt reaches only the pages
+            open when it is sent: one sent while the server starts reaches
+            none (DEFECTS M47).
+        :return: the notification's id
         """
         notifcation_id = shortuuid.uuid()
         background_tasks = set()
@@ -155,18 +177,19 @@ class NotificationController:
             # by waiting for a click that may never come. dict preserves
             # insertion order, so the oldest pending callback goes first.
             while len(self.callback_cache) > self.MAX_CALLBACK_CACHE:
-                self.callback_cache.pop(next(iter(self.callback_cache)))
-        self.cbpi.ws.send(
-            dict(
-                id=notifcation_id,
-                topic="notifiaction",
-                type=type.value,
-                title=title,
-                message=message,
-                action=actions,
-                timeout=timeout,
-            )
+                self.retire(next(iter(self.callback_cache)))
+        shown = dict(
+            id=notifcation_id,
+            topic="notifiaction",
+            type=type.value,
+            title=title,
+            message=message,
+            action=actions,
+            timeout=timeout,
         )
+        if keep and action:
+            self._open()[notifcation_id] = dict(shown)
+        self.cbpi.ws.send(shown)
         data = dict(
             type=type.value,
             title=title,
@@ -186,6 +209,31 @@ class NotificationController:
         task = asyncio.create_task(self._call_listener(title, message, type, action))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
+        return notifcation_id
+
+    def retire(self, notification_id) -> bool:
+        """Take a prompt down: it has been answered, or no longer applies.
+
+        From every page showing it, and from those shown to pages that open
+        later. Its buttons stop working too: pressed on a page that missed
+        this, they would act on a profile that has moved on - "Skip this step"
+        on a "Resume brew?" left over skips whatever step runs by then.
+
+        True if it was still waiting for an answer.
+        """
+        waiting = self.callback_cache.pop(notification_id, None) is not None
+        kept = self._open().pop(notification_id, None) is not None
+        if waiting or kept:
+            self.cbpi.ws.send(dict(topic=self.RETIRED_TOPIC, id=notification_id))
+        return waiting or kept
+
+    def kept_prompts(self):
+        """The prompts kept for every page, as the messages that showed them."""
+        return [dict(shown) for shown in self._open().values()]
+
+    def waiting_prompts(self):
+        """The ids of the prompts whose buttons still do something."""
+        return list(self.callback_cache)
 
     def delete_all_notifications(self):
         self.notifications = []
@@ -217,7 +265,10 @@ class NotificationController:
                 task = asyncio.create_task(action.method())
                 background_tasks.add(task)
                 task.add_done_callback(background_tasks.discard)
-            del self.callback_cache[notification_id]
+            # Answered: gone from every page, not just the one it was
+            # answered on, where a phone kept showing it with a button that
+            # no longer did anything.
+            self.retire(notification_id)
             return True
         except Exception as e:
             self.logger.error("Failed to call notification callback")
