@@ -1,5 +1,7 @@
 import asyncio
+import inspect
 import logging
+import math
 import time
 import warnings
 from datetime import datetime
@@ -652,6 +654,280 @@ class WaitStep(CBPiStep):
         while self.running == True:
             await asyncio.sleep(1)
         return StepResult.DONE
+
+
+def _fmt_temp(value):
+    """170.0 -> "170", 170.5 -> "170.5"."""
+    return ("%.1f" % value).rstrip("0").rstrip(".")
+
+
+@parameters(
+    [
+        Property.Number(
+            label="Timer", description="Minutes the stand lasts", configurable=True
+        ),
+        Property.Number(
+            label="Temp",
+            configurable=True,
+            description="The whirlpool temperature. If the wort falls more than "
+            "2 C / 3.6 F below it during the stand, you are asked whether to "
+            "heat it back and hold it there until the stand ends. Blank: never "
+            "asked.",
+        ),
+        Property.Kettle(
+            label="Kettle",
+            description="The kettle the wort stands in - the boil kettle.",
+        ),
+    ]
+)
+class WhirlpoolStep(WaitStep):
+    """A whirlpool or hop stand: a timed wait in the boil kettle, kept warm on request.
+
+    Scott, 4 Nov, after a brew day on the simulator: "whirlpool step cooled too
+    far. I'd like a prompt to ask if I want to raise temp back to whirlpool
+    temp and hold". The stand was a WaitStep - a timer and nothing else - and
+    the wort lost about 18 F over its 20 minutes with nothing watching it.
+
+    Now, if the wort falls more than 2 C / 3.6 F below Temp, the brewer is
+    asked, once a stand, in a prompt kept until it is answered: heat it back
+    and hold it there until the stand ends? Heat and hold sets a hold on the
+    kettle's logic - BoilPower's Hold a temperature where the logic has one,
+    the kettle's target where it has not - and then switches the logic on: in
+    that order, so BoilPower never runs a moment without its hold, which would
+    be a boil. When the stand ends, or is stopped or skipped, the logic is
+    switched off and then the hold cleared, so the chill that follows starts
+    with the element off. Stopped and started again, the stand holds again
+    without asking.
+
+    The stand's time runs on while the wort reheats: the stand lasts what the
+    recipe says.
+    """
+
+    # How far below Temp counts as cooled too far: BoilPower's own band for
+    # "meaningfully below" (its BOIL_EXIT_DROP_C), where its hold heats again.
+    COOLED_C = 2.0
+
+    # Per stand. Class defaults, so a step built without __init__ has them;
+    # only immutable values.
+    _asked = False  # the question is on show, or was answered
+    _prompt_id = None
+    _declined = False  # the brewer said No
+    _hold_wanted = False  # the brewer said Heat and hold
+    _holding = False  # this step set the hold and switched the logic on
+    _held_by_action = False  # through the logic's Hold a temperature
+
+    async def on_start(self):
+        await super().on_start()
+        if self._hold_wanted and not self._holding:
+            # Stopped and started again: the brewer has already chosen.
+            await self._start_hold()
+        await self._check_wort()
+
+    async def on_timer_update(self, timer, seconds):
+        await super().on_timer_update(timer, seconds)
+        await self._check_wort()
+
+    async def on_stop(self):
+        paused = self.cancel_reason == StepResult.STOP
+        await self._end_hold()
+        # Not answered by now, the question no longer applies: taken down from
+        # every page, and asked again if a paused stand is started again.
+        self._retire_prompt()
+        self._asked = False
+        if not paused:
+            # Finished or skipped: a later run of this step starts afresh.
+            self._declined = False
+            self._hold_wanted = False
+        await super().on_stop()
+
+    async def reset(self):
+        await super().reset()
+        self._retire_prompt()
+        self._asked = self._declined = self._hold_wanted = False
+        self._holding = self._held_by_action = False
+
+    def _whirlpool_temp(self):
+        """Temp as a number, or None: blank, or unreadable."""
+        raw = self.props.get("Temp", None)
+        if raw in (None, ""):
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    def _kettle(self):
+        kettle_id = self.props.get("Kettle", None)
+        if not kettle_id:
+            return None
+        try:
+            return self.get_kettle(kettle_id)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _wort_temp(self, kettle):
+        """The kettle's probe reading, or None if there is no usable one."""
+        sensor = getattr(kettle, "sensor", None)
+        if not sensor:
+            return None
+        try:
+            reading = self.get_sensor_value(sensor)
+            value = reading.get("value") if isinstance(reading, dict) else reading
+        except Exception:  # noqa: BLE001
+            return None
+        return float(value) if self.reading_usable(value) else None
+
+    def _unit(self):
+        try:
+            unit = str(self.get_config_value("TEMP_UNIT", "C")).upper()
+        except Exception:  # noqa: BLE001
+            unit = "C"
+        return "F" if unit.startswith("F") else "C"
+
+    async def _check_wort(self):
+        """Ask, once a stand, if the wort has cooled too far."""
+        if self._asked or self._declined or self._hold_wanted or not self.running:
+            return
+        target = self._whirlpool_temp()
+        kettle = self._kettle()
+        if target is None or kettle is None:
+            return
+        value = self._wort_temp(kettle)
+        band = self.COOLED_C * (1.8 if self._unit() == "F" else 1.0)
+        if value is None or value >= target - band:
+            return
+        self._ask(value, target, kettle)
+
+    def _ask(self, value, target, kettle):
+        self._asked = True
+        unit = "\u00b0" + self._unit()
+        try:
+            minutes = int(round(self.timer.seconds_left() / 60.0))
+            left = ", with {} minute{} of the stand left".format(
+                minutes, "" if minutes == 1 else "s")
+        except Exception:  # noqa: BLE001
+            left = ""
+        message = (
+            "The wort in {kettle} has cooled to {value:.1f} {u}, below the "
+            "{target} {u} whirlpool{left}. Heat it back to {target} {u} and hold "
+            "it there until the stand ends?".format(
+                kettle=getattr(kettle, "name", None) or "the kettle", value=value,
+                u=unit, target=_fmt_temp(target), left=left,
+            )
+        )
+        logging.warning("%s: %s", self.name, message)
+        try:
+            self._prompt_id = _notify_kept(
+                self.cbpi, self.name, message, NotificationType.WARNING,
+                [NotificationAction("Heat and hold", self._accept),
+                 NotificationAction("No", self._decline)],
+            )
+        except Exception as e:  # noqa: BLE001
+            logging.warning("%s: could not ask about the cooled wort: %s", self.name, e)
+
+    async def _accept(self):
+        self._prompt_id = None
+        if not self.running:
+            # A button from a stand that has ended - pressed on a page that
+            # never heard the prompt was taken down. It must not switch a
+            # kettle on during the chill.
+            logging.info("%s: Heat and hold pressed after the stand ended; ignored", self.name)
+            return
+        self._hold_wanted = True
+        await self._start_hold()
+
+    async def _decline(self):
+        self._prompt_id = None
+        self._declined = True
+
+    def _has_hold_action(self, kettle):
+        """Whether the kettle's logic offers Hold a temperature (BoilPower)."""
+        try:
+            logic = (self.cbpi.kettle.types.get(kettle.type) or {}).get("class")
+            return bool(getattr(getattr(logic, "set_hold_target", None), "action", False))
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _start_hold(self):
+        """Hold the whirlpool temperature, then switch the kettle's logic on."""
+        kettle = self._kettle()
+        target = self._whirlpool_temp()
+        if kettle is None or target is None:
+            return
+        try:
+            by_action = self._has_hold_action(kettle)
+            if by_action:
+                held = await self.cbpi.kettle.call_action(
+                    kettle.id, "set_hold_target", {"Hold_Target": target})
+                if held is False:
+                    raise RuntimeError("its logic refused the hold")
+            else:
+                await self.cbpi.kettle.set_target_temp(kettle.id, target)
+            self._held_by_action = by_action
+            instance = getattr(kettle, "instance", None)
+            if instance is None or not getattr(instance, "running", False):
+                await self.cbpi.kettle.start(kettle.id)
+            self._holding = True
+            self.summary2 = "Holding {} \u00b0{}".format(_fmt_temp(target), self._unit())
+            await self.push_update()
+        except Exception as e:  # noqa: BLE001
+            logging.warning("%s: could not hold %s: %s", self.name, target, e)
+            try:
+                self.cbpi.notify(
+                    self.name,
+                    "Could not hold {} at {} \u00b0{}: {}. Set it from the "
+                    "dashboard if you still want it.".format(
+                        getattr(kettle, "name", "the kettle"), _fmt_temp(target),
+                        self._unit(), e),
+                    NotificationType.WARNING,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _end_hold(self):
+        """Undo what Heat and hold did: logic off first, then the hold cleared."""
+        if not self._holding:
+            return
+        self._holding = False
+        self.summary2 = None
+        kettle = self._kettle()
+        if kettle is None:
+            return
+        try:
+            await self.cbpi.kettle.stop(kettle.id)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("%s: could not switch %s off: %s", self.name, kettle.id, e)
+        if self._held_by_action:
+            try:
+                await self.cbpi.kettle.call_action(
+                    kettle.id, "set_hold_target", {"Hold_Target": ""})
+            except Exception as e:  # noqa: BLE001
+                logging.warning("%s: could not clear the hold: %s", self.name, e)
+
+    def _retire_prompt(self):
+        prompt, self._prompt_id = self._prompt_id, None
+        if prompt is None:
+            return
+        retire = getattr(getattr(self.cbpi, "notification", None), "retire", None)
+        if retire is None:
+            return
+        try:
+            retire(prompt)
+        except Exception as e:  # noqa: BLE001
+            logging.debug("%s: could not take the question down: %s", self.name, e)
+
+
+def _notify_kept(cbpi, title, message, type, action):
+    """notify(..., keep=True) where CraftBeerPi can keep a prompt for every
+    page (DEFECTS M47); plain notify where it cannot. Returns the id, if any."""
+    try:
+        keeps = "keep" in inspect.signature(cbpi.notify).parameters
+    except (TypeError, ValueError):
+        keeps = False
+    if keeps:
+        return cbpi.notify(title, message, type, action=action, keep=True)
+    return cbpi.notify(title, message, type, action=action)
 
 
 @parameters(
@@ -1437,6 +1713,7 @@ def setup(cbpi):
     cbpi.plugin.register("BoilStep", BoilStep)
     cbpi.plugin.register("CooldownStep", CooldownStep)
     cbpi.plugin.register("WaitStep", WaitStep)
+    cbpi.plugin.register("WhirlpoolStep", WhirlpoolStep)
     cbpi.plugin.register("ToggleStep", ToggleStep)
     cbpi.plugin.register("ActorStep", ActorStep)
     cbpi.plugin.register("NotificationStep", NotificationStep)
