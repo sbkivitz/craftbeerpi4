@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import time
+import weakref
 
 from cbpi.api import clock
 
@@ -16,6 +17,13 @@ class Timer(object):
     #: last step overshot by, multiplied by the time scale.
     UPDATE_INTERVAL = 1.0
 
+    #: Told as any timer starts counting down, has its end moved, stops before
+    #: its end or reaches it: observer(timer, what), `what` being
+    #: "timer_started", "timer_changed", "timer_stopped" or "timer_done".
+    #: Bound methods, held weakly, so an observer goes with its owner. A timer
+    #: does not know whose it is; StepController.add_listener finds out.
+    _observers = []
+
     def __init__(self, timeout, on_done=None, on_update=None) -> None:
         super().__init__()
         self.timeout = timeout
@@ -28,6 +36,31 @@ class Timer(object):
         self._deadline = None
         self._started = False
         self._update_error = None
+        # Counting down now, and since when (brewing clock) - for state().
+        self._counting = False
+        self._counting_since = None
+
+    @classmethod
+    def add_observer(cls, method):
+        """Tell `method`, a bound method, about every timer (see _observers)."""
+        Timer.remove_observer(method)
+        Timer._observers.append(weakref.WeakMethod(method))
+
+    @classmethod
+    def remove_observer(cls, method):
+        """Stop telling `method`. One never added: nothing happens."""
+        Timer._observers[:] = [ref for ref in Timer._observers
+                               if ref() is not None and ref() != method]
+
+    def _tell(self, what):
+        for ref in list(Timer._observers):
+            observer = ref()
+            if observer is None:
+                continue
+            try:
+                observer(self, what)
+            except Exception:  # noqa: BLE001 - an observer never ends a rest
+                logging.exception("A timer observer failed on %s", what)
 
     def done(self, task):
         # A cancelled timer has not finished, it was stopped. Firing the completion
@@ -38,6 +71,8 @@ class Timer(object):
         # server was shutting down.
         if task.cancelled():
             return
+        self._counting = False
+        self._tell("timer_done")
         if self._callback is not None:
             asyncio.create_task(self._callback(self))
 
@@ -66,6 +101,8 @@ class Timer(object):
         self._deadline = start + duration
         self.end_time = int(round(self._deadline, 0))
         self.count = int(round(duration, 0))
+        self._counting, self._counting_since = True, start
+        self._tell("timer_started")
         try:
             while True:
                 remaining = self._deadline - clock.now()
@@ -98,6 +135,8 @@ class Timer(object):
                 )
         except asyncio.CancelledError:
             self._timemout = max(0.0, self._deadline - clock.now())
+            self._counting = False
+            self._tell("timer_stopped")
             # Re-raised so the task is actually marked cancelled. Swallowing it
             # left the task "completed", which is what made done() treat a stop as
             # an expiry. The remaining time above is still recorded first, so
@@ -117,6 +156,35 @@ class Timer(object):
             self._timemout = max(0.0, float(self._timemout) + seconds)
             if self.end_time is not None:
                 self.end_time = self.end_time + seconds
+        self._tell("timer_changed")
+
+    def state(self):
+        """The countdown as plain data, in brewing-clock seconds (cbpi.api.clock).
+
+        counting: counting down now. started_at and ends_at: when this
+        countdown began, and when it ends - None unless counting; ends_at moves
+        when time is added. seconds_left: as seconds_left(). length: what the
+        timer was set to run - after a power cut, what was left of the rest.
+        """
+        counting = bool(self._counting) and self._deadline is not None
+
+        def seconds(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            left = self.seconds_left()
+        except (TypeError, ValueError):
+            left = None
+        return {
+            "counting": counting,
+            "started_at": seconds(self._counting_since) if counting else None,
+            "ends_at": seconds(self._deadline) if counting else None,
+            "seconds_left": seconds(left),
+            "length": seconds(self.timeout),
+        }
 
     def start(self):
         self._started = True

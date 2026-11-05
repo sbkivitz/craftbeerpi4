@@ -25,6 +25,7 @@ from tabulate import tabulate
 
 from ..api.decorator import normalize_action_parameters, resolve_action
 from ..api.step import CBPiStep, StepMove, StepResult, StepState
+from ..api.timer import Timer
 
 
 def system_clock_synchronized():
@@ -76,6 +77,16 @@ class StepController:
 
     MASH_PH_REMINDER_KEY = "_mash_ph_reminder"
     MASH_PH_REMINDER_DELAY = 900
+
+    #: What a listener is told (add_listener).
+    LISTENER_EVENTS = ("step_started", "step_held", "timer_started", "timer_changed",
+                       "timer_stopped", "timer_done", "step_done", "step_failed",
+                       "stopped", "reset", "loaded")
+
+    # The listeners (add_listener), and the tasks of async ones still running.
+    # Class defaults too, for a controller assembled without __init__.
+    _listeners = ()
+    _listener_tasks = ()
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
@@ -886,6 +897,7 @@ class StepController:
             )
         except Exception as e:  # noqa: BLE001
             logging.warning("Could not ask the brewer to start '%s': %s", step.name, e)
+        self._tell("step_held", step)
 
     async def _start_held(self, step_id):
         """The button on a hold: start the step it was raised for, as the brewer.
@@ -1039,6 +1051,7 @@ class StepController:
         if step is not None:
             if step.instance is not None:
                 step.status = StepState.DONE
+                self._tell("step_done", step)
                 await self.save()
                 # The step after a skipped one starts as the profile would start
                 # it, not as the brewer starting it: skipping an interrupted mash
@@ -1075,6 +1088,7 @@ class StepController:
                     data=dict(type="info", title="Pause", message="Calling paue step"),
                 )
                 step.status = StepState.STOP
+                self._tell("stopped", step)
 
                 await self.save()
             except Exception as e:
@@ -1150,6 +1164,7 @@ class StepController:
         self._clear_hold()
         # Starting over: no question about the brew before still stands.
         self._retire_prompts(everything=True)
+        self._tell("reset")
         await self.save()
         self.push_udpate()
 
@@ -1222,6 +1237,7 @@ class StepController:
             # anywhere; this is the case it was meant for.
             step_current = self.find_by_id(step.id)
             step_current.status = StepState.ERROR
+            self._tell("step_failed", step_current)
 
             async def report():
                 await self.save()
@@ -1243,6 +1259,7 @@ class StepController:
         if result == StepResult.NEXT:
             step_current = self.find_by_id(step.id)
             step_current.status = StepState.DONE
+            self._tell("step_done", step_current)
 
             async def wrapper():
                 await self.save()
@@ -1281,6 +1298,109 @@ class StepController:
                     topic="cbpi/stepupdate/{}".format(step.id), data=(step.to_dict())
                 )
 
+    def add_listener(self, fn):
+        """Tell `fn` about the brew steps as they change: fn(event, snapshot).
+
+        For a plugin that follows the brew without running it. Porter, for
+        BrewScribe, 5 Nov: "all of brewScribe's reminders should appear from
+        craftbeerpi: Check mash pH again before mash-out or transfer" - which
+        needs to know when a rest will end, and polling once a real second
+        cannot tell that on a simulator running 60 times faster.
+
+        `event` is one of LISTENER_EVENTS, and `snapshot` is snapshot(event),
+        a copy of its own. A plain function is called on the event loop right
+        after the change, so it must return quickly; an `async def` is run as a
+        task of its own, just after. Read-only by contract: a listener must not
+        start, stop, move on or reset the brew steps, nor switch anything.
+        Whatever it raises is logged, and the brew carries on, as do the other
+        listeners. Adding the same one twice keeps one. Not saved: a plugin
+        adds its listener again on every start.
+        """
+        if not callable(fn):
+            raise TypeError("a listener must be callable, not %r" % (fn,))
+        if not isinstance(self._listeners, list):
+            self._listeners = []
+        if fn not in self._listeners:
+            self._listeners.append(fn)
+        Timer.add_observer(self._timer_told)
+
+    def remove_listener(self, fn):
+        """Stop telling `fn`. One that was never added: nothing happens."""
+        if isinstance(self._listeners, list) and fn in self._listeners:
+            self._listeners.remove(fn)
+        if not self._listeners:
+            Timer.remove_observer(self._timer_told)
+
+    def snapshot(self, event=None, step=None):
+        """The brew steps as plain data, for a listener - a copy: changing it
+        changes nothing here.
+
+        event: what happened (LISTENER_EVENTS); None when asked for directly.
+        at: when, in brewing-clock seconds (cbpi.api.clock.now()). step_id: the
+        step it happened to, None for reset and loaded. active_id: the step
+        running. held_id: the step the brew waits before for the brewer (the
+        boil). basic: the recipe's basic data, without the mash pH reminder's
+        bookkeeping - mash_ph_reminder_status() reads that. steps, in order:
+        id, name, type, status ("I" waiting, "A" active, "S" stopped, "D" done,
+        "E" failed), props, state_text, state_text2, and timer: None, or
+        Timer.state(), in brewing-clock seconds.
+        """
+        basic = copy.deepcopy(self.basic_data) if isinstance(self.basic_data, dict) else {}
+        basic.pop(self.MASH_PH_REMINDER_KEY, None)
+        profile = getattr(self, "profile", None) or []
+        active = self.find_by_status(StepState.ACTIVE) if profile else None
+        steps = []
+        for item in profile:
+            entry = copy.deepcopy(item.to_dict())
+            timer = getattr(item.instance, "timer", None)
+            entry["timer"] = timer.state() if isinstance(timer, Timer) else None
+            steps.append(entry)
+        return {
+            "event": event,
+            "at": clock.now(),
+            "step_id": getattr(step, "id", None),
+            "active_id": active.id if active is not None else None,
+            "held_id": self._held_step_id,
+            "basic": basic,
+            "steps": steps,
+        }
+
+    def _tell(self, event, step=None):
+        """Tell the listeners (add_listener) - never raising, never waiting."""
+        listeners = list(self._listeners or ())
+        if not listeners:
+            return
+        try:
+            snap = self.snapshot(event, step)
+        except Exception:  # noqa: BLE001 - never the reason a brew stops
+            logging.exception("Could not tell the step listeners about %s", event)
+            return
+        for fn in listeners:
+            try:
+                result = fn(event, copy.deepcopy(snap))
+                if inspect.isawaitable(result):
+                    task = asyncio.ensure_future(result)
+                    if not isinstance(self._listener_tasks, set):
+                        self._listener_tasks = set()
+                    self._listener_tasks.add(task)
+                    task.add_done_callback(self._listener_finished)
+            except Exception:  # noqa: BLE001
+                logging.exception("A step listener failed on %s", event)
+
+    def _listener_finished(self, task):
+        if isinstance(self._listener_tasks, set):
+            self._listener_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logging.error("A step listener failed: %r", task.exception(),
+                          exc_info=task.exception())
+
+    def _timer_told(self, timer, what):
+        """Timer.add_observer: if `timer` is one of these steps', tell the listeners."""
+        step = next((item for item in getattr(self, "profile", None) or []
+                     if getattr(item.instance, "timer", None) is timer), None)
+        if step is not None:
+            self._tell(what, step)
+
     async def start_step(self, step, by_brewer=False):
         try:
             logging.info("Try to start step %s" % step)
@@ -1290,6 +1410,7 @@ class StepController:
             step.status = StepState.ACTIVE
             if self._held_step_id == step.id:
                 self._held_step_id = None
+            self._tell("step_started", step)
         except Exception as e:
             self.cbpi.notify(
                 "Error",
@@ -1351,6 +1472,7 @@ class StepController:
         self.load()
         self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
+        self._tell("loaded")
 
     async def clear(self):
         try:
@@ -1366,6 +1488,7 @@ class StepController:
         self.load()
         self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
+        self._tell("loaded")
 
     #: Where an import came from, in a recipe the book keeps for it - as
     #: RecipeController.IMPORTED_FROM. Not part of a recipe the brewer saves.
