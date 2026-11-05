@@ -74,6 +74,9 @@ class StepController:
     # __init__, as test_mashin_holds_temp.py builds one, crashed in reset_all.
     _held_step_id = None
 
+    MASH_PH_REMINDER_KEY = "_mash_ph_reminder"
+    MASH_PH_REMINDER_DELAY = 900
+
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.logger = logging.getLogger(__name__)
@@ -89,16 +92,217 @@ class StepController:
         # Prompts kept for every page until answered or no longer applying
         # (_ask_kept): notification id -> (kind, step id, still_applies).
         self._kept_prompts = {}
+        self._mash_ph_reminder_enabled = False
+        self._mash_ph_reminder_ready = False
+        self._mash_ph_reminder_task = None
+        self._mash_ph_prompt_id = None
+        self._mash_ph_shutting_down = False
         self.cbpi.app.on_cleanup.append(self.shutdown)
 
     async def init(self):
         logging.info("INIT STEP Controller")
         self.load(startActive=True)
+        self._mash_ph_reminder_ready = True
+        self._schedule_mash_ph_reminder()
         if self._resume_after_startup is not None:
             # Not now: the actors and kettles a step switches on are set up
             # after this controller (CraftBeerPi.init_serivces). The app's
             # start-up hooks run once everything is.
             self.cbpi.app.on_startup.append(self._start_resume)
+
+    def enable_mash_ph_reminder(self) -> dict:
+        """Opt in at plugin setup/startup, once per server process.
+
+        Only a subsequent, genuine MashIn acknowledgement starts a new timer.
+        A saved timer from this run is restored, never inferred from step age.
+        Repeated registration is harmless. Returns the same read-only snapshot
+        as mash_ph_reminder_status().
+        """
+        self._mash_ph_reminder_enabled = True
+        self._schedule_mash_ph_reminder()
+        return self.mash_ph_reminder_status()
+
+    def mash_ph_reminder_status(self) -> dict:
+        """A detached snapshot; reading it never arms or acknowledges anything."""
+        enabled = getattr(self, "_mash_ph_reminder_enabled", False)
+        state = copy.deepcopy(self.basic_data.get(self.MASH_PH_REMINDER_KEY))
+        result = dict(enabled=enabled, state="waiting_for_mash_in" if enabled else "disabled")
+        if state:
+            result.update(
+                state=state["status"] if enabled else "disabled",
+                run_id=state["run_id"],
+                step_id=state["step_id"],
+                confirmed_at=state["confirmed_at"],
+                due_at=state["due_at"],
+                remaining_seconds=max(0.0, state["due_at"] - clock.now()),
+            )
+        return result
+
+    def _cancel_mash_ph_reminder(self, clear=False):
+        task = getattr(self, "_mash_ph_reminder_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._mash_ph_reminder_task = None
+        notification_id = getattr(self, "_mash_ph_prompt_id", None)
+        if notification_id is not None:
+            self.cbpi.notification.retire(notification_id)
+        self._mash_ph_prompt_id = None
+        if clear:
+            self.basic_data.pop(self.MASH_PH_REMINDER_KEY, None)
+
+    def _mash_ph_anchor_exists(self, state):
+        step = self.find_by_id(state["step_id"])
+        return (step is not None and step.type == "MashInStep"
+                and step.status in (StepState.ACTIVE, StepState.STOP, StepState.DONE))
+
+    def _load_mash_ph_reminder(self):
+        state = self.basic_data.get(self.MASH_PH_REMINDER_KEY)
+        if state is None:
+            return
+        try:
+            if (not isinstance(state, dict) or state.get("version") != 1
+                    or not isinstance(state.get("run_id"), str) or not state["run_id"]
+                    or state.get("status") not in ("pending", "shown", "acknowledged")
+                    or not all(isinstance(state.get(key), (int, float))
+                               and not isinstance(state[key], bool)
+                               and math.isfinite(state[key])
+                               for key in ("confirmed_at", "due_at"))
+                    or not self._mash_ph_anchor_exists(state)):
+                raise ValueError("invalid or no longer belongs to this run")
+            saved = state.get("clock")
+            if saved is not None:
+                if (not isinstance(saved, dict)
+                        or not all(isinstance(saved.get(key), (int, float))
+                                   and not isinstance(saved[key], bool)
+                                   and math.isfinite(saved[key])
+                                   for key in ("brewing_at", "real_at", "scale"))
+                        or saved["scale"] <= 0):
+                    raise ValueError("invalid clock checkpoint")
+                # ScaledTimeSource starts at the real epoch in each process.
+                # Translate the saved deadline, rather than inheriting the old
+                # process's synthetic epoch. Offline time uses the last rate.
+                offline = max(0.0, clock.RealTimeSource().now() - saved["real_at"])
+                remaining = max(0.0, state["due_at"] - saved["brewing_at"]
+                                - offline * saved["scale"])
+                state["due_at"] = clock.now() + remaining
+                state.pop("clock")
+        except (KeyError, TypeError, ValueError) as error:
+            logging.warning("Discarding mash pH reminder: %s", error)
+            self.basic_data.pop(self.MASH_PH_REMINDER_KEY, None)
+
+    def _checkpoint_mash_ph_reminder(self):
+        state = self.basic_data.get(self.MASH_PH_REMINDER_KEY)
+        if state is None:
+            return
+        if not self._mash_ph_anchor_exists(state):
+            self._cancel_mash_ph_reminder(clear=True)
+            return
+        if isinstance(clock.get_source(), clock.ScaledTimeSource):
+            state["clock"] = dict(
+                brewing_at=clock.now(), real_at=clock.RealTimeSource().now(),
+                scale=clock.scale(),
+            )
+        else:
+            state.pop("clock", None)
+
+    async def _mash_in_confirmed(self, instance):
+        """Called only by MashIn.next(), while its live instance waits for malt."""
+        if not getattr(self, "_mash_ph_reminder_enabled", False):
+            return False
+        step = self.find_by_id(instance.id)
+        if (step is None or step.instance is not instance
+                or step.status != StepState.ACTIVE or not instance.running
+                or instance.task is None or instance.task.done()
+                or not getattr(instance, "_waiting_for_malt", False)
+                or not instance.props.get(instance.WAITING_FOR_MALT_PROP, False)):
+            logging.info("Not arming mash pH reminder: no live malt acknowledgement")
+            return False
+        if self.basic_data.get(self.MASH_PH_REMINDER_KEY) is not None:
+            return False
+        confirmed_at = clock.now()
+        self.basic_data[self.MASH_PH_REMINDER_KEY] = dict(
+            version=1, run_id=shortuuid.uuid(), step_id=step.id, status="pending",
+            confirmed_at=confirmed_at, due_at=confirmed_at + self.MASH_PH_REMINDER_DELAY,
+        )
+        # The timer before the save. The timer is what reminds the brewer; the
+        # save only lets a restart bring it back. Saved first, a failed write
+        # left the reminder "pending" with nothing counting down to it.
+        self._schedule_mash_ph_reminder()
+        await self.save()
+        return True
+
+    def _schedule_mash_ph_reminder(self):
+        if (not getattr(self, "_mash_ph_reminder_enabled", False)
+                or not getattr(self, "_mash_ph_reminder_ready", False)
+                or getattr(self, "_mash_ph_shutting_down", False)):
+            return
+        state = self.basic_data.get(self.MASH_PH_REMINDER_KEY)
+        if state is None or state["status"] == "acknowledged":
+            return
+        task = getattr(self, "_mash_ph_reminder_task", None)
+        if ((task is not None and not task.done())
+                or getattr(self, "_mash_ph_prompt_id", None) is not None):
+            return
+        task = asyncio.create_task(self._run_mash_ph_reminder(state["run_id"]))
+        self._mash_ph_reminder_task = task
+        task.add_done_callback(self._mash_ph_reminder_done)
+
+    @staticmethod
+    def _mash_ph_reminder_done(task):
+        if not task.cancelled() and task.exception() is not None:
+            logging.error("Mash pH reminder failed: %s", task.exception())
+
+    async def _wait_for_mash_ph_due(self, run_id):
+        """Until the reminder is due, keeping up with the clock's speed.
+
+        In slices of at most a real second - clock.scale() brewing seconds -
+        rather than one sleep, which keeps the speed the clock had when it
+        began. A simulator sets SIM_TIME_SCALE from a loop a moment after
+        start-up, by when a restored reminder is already waiting, and again
+        whenever the setting changes: one sleep begun at 1x still took 15 real
+        minutes once the clock ran at 60x, where it should take 15 seconds.
+        Step timers wait in slices for the same reason.
+        """
+        while True:
+            state = self.basic_data.get(self.MASH_PH_REMINDER_KEY)
+            if state is None or state.get("run_id") != run_id:
+                return
+            due = state["due_at"]
+            if clock.now() >= due:
+                return
+            await clock.sleep_until(min(clock.now() + clock.scale(), due))
+
+    async def _run_mash_ph_reminder(self, run_id):
+        state = self.basic_data[self.MASH_PH_REMINDER_KEY]
+        if state["status"] == "pending":
+            await self._wait_for_mash_ph_due(run_id)
+        state = self.basic_data.get(self.MASH_PH_REMINDER_KEY)
+        if (state is None or state["run_id"] != run_id
+                or state["status"] == "acknowledged" or not self._mash_ph_anchor_exists(state)):
+            return
+        # "shown" survives a restart, but an open notification does not. Rebuild
+        # that same unacknowledged question, not another countdown.
+        state["status"] = "shown"
+        await self.save()
+
+        async def acknowledge():
+            current = self.basic_data.get(self.MASH_PH_REMINDER_KEY)
+            if current is None or current["run_id"] != run_id:
+                logging.info("Ignoring an old mash pH acknowledgement")
+                return
+            current["status"] = "acknowledged"
+            notification_id, self._mash_ph_prompt_id = self._mash_ph_prompt_id, None
+            if notification_id is not None:
+                self.cbpi.notification.retire(notification_id)
+            await self.save()
+
+        self._mash_ph_prompt_id = self.cbpi.notify(
+            "Check mash pH",
+            "It has been 15 minutes since you confirmed mash-in. Check mash pH. "
+            "Acknowledging this reminder does not record a measurement or change the brew.",
+            NotificationType.INFO,
+            action=[NotificationAction("OK", acknowledge)], keep=True,
+        )
 
     def _recover_interrupted_step(self):
         """Offer to resume a profile interrupted by a restart, rather than guessing.
@@ -436,6 +640,8 @@ class StepController:
 
     def load(self, startActive=False):
 
+        self._cancel_mash_ph_reminder()
+        self._mash_ph_shutting_down = False
         # create file if not exists
         if os.path.exists(self.path) is False:
             logging.warning("Missing step_data.json file. INIT empty file")
@@ -477,6 +683,9 @@ class StepController:
                 # recreated it with steps=[], so there is nothing to recover. Kept
                 # consistent with the path above rather than left to rot.
                 self._recover_interrupted_step()
+
+        self._load_mash_ph_reminder()
+        self._schedule_mash_ph_reminder()
 
     async def add(self, item: Step):
         logging.debug("Add step")
@@ -586,6 +795,7 @@ class StepController:
 
     async def save(self):
         logging.debug("save profile")
+        self._checkpoint_mash_ph_reminder()
         data = dict(
             basic=self.basic_data,
             steps=list(map(lambda item: item.to_dict(), self.profile)),
@@ -786,6 +996,9 @@ class StepController:
             ),
         )
         logging.info("BREWING COMPLETE")
+        if self.basic_data.get(self.MASH_PH_REMINDER_KEY) is not None:
+            self._cancel_mash_ph_reminder(clear=True)
+            await self.save()
 
     async def previous(self):
         logging.info("Trigger Previous")
@@ -868,6 +1081,7 @@ class StepController:
             logging.error("Please stop before reset")
             return
 
+        self._cancel_mash_ph_reminder(clear=True)
         for item in self.profile:
             logging.info("Reset %s" % item)
             item.status = StepState.INITIAL
@@ -981,6 +1195,8 @@ class StepController:
 
     async def shutdown(self, app=None):
         logging.info("Mash Profile Shutdown")
+        self._mash_ph_shutting_down = True
+        self._cancel_mash_ph_reminder()
         for p in self.profile:
             instance = p.instance
             # Stopping all running task
@@ -1122,6 +1338,7 @@ class StepController:
                     del props[key]
 
         list(map(lambda item: add_runtime_data(item), data.get("steps")))
+        data.get("basic", {}).pop(self.MASH_PH_REMINDER_KEY, None)
         # In one write: an import or the recipe book replaces the whole profile,
         # and a write broken part-way left an unreadable file, which load()
         # then set aside for an empty profile (DEFECTS M39).
@@ -1151,8 +1368,10 @@ class StepController:
         path = os.path.join(
             self.cbpi.config_folder.get_file_path("recipes"), "{}.yaml".format(name)
         )
+        basic = copy.deepcopy(self.basic_data)
+        basic.pop(self.MASH_PH_REMINDER_KEY, None)
         data = dict(
-            basic=self.basic_data,
+            basic=basic,
             steps=list(map(lambda item: item.to_dict(), self.profile)),
         )
         with open(path, "w") as file:
