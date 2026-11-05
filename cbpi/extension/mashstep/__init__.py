@@ -16,7 +16,7 @@ from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import Kettle, NotificationAction, NotificationType, Props
 from cbpi.api.strike import strike_temperature
-from cbpi.api.step import CBPiStep, StepResult
+from cbpi.api.step import CBPiStep, StepResult, StepState
 from cbpi.api.timer import Timer
 from voluptuous.schema_builder import message
 
@@ -167,7 +167,34 @@ class MashInStep(CBPiStep):
     WAITING_FOR_MALT_PROP = "_waiting_for_malt"
 
     async def NextStep(self, **kwargs):
+        step = self.cbpi.step.find_by_id(self.id)
+        if (step is None or step.instance is not self
+                or step.status != StepState.ACTIVE or not self.running):
+            logging.info("Ignoring an old malt acknowledgement for %s", self.id)
+            return
         await self.next()
+
+    async def next(self):
+        # The brewer confirming the malt is in starts the mash pH reminder, if a
+        # plugin such as BrewScribe asked for it (StepController.
+        # enable_mash_ph_reminder). Nothing about it may hold the mash up.
+        confirmed = getattr(getattr(self.cbpi, "step", None), "_mash_in_confirmed", None)
+        if confirmed is not None:
+            try:
+                await confirmed(self)
+            except Exception as error:  # noqa: BLE001
+                logging.warning("Could not save the mash pH reminder: %s", error)
+                try:
+                    self.cbpi.notify(
+                        "Mash pH reminder",
+                        "Could not save the reminder, so a restart would lose it. If "
+                        "it has not appeared 15 minutes after mash-in, check the mash "
+                        "pH anyway.",
+                        NotificationType.WARNING,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        await super().next()
 
     async def on_timer_done(self, timer):
         # Deliberately does NOT clear the setpoint or switch AutoMode off.
@@ -1746,5 +1773,3 @@ def setup(cbpi):
     cbpi.plugin.register("ToggleStep", ToggleStep)
     cbpi.plugin.register("ActorStep", ActorStep)
     cbpi.plugin.register("NotificationStep", NotificationStep)
-
-

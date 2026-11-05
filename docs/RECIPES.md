@@ -318,6 +318,61 @@ Hop and step notifications appear in the UI and auto-dismiss after a few seconds
 For a 5-minute hop addition that matters — consider an MQTT actor driving a buzzer,
 or keep the screen within earshot.
 
+### Mash pH reminder (for plugins such as BrewScribe)
+
+Off unless a plugin turns it on. When it's on, CraftBeerPi reminds you to check
+the mash pH 15 minutes after you confirm mash-in, on every brew.
+
+A plugin turns it on once, when it loads, in its `setup(cbpi)` function or at
+start-up, and can read where it's up to (added in 4.7.7.post28):
+
+```python
+if hasattr(cbpi.step, "enable_mash_ph_reminder"):
+    cbpi.step.enable_mash_ph_reminder()           # calling it again does no harm
+    status = cbpi.step.mash_ph_reminder_status()  # a copy: reading it changes nothing
+```
+
+**What starts it.** Only you confirming the malt is in, on the built-in mash-in
+step (`MashInStep`): its **Next Step** button on the "please add malt" message,
+or the dashboard's **Next** while that step waits for the malt. Heating,
+reaching strike, pressing Next before the water was hot, or turning the
+reminder on after you'd already confirmed mash-in don't start it. A plugin
+can't start it with a time of its own, and mash-in steps from other plugins
+don't start it.
+
+**What you see.** 15 brewing minutes after you confirm, every page shows
+**Check mash pH** with an **OK** button, including pages opened later, until you
+press OK on one of them. OK only clears the reminder. It doesn't record a
+measurement, move the brew on or switch anything.
+
+**Once per brew.** It keeps counting while the profile is stopped, and Stop and
+Start don't start another one. Reset, Clear, loading or importing a recipe,
+deleting the mash-in step or changing its type, and the end of the brew cancel
+it.
+
+**After a restart.** It's saved in `step_data.json` under
+`basic._mash_ph_reminder`, not in the step's settings. A restart brings back a
+countdown still running, or the reminder itself if it was due and not yet
+answered; one you answered never comes back. If no plugin turns the reminder on
+after the restart, nothing is shown. Saving the profile to the recipe book
+leaves it out, and an import throws it away.
+
+**On a simulator.** The 15 minutes are brewing time, from `cbpi.api.clock`: at
+`SIM_TIME_SCALE` 60 the reminder comes 15 real seconds after mash-in, and it
+keeps up if you change the speed while it counts down. If the simulator
+restarts mid-countdown, the time left carries over, and the time it was off
+counts at the speed it ran before. Like every time saved for a restart, this
+relies on the computer's clock being right.
+
+**Status.** `mash_ph_reminder_status()` always has `enabled` and `state`.
+`state` is `disabled` (no plugin turned it on, even if a reminder is saved),
+`waiting_for_mash_in`, `pending` (counting down), `shown` (on screen) or
+`acknowledged`. Once mash-in is confirmed it also has `run_id` (new each brew),
+`step_id` (the mash-in step), `confirmed_at` and `due_at` (brewing-clock
+seconds; after a simulator restart `due_at` is moved onto the new clock) and
+`remaining_seconds`. Use these two functions rather than editing
+`basic._mash_ph_reminder`. There's no web address for it.
+
 ---
 
 ## Saving and reusing
