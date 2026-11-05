@@ -2,6 +2,7 @@ import importlib
 import logging
 import os
 import pkgutil
+import re
 from importlib import import_module
 
 from cbpi.api import *
@@ -85,7 +86,7 @@ class PluginController:
             # reported as a missing plugin.
             core_distributions = {"cbpi4"}
 
-            installed = set()
+            installed = {}
             for dist in distributions():
                 name = (dist.metadata["Name"] or "").strip()
                 if (
@@ -93,12 +94,28 @@ class PluginController:
                     and len(name) > 4
                     and name.lower() not in core_distributions
                 ):
-                    installed.add(name)
+                    try:
+                        top = (dist.read_text("top_level.txt") or "").split()
+                    except Exception:  # noqa: BLE001 - optional metadata
+                        top = []
+                    installed[name] = top
         except Exception as e:
             logger.debug("Could not enumerate installed distributions: {}".format(e))
             return
 
-        missing = sorted(installed - set(discovered_plugins))
+        # Compared as pip compares names: a distribution and the package it
+        # installs need not be spelled alike. cbpi4-BrewScribe installs
+        # cbpi4_BrewScribe, and was reported "not discovered" on every start
+        # while it loaded perfectly well (4 Nov).
+        def normalise(name):
+            return re.sub(r"[-_.]+", "-", name).lower()
+
+        seen = {normalise(m) for m in discovered_plugins}
+        missing = sorted(
+            name for name, top in installed.items()
+            if normalise(name) not in seen
+            and not any(normalise(t) in seen for t in top)
+        )
         for name in missing:
             logger.warning(
                 "Plugin '%s' is installed but was not discovered, so it will not be "
