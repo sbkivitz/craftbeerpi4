@@ -1227,7 +1227,7 @@ class StepController:
                 await self.save()
                 try:
                     self.cbpi.notify(
-                        "Mash Profile",
+                        "Brew Steps",
                         "Step '{}' failed and the profile has stopped. Check the "
                         "log, then start to retry it or next to skip it.".format(
                             step.name
@@ -1293,7 +1293,7 @@ class StepController:
         except Exception as e:
             self.cbpi.notify(
                 "Error",
-                "Can't start step. Please check step in Mash Profile",
+                "Can't start the step. Check it on the Brew Steps page.",
                 NotificationType.ERROR,
             )
             logging.error("Failed to start step %s" % step)
@@ -1367,17 +1367,32 @@ class StepController:
         self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
 
+    #: Where an import came from, in a recipe the book keeps for it - as
+    #: RecipeController.IMPORTED_FROM. Not part of a recipe the brewer saves.
+    IMPORTED_FROM_KEY = "imported_from"
+
+    def book_data(self):
+        """The brew steps as the recipe book keeps them: the recipe, not this run.
+
+        What Save writes, and what an import keeps in the book. Not the mash pH
+        reminder, which belongs to this brew; and not where an import came
+        from: a copy the brewer saves is the brewer's own, and an import of the
+        same name never replaces it (RecipeController.keep_import).
+        """
+        basic = copy.deepcopy(self.basic_data)
+        basic.pop(self.MASH_PH_REMINDER_KEY, None)
+        basic.pop(self.IMPORTED_FROM_KEY, None)
+        return dict(
+            basic=basic,
+            steps=list(map(lambda item: item.to_dict(), self.profile)),
+        )
+
     async def savetobook(self):
         name = shortuuid.uuid()
         path = os.path.join(
             self.cbpi.config_folder.get_file_path("recipes"), "{}.yaml".format(name)
         )
-        basic = copy.deepcopy(self.basic_data)
-        basic.pop(self.MASH_PH_REMINDER_KEY, None)
-        data = dict(
-            basic=basic,
-            steps=list(map(lambda item: item.to_dict(), self.profile)),
-        )
+        data = self.book_data()
         with open(path, "w") as file:
             yaml.dump(data, file)
         self.push_udpate()

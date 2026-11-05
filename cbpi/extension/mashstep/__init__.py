@@ -1301,7 +1301,7 @@ class BoilStep(CBPiStep):
         return (
             "Ready to boil? Move the wort to the boil kettle first - the dashboard "
             "is yours meanwhile. The boil kettle stays off until you press Start "
-            "the boil, or Start in the mash profile. (Set CONFIRM_BEFORE_BOIL to "
+            "the boil, or Start on the Brew Steps page. (Set CONFIRM_BEFORE_BOIL to "
             "No to go straight on.)",
             "Start the boil",
         )
