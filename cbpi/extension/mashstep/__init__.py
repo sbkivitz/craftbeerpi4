@@ -729,7 +729,7 @@ class WhirlpoolStep(WaitStep):
 
     async def on_stop(self):
         paused = self.cancel_reason == StepResult.STOP
-        await self._end_hold()
+        await self._end_hold(paused)
         # Not answered by now, the question no longer applies: taken down from
         # every page, and asked again if a paused stand is started again.
         self._retire_prompt()
@@ -858,8 +858,10 @@ class WhirlpoolStep(WaitStep):
         try:
             by_action = self._has_hold_action(kettle)
             if by_action:
+                # Quiet: the logic's own message as it starts holding says what
+                # it does; "switched on, it holds" before that is noise.
                 held = await self.cbpi.kettle.call_action(
-                    kettle.id, "set_hold_target", {"Hold_Target": target})
+                    kettle.id, "set_hold_target", {"Hold_Target": target, "Quiet": True})
                 if held is False:
                     raise RuntimeError("its logic refused the hold")
             else:
@@ -885,8 +887,15 @@ class WhirlpoolStep(WaitStep):
             except Exception:  # noqa: BLE001
                 pass
 
-    async def _end_hold(self):
-        """Undo what Heat and hold did: logic off first, then the hold cleared."""
+    async def _end_hold(self, paused=False):
+        """Undo what Heat and hold did: logic off first, then the hold cleared.
+
+        Then say so, here, where it is known why. BoilPower is asked to clear
+        the hold quietly: its own words, for a brewer clearing a hold from the
+        dashboard, were "Hold cleared: Boil Kettle boils when it is switched
+        on" - which at the end of a stand, as the chill starts, read as if the
+        kettle were about to boil (Scott, 4 Nov, brewing test recipe v4).
+        """
         if not self._holding:
             return
         self._holding = False
@@ -894,16 +903,36 @@ class WhirlpoolStep(WaitStep):
         kettle = self._kettle()
         if kettle is None:
             return
+        switched_off = True
         try:
             await self.cbpi.kettle.stop(kettle.id)
         except Exception as e:  # noqa: BLE001
             logging.warning("%s: could not switch %s off: %s", self.name, kettle.id, e)
+            switched_off = False
         if self._held_by_action:
             try:
                 await self.cbpi.kettle.call_action(
-                    kettle.id, "set_hold_target", {"Hold_Target": ""})
+                    kettle.id, "set_hold_target", {"Hold_Target": "", "Quiet": True})
             except Exception as e:  # noqa: BLE001
                 logging.warning("%s: could not clear the hold: %s", self.name, e)
+        name = getattr(kettle, "name", None) or "The kettle"
+        target = self._whirlpool_temp()
+        held = ("{} \u00b0{}".format(_fmt_temp(target), self._unit())
+                if target is not None else "the whirlpool temperature")
+        if not switched_off:
+            message = "Could not switch {} off. Switch it off from the dashboard.".format(name)
+            level = NotificationType.WARNING
+        elif paused:
+            message = ("Stand paused: {} is off. It holds {} again when the "
+                       "stand is started again.".format(name, held))
+            level = NotificationType.INFO
+        else:
+            message = "Stand over: {} is off and no longer holding {}.".format(name, held)
+            level = NotificationType.INFO
+        try:
+            self.cbpi.notify(self.name, message, level)
+        except Exception as e:  # noqa: BLE001
+            logging.debug("%s: could not say the hold ended: %s", self.name, e)
 
     def _retire_prompt(self):
         prompt, self._prompt_id = self._prompt_id, None
