@@ -381,6 +381,86 @@ seconds; after a simulator restart `due_at` is moved onto the new clock) and
 `remaining_seconds`. Use these two functions rather than editing
 `basic._mash_ph_reminder`. There's no web address for it.
 
+### Following the brew steps (for plugins)
+
+A plugin can be told as the brew steps change, without running them (added in
+4.7.7.post30). BrewScribe uses it to remind you before the mash out.
+
+```python
+def on_steps(event, snapshot):
+    ...                                    # read only, and quick
+
+if hasattr(cbpi.step, "add_listener"):
+    cbpi.step.add_listener(on_steps)       # adding it again does no harm
+    now = cbpi.step.snapshot()             # where the brew is up to, at start-up
+```
+
+Add it when the plugin loads. It isn't saved, so add it on every start.
+`cbpi.step.remove_listener(on_steps)` stops it.
+
+**When you're told.** Only when something changes, never once a second. The
+names are in `cbpi.step.LISTENER_EVENTS`.
+
+| Event | When |
+|---|---|
+| `step_started` | A step starts: Start, Resume, Next, or moving on by itself. Its countdown may not have begun. |
+| `step_held` | The brew waits for you to start the next step: the boil, while you move the wort. |
+| `timer_started` | The active step's countdown begins. From now on you know when it ends. |
+| `timer_changed` | Its end moved: **Add 5 minutes**. |
+| `timer_stopped` | It stopped before its end: Stop, Next, Reset or a shutdown. The time left is kept. |
+| `timer_done` | It reached its end. |
+| `step_done` | A step finished, by its countdown or by Next. |
+| `step_failed` | A step failed. The brew steps stop there. |
+| `stopped` | You pressed Stop. |
+| `reset` | You pressed Reset: every step is waiting again. |
+| `loaded` | The brew steps were replaced: an import, Brew from the Recipe Book, or Clear. |
+
+**What you get.** Plain data, and a copy of your own: changing it changes
+nothing.
+
+```python
+{
+    "event": "timer_started",
+    "at": 1234567.0,           # brewing-clock seconds, as cbpi.api.clock.now()
+    "step_id": "...",          # the step it happened to; None for reset and loaded
+    "active_id": "...",        # the step running, or None
+    "held_id": None,           # the step waiting for you to start it, or None
+    "basic": {"name": "...", "author": "..."},   # without basic._mash_ph_reminder
+    "steps": [                 # every step, in order
+        {"id": "...", "name": "Saccharification", "type": "MashStep",
+         "status": "A",        # I waiting, A active, S stopped, D done, E failed
+         "props": {}, "state_text": "", "state_text2": None,
+         "timer": {"counting": True,
+                   "started_at": 1234567.0,      # None unless counting
+                   "ends_at": 1238167.0,         # None unless counting
+                   "seconds_left": 3600.0,
+                   "length": 3600.0}},           # or None: no countdown yet
+    ],
+}
+```
+
+**Timing.**
+
+- A rest's real end is known only from `timer_started`. A mash step starts
+  counting when the mash reaches the rest temperature, not when the step
+  starts. After a power cut it counts down what was left, so use `seconds_left`
+  and `ends_at`, not the step's `Timer` setting.
+- Treat each snapshot as the whole story. Cancel what you planned on
+  `timer_stopped`, `stopped`, `reset` and `loaded`; plan again on
+  `timer_started` and `timer_changed`.
+- Wait with `await clock.sleep_until(ends_at - lead)` from `cbpi.api.clock`.
+  Don't use the PC's clock, and don't poll: this is exact at any simulator speed.
+- Moving on is immediate. `timer_done`, `step_done` and the next step's
+  `step_started` all come at the same brewing instant. To do something *before*
+  the mash out, plan it from the end of the rest before it.
+
+**Read only.** A listener must not start, stop, move on or reset the brew steps,
+or switch anything. A plain function runs on the server's event loop right after
+the change, so keep it quick; an `async def` runs as a task of its own, just
+after. If a listener raises, CraftBeerPi logs it and carries on, and the other
+listeners are still told. The mash pH reminder above is separate: listening
+neither starts it nor adds a second one.
+
 ---
 
 ## Saving and reusing
