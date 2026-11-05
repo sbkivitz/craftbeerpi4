@@ -231,7 +231,7 @@ class UploadController:
     async def get_json_recipes(self):
         try:
             path = self.cbpi.config_folder.get_upload_file("mmum.json")
-            with open(path) as f:
+            with open(path, encoding="utf-8-sig") as f:
                 e = json.load(f)
             result = []
             result.append({"value": str(1), "label": e["Name"]})
@@ -356,6 +356,29 @@ class UploadController:
         return next((kind for kind, (_, types) in self.UPLOAD_KINDS.items()
                      if content_type in types), None)
 
+    @staticmethod
+    def _kept_bytes(kind, content):
+        """What is kept of an uploaded BeerXML or MMuM file: the bytes as sent.
+
+        They used to be decoded as UTF-8 and written back as text, which is not
+        what was sent. On Windows every line ending gained a carriage return:
+        Scott's test recipe v3 sat on his simulator as CR CR LF (4 Nov). And a
+        BeerXML file declares its own encoding - BeerSmith's says ISO-8859-1 -
+        so a raw degree sign in one came back as a replacement character.
+
+        A file that cannot be read as sent - XML that does not parse, JSON that
+        is not UTF-8 - is still decoded leniently, as every upload used to be,
+        so it imports with odd characters rather than not at all.
+        """
+        try:
+            if kind == "xml":
+                xml.etree.ElementTree.fromstring(content)
+            else:
+                content.decode("utf-8-sig")
+            return content
+        except (xml.etree.ElementTree.ParseError, UnicodeDecodeError):
+            return content.decode("utf-8", "replace").encode("utf-8")
+
     async def FileUpload(self, data):
         """Keep an uploaded recipe file. Returns True if it was kept.
 
@@ -378,12 +401,10 @@ class UploadController:
         try:
             content = recipe_file.read()
             self.path = self.cbpi.config_folder.get_upload_file(target)
-            if kind == "sqlite":
-                with open(self.path, "wb") as f:
-                    f.write(content)
-            else:
-                with open(self.path, "w") as f:
-                    f.write(content.decode("utf-8", "replace"))
+            if kind != "sqlite":
+                content = self._kept_bytes(kind, content)
+            with open(self.path, "wb") as f:
+                f.write(content)
         except Exception as e:  # noqa: BLE001
             self.cbpi.notify("Error", "Upload of {} failed: {}".format(filename, e),
                              NotificationType.ERROR)
@@ -679,7 +700,7 @@ class UploadController:
 
     def getJsonMashin(self, id):
         self.path = self.cbpi.config_folder.get_upload_file("mmum.json")
-        with open(self.path) as f:
+        with open(self.path, encoding="utf-8-sig") as f:
             e = json.load(f)
         return float(e["Einmaischtemperatur"])
 
@@ -698,7 +719,7 @@ class UploadController:
                         NotificationType.ERROR,
                     )
 
-                with open(self.path) as f:
+                with open(self.path, encoding="utf-8-sig") as f:
                     e = json.load(f)
                 logging.info(json.dumps(e, indent=4))
                 name = e["Name"]
@@ -1282,7 +1303,7 @@ class UploadController:
                 )
         elif recipe_type == "json":
             self.path = self.cbpi.config_folder.get_upload_file("mmum.json")
-            with open(self.path) as f:
+            with open(self.path, encoding="utf-8-sig") as f:
                 e = json.load(f)
             Rasten= e["Rasten"]
             idx = 1
