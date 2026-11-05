@@ -1684,7 +1684,7 @@ class UploadController:
             for misc in miscs:
                 if recipe_type == "xml":
                     alerts.append(
-                        [float(misc.find("TIME").text), misc.find("NAME").text]
+                        [float(misc.find("TIME").text), self._xml_misc_label(misc)]
                     )
                 elif recipe_type == "bf":
                     use = misc["use"]
@@ -1751,6 +1751,47 @@ class UploadController:
         """
         name = element.find("NAME").text
         amount = self._xml_amount(element)
+        return "{} {}".format(amount, name) if amount else name
+
+    #: Units that only count things. "1.00 Items Whirlfloc Tablet" reads
+    #: badly; "1 Whirlfloc Tablet" is what the brewer would say.
+    _COUNT_UNITS = ("item", "items", "each", "ea")
+
+    def _xml_misc_amount(self, misc):
+        """How much of a BeerXML misc addition, or None if the file does not say.
+
+        DISPLAY_AMOUNT as written ("1.00 tsp"), but a count as a plain number:
+        BeerSmith writes a Whirlfloc tablet as "1.00 Items", Brewfather as
+        "0.5 items". Without DISPLAY_AMOUNT, only a weight is used. AMOUNT is
+        otherwise litres, and BeerXML has no unit for a count, so 1 tablet and
+        1 litre are written the same way - better the name alone, as before,
+        than "1000 ml Whirlfloc".
+        """
+        shown = misc.find("DISPLAY_AMOUNT")
+        if shown is not None and shown.text and shown.text.strip():
+            text = shown.text.strip()
+            parts = text.split()
+            if len(parts) == 2 and parts[1].lower() in self._COUNT_UNITS:
+                try:
+                    count = float(parts[0])
+                except ValueError:
+                    return text
+                if math.isfinite(count) and count > 0:
+                    return "{:g}".format(count)
+            return text
+        weight = misc.find("AMOUNT_IS_WEIGHT")
+        if weight is None or (weight.text or "").strip().upper() != "TRUE":
+            return None
+        return self._xml_amount(misc)
+
+    def _xml_misc_label(self, misc):
+        """'1 Whirlfloc Tablet': a misc boil addition, amount first, like a hop.
+
+        Scott, 4 Nov, brewing his test recipe v4 on the simulator: the Whirlfloc
+        prompt named the tablet but not how many - hops said "6.00 oz Willamette".
+        """
+        name = misc.find("NAME").text
+        amount = self._xml_misc_amount(misc)
         return "{} {}".format(amount, name) if amount else name
 
     def getWhirlpoolAdditions(self, hops):
