@@ -144,12 +144,40 @@ class UploadController:
                 logging.exception("could not write the imported recipe")
                 return self._not_imported(
                     "The {} recipe could not be saved: {}.".format(label, e))
-            self.cbpi.notify("{} recipe imported".format(label), staged["name"],
+            kept = await self._keep_in_book(label, staged["name"])
+            self.cbpi.notify("{} recipe imported".format(label),
+                             "{}. {}".format(staged["name"], kept) if kept else staged["name"],
                              NotificationType.INFO)
             return True, staged["name"]
 
+    async def _keep_in_book(self, label, name):
+        """Keep the recipe just imported in the Recipe Book, and say so in a sentence.
+
+        See RecipeController.keep_import (Scott, 5 Nov: v3 vanished from his
+        recipe book when he uploaded v4). The import has already succeeded -
+        the brew steps are the recipe - so a book that cannot be written is a
+        warning, not a failed import.
+        """
+        keep = getattr(getattr(self.cbpi, "recipe", None), "keep_import", None)
+        book_data = getattr(self.cbpi.step, "book_data", None)
+        if keep is None or book_data is None:
+            return ""
+        try:
+            _, replaced = await keep(book_data(), label)
+        except Exception as e:  # noqa: BLE001
+            logging.exception("could not keep the imported recipe in the recipe book")
+            self.cbpi.notify(
+                "Recipe not kept",
+                "'{}' is now your brew steps, but could not be kept in your Recipe "
+                "Book: {}".format(name, e),
+                NotificationType.WARNING,
+            )
+            return ""
+        return ("Its earlier copy in your Recipe Book was replaced." if replaced
+                else "Kept in your Recipe Book.")
+
     def _not_imported(self, why):
-        message = "{} The mash profile is unchanged.".format(why)
+        message = "{} The brew steps are unchanged.".format(why)
         logging.warning("Recipe not imported: %s", message)
         self.cbpi.notify("Recipe not imported", message, NotificationType.ERROR)
         return False, message

@@ -11,16 +11,22 @@ so.
 
 ## The one thing to understand first
 
-Importing a recipe **overwrites your active brew profile immediately**. It does not
-go into the recipe book and wait for you to pick it.
+Importing a recipe **replaces your brew steps immediately**, and keeps a copy of
+it in your **Recipe Book**. The brew steps are what CraftBeerPi runs on brew day,
+mash to chill, on the **Brew Steps** page (called *Mash Profile* before cbpi4gui
+0.5.1.a3.post8).
 
 ```
-beer.xml  ──import──>  active brew profile (step_data.json)  ──run──>  brew day
+beer.xml  ──import──>  brew steps (step_data.json)  ──run──>  brew day
+              └──────>  Recipe Book (config/recipes/)
 ```
 
-The recipe book (`/recipe/`) is a *separate* store for profiles you want to keep.
-Importing does not touch it. If you have a profile mid-brew, importing replaces it
-without asking.
+If you have brew steps mid-brew, importing replaces them without asking.
+
+The Recipe Book (`/recipe/`) keeps the recipes you import and the brew steps you
+save. Before 4.7.7.post30 an import never went into it: the upload page keeps one
+file, so uploading the next one replaced it, and the recipe was gone unless you'd
+saved it yourself.
 
 ---
 
@@ -91,7 +97,7 @@ A complete working example lives alongside this documentation in the testbench a
 
 | BeerXML path | Becomes |
 |---|---|
-| `RECIPE/NAME` | profile name |
+| `RECIPE/NAME` | the recipe's name |
 | `RECIPE/BOIL_TIME` | boil step timer, minutes |
 | `RECIPE/MASH/MASH_STEPS/MASH_STEP/NAME` | step name |
 | `…/MASH_STEP/STEP_TEMP` | step target temperature |
@@ -237,7 +243,9 @@ sensor offset — set it there, not in the file.
 
 ### From the UI
 
-**Upload** → choose your `.xml` → pick the recipe from the list.
+**Recipe Book** → **Import recipe** → upload your `.xml` → pick the recipe from the
+list → **Create Recipe from BeerXML recipe**. The notification says whether it was
+kept in the Recipe Book.
 
 ### From the API
 
@@ -277,7 +285,7 @@ The same flow works for Kleiner Brauhelfer (`/upload/kbh`, a `.db`) and MMuM JSO
 
 ## What you get
 
-The example file produces this profile:
+The example file produces these brew steps:
 
 | # | Step | Type | Details |
 |---|---|---|---|
@@ -297,10 +305,10 @@ A `CoolDown` step is appended when `steps_cooldown` is configured.
 
 ## Running it
 
-1. **Read the profile first.** Import is mechanical; it cannot tell you the recipe
+1. **Read the brew steps first.** Import is mechanical; it cannot tell you the recipe
    assumed a different rig.
 2. **Check each step's kettle and sensor.** These are resolved from your settings at
-   import time. Change kettles afterwards and the profile still points at the old
+   import time. Change kettles afterwards and the brew steps still point at the old
    ones.
 3. **Start.** Steps advance automatically when their timers expire, except those
    that wait for you.
@@ -345,7 +353,7 @@ don't start it.
 press OK on one of them. OK only clears the reminder. It doesn't record a
 measurement, move the brew on or switch anything.
 
-**Once per brew.** It keeps counting while the profile is stopped, and Stop and
+**Once per brew.** It keeps counting while the brew steps are stopped, and Stop and
 Start don't start another one. Reset, Clear, loading or importing a recipe,
 deleting the mash-in step or changing its type, and the end of the brew cancel
 it.
@@ -354,7 +362,7 @@ it.
 `basic._mash_ph_reminder`, not in the step's settings. A restart brings back a
 countdown still running, or the reminder itself if it was due and not yet
 answered; one you answered never comes back. If no plugin turns the reminder on
-after the restart, nothing is shown. Saving the profile to the recipe book
+after the restart, nothing is shown. Saving the brew steps to the Recipe Book
 leaves it out, and an import throws it away.
 
 **On a simulator.** The 15 minutes are brewing time, from `cbpi.api.clock`: at
@@ -377,16 +385,27 @@ seconds; after a simulator restart `due_at` is moved onto the new clock) and
 
 ## Saving and reusing
 
-Import overwrites the active profile, so save anything worth keeping:
+Every import is kept in the Recipe Book, marked *Imported from BeerXML* (or the
+format it came in; `imported_from` in the recipe's data). Importing a recipe of the
+same name again - changed in BeerSmith and exported again - replaces that copy, and
+the notification says so.
+
+An import never replaces a copy of your own. A copy is yours once you:
+
+- press **Save** on the Brew Steps page, which stores the brew steps *as they are
+  now*, including your edits;
+- change a recipe in the Recipe Book and save it; or
+- clone it.
+
+An import of the same name then adds a new copy next to yours.
 
 ```bash
-curl http://<pi>:8000/recipe/                    # list saved recipes
-curl -X POST http://<pi>:8000/recipe/<name>/brew # load a saved one as the profile
+curl http://<pi>:8000/recipe/                  # list the Recipe Book; "file" is each id
+curl -X POST http://<pi>:8000/recipe/<id>/brew # make one your brew steps
 ```
 
-Saving to the recipe book stores the profile *as it is now*, including manual edits.
-That is usually what you want: import once, adjust for your rig, save, and brew from
-the book thereafter.
+A good routine: import, adjust for your rig, save, and brew from the book
+thereafter.
 
 ---
 
@@ -401,4 +420,6 @@ the book thereafter.
 | Whirlpool runs 15 min instead of what I wrote | Aroma `TIME` is ignored; the wait is hardcoded. |
 | Mash temperatures lost their decimals | Step temperatures are truncated to integers on import. |
 | Steps point at the wrong kettle | Kettles are resolved at import time. Re-import after changing them. |
-| My saved recipe vanished | Import overwrites the active profile. Save to the recipe book first. |
+| My brew steps were replaced | An import replaces them. Save them to the Recipe Book first. |
+| A recipe I imported before 4.7.7.post30 is gone | Imports weren't kept then, and the next upload replaced the file. Import it again: it's kept now. |
+| "Recipe not kept" after an import | The recipe is your brew steps, but the Recipe Book couldn't be written (a full disk, say). Fix that, then press **Save** on the Brew Steps page. |
