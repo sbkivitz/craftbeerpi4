@@ -147,8 +147,12 @@ class StepController:
         if notification_id is not None:
             self.cbpi.notification.retire(notification_id)
         self._mash_ph_prompt_id = None
-        if clear:
-            self.basic_data.pop(self.MASH_PH_REMINDER_KEY, None)
+        # getattr: a controller assembled without __init__, as
+        # test_mashin_holds_temp.py builds one, has no basic_data, and reset_all
+        # comes here first.
+        basic = getattr(self, "basic_data", None)
+        if clear and basic is not None:
+            basic.pop(self.MASH_PH_REMINDER_KEY, None)
 
     def _mash_ph_anchor_exists(self, state):
         step = self.find_by_id(state["step_id"])
