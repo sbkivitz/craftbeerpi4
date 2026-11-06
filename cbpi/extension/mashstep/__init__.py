@@ -1181,6 +1181,10 @@ class BoilStep(CBPiStep):
     FIRST_WORT_DONE_PROP = "_first_wort_done"
     LID_ALERT_DONE_PROP = "_lid_alert_done"
     HOPS_DONE_PROP = "_hops_done"
+    #: The hold before this step asked for the first-wort hops ("Ready to boil?
+    #: Add ... for first wort"), so its start does not. A restart during the
+    #: hold asks again, in the hold.
+    FIRST_WORT_HELD_PROP = "_first_wort_held"
 
     def _hops_done(self):
         done = self.props.get(self.HOPS_DONE_PROP, None) or []
@@ -1188,6 +1192,34 @@ class BoilStep(CBPiStep):
             return sorted({int(n) for n in done})
         except (TypeError, ValueError):
             return []
+
+    def first_wort_due(self):
+        """The first-wort hops still to ask for this brew, as the reminder names
+        them ("1.00 oz Magnum", or "" if the recipe names none) - or None if it
+        has none, or they have been asked for.
+
+        Asked for before the wort reaches the boil kettle: as a step named for
+        the runoff starts (StepController._first_wort_at_runoff), else in the
+        hold before this step (wait_for_brewer), else as it starts (run). Until
+        4.7.7.post31 only as it started, which since the hold (post23) was
+        after the wort was in the kettle. Scott, 5 Nov: first-wort hops "should
+        be correctly supported".
+        """
+        if self.props.get("First_Wort", "No") != "Yes":
+            return None
+        if self.props.get(self.FIRST_WORT_DONE_PROP, False):
+            return None
+        return str(self.props.get("First_Wort_text", "") or "").strip()
+
+    def first_wort_asked(self):
+        """Asked for before the boil: not again this brew. The controller saves it."""
+        self.props[self.FIRST_WORT_DONE_PROP] = True
+
+    def held_for_brewer(self):
+        """The profile now holds before this step: if its question asked for the
+        first-wort hops, the boil's start does not ask again."""
+        if self.first_wort_due() is not None:
+            self.props[self.FIRST_WORT_HELD_PROP] = True
 
     @action("Start Timer", [])
     async def start_timer(self):
@@ -1298,8 +1330,14 @@ class BoilStep(CBPiStep):
         """
         if not self._needs_transfer_confirmation():
             return None
+        hops = self.first_wort_due()
+        if hops is None:
+            first = "Move the wort to the boil kettle first"
+        else:
+            first = ("Add {} to the boil kettle for first wort, then move the wort "
+                     "into it".format(hops or "the first-wort hops"))
         return (
-            "Ready to boil? Move the wort to the boil kettle first - the dashboard "
+            "Ready to boil? " + first + " - the dashboard "
             "is yours meanwhile. The boil kettle stays off until you press Start "
             "the boil, or Start on the Brew Steps page. (Set CONFIRM_BEFORE_BOIL to "
             "No to go straight on.)",
@@ -1476,8 +1514,11 @@ class BoilStep(CBPiStep):
             # Sticky, like the other hop alerts: with an action the interface
             # holds it until answered instead of dismissing it after five
             # seconds - and it is raised alongside the wort-transfer prompt,
-            # exactly when hands are busy.
-            if self.first_wort_hop_text is not None and self.first_wort_hop_text != "":
+            # exactly when hands are busy. Not when the hold before the boil
+            # asked for them: starting the boil, the wort is in the kettle.
+            if self.props.get(self.FIRST_WORT_HELD_PROP, False):
+                pass
+            elif self.first_wort_hop_text is not None and self.first_wort_hop_text != "":
                 self.cbpi.notify(
                     "First Wort Hop Addition!",
                     "Please add %s for first wort" % self.first_wort_hop_text,

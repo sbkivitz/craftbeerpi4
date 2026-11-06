@@ -103,7 +103,7 @@ A complete working example lives alongside this documentation in the testbench a
 | `…/MASH_STEP/STEP_TEMP` | step target temperature |
 | `…/MASH_STEP/STEP_TIME` | step duration, minutes |
 | `RECIPE/HOPS/HOP` with `USE=Boil` | hop alert during the boil |
-| `RECIPE/HOPS/HOP` with `USE=First Wort` | first-wort alert on the boil step |
+| `RECIPE/HOPS/HOP` with `USE=First Wort` | first-wort reminder before the wort reaches the boil kettle (see below) |
 | `RECIPE/HOPS/HOP` with `USE=Aroma` plus `TEMP` | whirlpool / hopstand steps |
 | `RECIPE/MISCS/MISC` with `USE=Boil` | alert during the boil, same as a hop |
 
@@ -213,6 +213,26 @@ Hop_4 = 5   Cascade
 > UI but never announced, because the boil step read only `Hop_1`–`Hop_5`. If you
 > are on an unpatched build, keep your boil additions to five or verify the last
 > one fires.
+
+### First-wort hops
+
+First-wort hops go into the boil kettle before the wort does, so CraftBeerPi asks
+for them before the wort reaches it (since 4.7.7.post31), once a brew:
+
+1. **When a step named for the runoff starts.** Its name starts with Sparge, Fly
+   Sparge, Batch Sparge, Continuous Sparge, Lauter or Runoff, and doesn't mention
+   water, heat, prepare, salts or treatment ("Heat Sparge Water" doesn't count).
+   The reminder reads "Please add 1.00 oz Magnum to the boil kettle before the
+   first runnings reach it", with an **Added** button.
+2. **Otherwise, in the question before the boil:** "Ready to boil? Add 1.00 oz
+   Magnum to the boil kettle for first wort, then move the wort into it …". A
+   restart while the boil waits asks again there.
+3. **With `CONFIRM_BEFORE_BOIL` set to No**, when the boil step starts, which is
+   then the end of the mash.
+
+Starting the boil, or Stop and Start, doesn't ask again; Reset does, for the next
+brew. Before 4.7.7.post31 the boil only asked as it started, which with the boil
+waiting for you came after the wort was in the kettle.
 
 ### Whirlpool / hopstand
 
