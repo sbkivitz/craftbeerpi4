@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import os.path
+import re
 import subprocess
 import sys
 import time
@@ -897,6 +898,14 @@ class StepController:
             )
         except Exception as e:  # noqa: BLE001
             logging.warning("Could not ask the brewer to start '%s': %s", step.name, e)
+        # The step may have asked for something in its question - BoilStep the
+        # first-wort hops - and must not ask again as it starts.
+        held = getattr(step.instance, "held_for_brewer", None)
+        if callable(held):
+            try:
+                held()
+            except Exception as e:  # noqa: BLE001
+                logging.warning("Step '%s' could not note its hold: %s", step.name, e)
         self._tell("step_held", step)
 
     async def _start_held(self, step_id):
@@ -1401,6 +1410,60 @@ class StepController:
         if step is not None:
             self._tell(what, step)
 
+    #: A step that runs the wort off to the boil kettle, by its name: the names
+    #: BrewScribe reads (its recipes.step_phase) and the BeerSmith guide asks
+    #: for - Sparge, Fly Sparge, Batch Sparge, Continuous Sparge, Lauter,
+    #: Runoff. Not one that only gets ready for it: "Heat sparge water".
+    _RUNOFF_NAME = re.compile(
+        r"^(?:step \d+ )?(?:(?:start|begin) )?(?:(?:fly|batch|continuous) )?"
+        r"(?:sparge|sparging|lauter|lautering|run ?off)(?: |$)")
+    _NOT_RUNOFF = re.compile(
+        r"\b(?:water|heat|heating|prepare|preparation|salts|treatment)\b")
+
+    @classmethod
+    def _collects_wort(cls, step):
+        """Is `step` the runoff to the boil kettle, by its name?"""
+        if getattr(step, "type", None) == "HeatStep":
+            return False
+        name = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(getattr(step, "name", "") or ""))
+        name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+        return bool(cls._RUNOFF_NAME.match(name)) and not cls._NOT_RUNOFF.search(name)
+
+    def _first_wort_at_runoff(self, step):
+        """Ask for the boil's first-wort hops as the runoff to the boil kettle starts.
+
+        Scott, 5 Nov: first-wort hops "should be correctly supported". The boil
+        asked for them as it started, and since the profile holds before the
+        boil (4.7.7.post23) that is after the wort is in the kettle. A step
+        named for the runoff starts as the first runnings head for the kettle,
+        so the first boil after it asks then, once a brew. With no such step,
+        the hold before the boil asks (BoilStep.wait_for_brewer); with no hold
+        (CONFIRM_BEFORE_BOIL No), the boil's start, which is the end of the mash.
+        """
+        try:
+            if not self._collects_wort(step):
+                return
+            index = self.get_index_by_id(step.id)
+            for later in self.profile[index + 1:]:
+                due = getattr(later.instance, "first_wort_due", None)
+                if not callable(due):
+                    continue
+                hops = due()
+                if hops is None:
+                    return
+                later.instance.first_wort_asked()
+                self.cbpi.notify(
+                    "First Wort Hop Addition!",
+                    "Please add {} to the boil kettle before the first runnings "
+                    "reach it".format(hops or "the first-wort hops"),
+                    NotificationType.WARNING,
+                    action=[NotificationAction("Added")],
+                )
+                return
+        except Exception as e:  # noqa: BLE001 - a reminder never stops the brew
+            logging.warning("Could not ask for the first-wort hops at '%s': %s",
+                            getattr(step, "name", "?"), e)
+
     async def start_step(self, step, by_brewer=False):
         try:
             logging.info("Try to start step %s" % step)
@@ -1411,6 +1474,7 @@ class StepController:
             if self._held_step_id == step.id:
                 self._held_step_id = None
             self._tell("step_started", step)
+            self._first_wort_at_runoff(step)
         except Exception as e:
             self.cbpi.notify(
                 "Error",
