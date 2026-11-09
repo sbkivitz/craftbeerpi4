@@ -77,6 +77,7 @@ class ConfigUpdate(CBPiExtension):
         ActorInterlock = self.cbpi.config.get("ACTOR_INTERLOCK_GROUPS", None)
         ActorInterlockMode = self.cbpi.config.get("ACTOR_INTERLOCK_MODE", None)
         ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", None)
+        BrewdayOverrideActor = self.cbpi.config.get("BREWDAY_OVERRIDE_ACTOR", None)
         MASH_TUN = self.cbpi.config.get("MASH_TUN", None)
         AutoMode = self.cbpi.config.get("AutoMode", None)
         AddMashIn = self.cbpi.config.get("AddMashInStep", None)
@@ -966,6 +967,26 @@ class ConfigUpdate(CBPiExtension):
                     ],
                 )
                 ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", "Yes")
+            except Exception:
+                logging.warning("Unable to update database")
+
+        # The brew-day screen warns that a pump it switched off may still run
+        # when the rig has an override switch for it, which CraftBeerPi cannot
+        # see: on Scott's rig the HLT pump, Recirc_PUMP (rig record, 9 Oct).
+        if BrewdayOverrideActor is None:
+            logging.info("INIT BREWDAY_OVERRIDE_ACTOR")
+            try:
+                await self.cbpi.config.add(
+                    "BREWDAY_OVERRIDE_ACTOR",
+                    "",
+                    type=ConfigType.ACTOR,
+                    description="Brew-day screen: a switch with its own override "
+                                "switch on the rig, which can run it whatever "
+                                "CraftBeerPi says. The screen then warns that "
+                                "it may still run after it is switched off. "
+                                "(default: None)",
+                    source="craftbeerpi",
+                )
             except Exception:
                 logging.warning("Unable to update database")
 

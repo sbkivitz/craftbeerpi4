@@ -34,6 +34,7 @@ from cbpi.controller.log_file_controller import LogController
 from cbpi.controller.notification_controller import NotificationController
 from cbpi.controller.plugin_controller import PluginController
 from cbpi.controller.recipe_controller import RecipeController
+from cbpi.controller.rest_timer_controller import RestTimerController
 from cbpi.controller.satellite_controller import SatelliteController
 from cbpi.controller.sensor_controller import SensorController
 from cbpi.controller.step_controller import StepController
@@ -52,6 +53,7 @@ from cbpi.http_endpoints.http_login import Login
 from cbpi.http_endpoints.http_notification import NotificationHttpEndpoints
 from cbpi.http_endpoints.http_plugin import PluginHttpEndpoints
 from cbpi.http_endpoints.http_recipe import RecipeHttpEndpoints
+from cbpi.http_endpoints.http_resttimer import RestTimerHttpEndpoints
 from cbpi.http_endpoints.http_sensor import SensorHttpEndpoints
 from cbpi.http_endpoints.http_step import StepHttpEndpoints
 from cbpi.http_endpoints.http_system import SystemHttpEndpoints
@@ -210,6 +212,8 @@ class CraftBeerPi:
         self.fermenterrecipe : FermenterRecipeController = FermenterRecipeController(self)
         self.upload : UploadController = UploadController(self)
         self.notification : NotificationController = NotificationController(self)
+        # The brew-day screen's rest timer, one for every screen (Scott, 9 Nov 2026).
+        self.resttimer : RestTimerController = RestTimerController(self)
         self.satellite = None
         if str(self.static_config.get("mqtt", False)).lower() == "true":
             self.satellite: SatelliteController = SatelliteController(self)
@@ -229,6 +233,7 @@ class CraftBeerPi:
         self.http_notification = NotificationHttpEndpoints(self)
         self.http_upload = UploadHttpEndpoints(self)
         self.http_fermenter = FermentationHttpEndpoints(self)
+        self.http_resttimer = RestTimerHttpEndpoints(self)
 
         self.login = Login(self)
 
