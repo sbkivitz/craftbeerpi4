@@ -89,6 +89,31 @@ class LogController:
         except Exception as e:  # noqa: BLE001 - telemetry never breaks control
             logging.error("control logging listener exception: {}".format(e))
 
+    def log_change(self, series_id: str, value) -> None:
+        """Log a value only when it differs from the last one logged for its series.
+
+        For what the brew-day screen's graphs draw besides the temperature
+        (Scott chose them on 10 Nov): each kettle's target and whether its AUTO
+        is on, and each switch's level, 0 when off. They change a few times a
+        brew day, or every control cycle at most while a PID moves a level, so
+        writing them only on a change costs less than any temperature log.
+        Without them a graph could show the target and the element's power
+        only for as long as the page had been open: PID_LOGGING is off by
+        default, BoilPower logs nothing, and nothing is logged by hand.
+        """
+        try:
+            last = getattr(self, "_last_change", None)
+            if last is None:
+                last = self._last_change = {}
+            if series_id in last and last[series_id] == value:
+                return
+            if not self.sensor_data_listeners:
+                return  # nothing to write to yet: the next change is logged
+            last[series_id] = value
+            self.log_control_data(series_id, value)
+        except Exception as e:  # noqa: BLE001 - telemetry never breaks control
+            logging.error("change logging exception: {}".format(e))
+
     def _emit(self, id, value, name, timestamp=None):
         """Hand a reading to every log target, stamped to the millisecond.
 

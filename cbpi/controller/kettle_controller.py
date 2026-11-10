@@ -152,6 +152,7 @@ class KettleController(BasicController):
         except Exception as e:  # noqa: BLE001
             logging.debug("shared-heater check skipped: %s", e)
         await super().start(id, preset=preset)
+        self._log_auto(id)
         # Tell every page, as stop() does. Only toggle() did: started through
         # here - POST /kettle/{id}/on, which the brew-day screen's AUTO sends,
         # or a step starting its kettle - every open page went on showing the
@@ -204,14 +205,30 @@ class KettleController(BasicController):
                 await self.start(id)
             else:
                 await item.instance.stop()
+                self._log_auto(id)
             await self.push_udpate()
         except Exception as e:
             logging.error("Failed to switch on KettleLogic {} {}".format(id, e))
+
+    def _log_auto(self, id):
+        """Whether the kettle's AUTO is on, 1 or 0, for the brew-day screen's graphs: they draw the target only
+        while AUTO holds it. Logged when it changes (LogController.log_change)."""
+        try:
+            item = self.find_by_id(id)
+            on = item is not None and item.instance is not None and bool(getattr(item.instance, "state", False))
+            self.cbpi.log.log_change("{}.auto".format(id), 1 if on else 0)
+        except Exception as e:  # noqa: BLE001 - telemetry never breaks control
+            logging.debug("Could not log kettle %s's AUTO: %s", id, e)
 
     async def set_target_temp(self, id, target_temp):
         try:
             item = self.find_by_id(id)
             item.target_temp = target_temp
+            try:
+                # For the brew-day screen's graphs (LogController.log_change).
+                self.cbpi.log.log_change("{}.target".format(id), float(target_temp))
+            except Exception as e:  # noqa: BLE001 - telemetry never breaks control
+                logging.debug("Could not log kettle %s's target: %s", id, e)
             await self.save()
         except Exception as e:
             logging.error("Failed to set Target Temp {} {}".format(id, e))
@@ -222,6 +239,7 @@ class KettleController(BasicController):
             item = self.find_by_id(id)
             if item.instance:
                 await item.instance.stop()
+            self._log_auto(id)
             await self.push_udpate()
         except Exception as e:
             logging.error("Failed to switch off KettleLogic {} {}".format(id, e))

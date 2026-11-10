@@ -503,6 +503,7 @@ class ActorController(BasicController):
                 self.cbpi.push_update(
                     "cbpi/actorupdate/{}".format(id), item.to_dict(), True
                 )
+                self._log_out(item)
             else:
                 # Already running, so this is a change of level rather than a
                 # start. Exactly one of the two drives; the other is derived.
@@ -562,6 +563,7 @@ class ActorController(BasicController):
                 self.sorting,
             )
             self.cbpi.push_update("cbpi/actorupdate/{}".format(id), item.to_dict())
+            self._log_out(item)
 
             # Report what the hardware is actually doing, not what was asked.
             # A caller that gets True from an emergency stop is entitled to
@@ -618,6 +620,7 @@ class ActorController(BasicController):
                 self.sorting,
             )
             self.cbpi.push_update("cbpi/actorupdate/{}".format(id), item.to_dict())
+            self._log_out(item)
         except Exception as e:
             logging.error("Failed to toggle Actor {} {}".format(id, e))
 
@@ -710,8 +713,18 @@ class ActorController(BasicController):
                     await item.instance.set_power(item.power)
                     if not by_automation():
                         item.manual_power = item.power
+            self._log_out(item)
         except Exception as e:
             logging.error("Failed to set output {} {}".format(id, e))
+
+    def _log_out(self, item):
+        """A switch's level, 0 when it is off, for the brew-day screen's graphs: the band under each
+        temperature line. Logged when it changes (LogController.log_change)."""
+        try:
+            on = getattr(item.instance, "state", False) is True
+            self.cbpi.log.log_change("{}.out".format(item.id), self._clamp_power(item.power) if on else 0)
+        except Exception as e:  # noqa: BLE001 - telemetry never breaks control
+            logging.debug("Could not log actor %s's level: %s", getattr(item, "id", "?"), e)
 
     def _publish_actor_state(self, id, item):
         """Broadcast the actor list. One owner, so the guard is not bypassable.
@@ -736,6 +749,7 @@ class ActorController(BasicController):
             self.sorting,
         )
         self.cbpi.push_update("cbpi/actorupdate/{}".format(id), item.to_dict())
+        self._log_out(item)
 
     async def actor_update(self, id, power, output=None, maxoutput=None):
         try:
