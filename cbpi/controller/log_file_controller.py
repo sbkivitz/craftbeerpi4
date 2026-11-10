@@ -458,7 +458,7 @@ class LogController:
     WINDOW_POINTS_MAX = 2000
 
     async def get_window(self, names, since=None, points=None) -> dict:
-        """Each named log from `since` on, thinned to about `points` readings.
+        """Each named log from `since` on, thinned to about `points` readings, with its last reading before `since`.
 
         For the brew-day screen's temperature graphs (Scott chose them on 10
         Nov): the last 10 or 30 minutes, or the brew day. get_data() reads a
@@ -499,9 +499,16 @@ class LogController:
             except Exception as e:  # noqa: BLE001 - one bad log never blanks the others
                 self.logger.warning("Could not read the log %s for a graph: %s", name, e)
                 s = pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
+            earlier = s.iloc[0:0]
             if start is not None:
+                earlier = s[s.index <= start]
                 s = s[s.index > start]
             s = self._thin(s, points)
+            # A log written only when its value changes - a kettle's target or AUTO, a switch's level - has nothing
+            # in the window until its next change, so its last reading before `since` comes too, at its own time:
+            # where the window's line starts. Added after the thinning, which it would otherwise stretch.
+            if len(earlier):
+                s = pd.concat([earlier.iloc[-1:], s])
             series[name] = {
                 # A naive datetime's timestamp() reads it as local time, as
                 # fromtimestamp() wrote it, daylight saving and all.
