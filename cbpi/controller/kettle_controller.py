@@ -1,5 +1,8 @@
+import asyncio
 import logging
+import math
 
+from cbpi.api import clock
 from cbpi.api.dataclasses import Kettle, Props
 from cbpi.controller.basic_controller2 import BasicController
 from tabulate import tabulate
@@ -11,6 +14,61 @@ class KettleController(BasicController):
         super(KettleController, self).__init__(cbpi, Kettle, "kettle.json")
         self.update_key = "kettleupdate"
         self.autostart = False
+        self._change_sweep = None
+
+    async def init(self):
+        await super().init()
+        # Started last of the controllers, so the switches are loaded too.
+        self._change_sweep = asyncio.create_task(self._sweep_changes())
+
+    async def shutdown(self, app=None):
+        if self._change_sweep is not None:
+            self._change_sweep.cancel()
+            self._change_sweep = None
+        await super().shutdown(app)
+
+    async def _sweep_changes(self):
+        # Brewing time, so a simulator at any speed logs a change within one
+        # brewing second of it.
+        while True:
+            await clock.sleep(1)
+            try:
+                self.log_changes()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - telemetry never breaks control
+                logging.debug("Could not log what changed: %s", e)
+
+    def log_changes(self):
+        """Log each kettle's target and AUTO, and each switch's level, where
+        they differ from what was last logged (LogController.log_change), for
+        the brew-day screen's graphs.
+
+        Each brewing second, from what the controllers hold, so that what
+        changes them by any path reaches the logs. The steps set a kettle's
+        target directly, not through set_target_temp, so the target a recipe
+        set was never logged, and a graph loaded mid-recipe drew the last one
+        set by hand (review of the graphs, 10 Nov). And the first look after a
+        start-up logs every kettle's AUTO and every switch as they are then,
+        off: nothing logged them going off at a restart or a power cut, so the
+        target and the element's level drawn from before it ran on through it.
+        """
+        log = getattr(self.cbpi, "log", None)
+        if log is None or not hasattr(log, "log_change"):
+            return
+        for item in list(self.data):
+            try:
+                target = float(item.target_temp)
+            except (TypeError, ValueError):
+                target = None
+            if target is not None and math.isfinite(target):
+                log.log_change("{}.target".format(item.id), target)
+            self._log_auto(item.id)
+        actors = getattr(self.cbpi, "actor", None)
+        log_out = getattr(actors, "_log_out", None)
+        if callable(log_out):
+            for actor in list(getattr(actors, "data", None) or []):
+                log_out(actor)
 
     def create(self, data):
         return Kettle(
