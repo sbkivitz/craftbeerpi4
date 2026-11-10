@@ -644,6 +644,259 @@ class MashStep(CBPiStep):
             )
 
 
+#: What a sparge step says once the sparge water is ready, when its
+#: Notification is blank. {temp} is the step's temperature with its unit.
+SPARGE_READY_TEXT = (
+    "The sparge water is ready at {temp}. Set the valves and start the pumps by "
+    "hand, for a fly or a batch sparge, then press Sparge started, which "
+    "switches the HLT's AUTO off.")
+#: And what it says at once when it heats nothing: no HLT, or no temperature.
+SPARGE_NOW_TEXT = (
+    "Set the valves and start the pumps by hand, for a fly or a batch sparge, "
+    "then press Sparge started.")
+#: Said as Sparge started switches the HLT's AUTO off.
+SPARGE_HLT_OFF_TEXT = "The HLT's AUTO is off now, so its element won't run as the HLT empties."
+
+
+@parameters(
+    [
+        Property.Number(
+            label="Timer",
+            description="Minutes, counted from when you press Sparge started. 0: until Next Step",
+            configurable=True,
+        ),
+        Property.Number(
+            label="Temp",
+            description=("Sparge water temperature: the HLT heats to it and holds it until you press "
+                         "Sparge started. Blank: the HLT is left alone"),
+            configurable=True,
+        ),
+        Property.Kettle(label="Kettle", description="The hot liquor tank, which heats the sparge water"),
+        Property.Sensor(label="Sensor", description="The HLT's sensor. Blank: its kettle's"),
+        Property.Kettle(
+            label="Mash_Tun",
+            description="Its AUTO goes off as the step starts, so its pump is yours",
+        ),
+        Property.Text(
+            label="Notification",
+            configurable=True,
+            description="What to say when the sparge water is ready. Blank: set the valves and start the pumps",
+        ),
+    ]
+)
+class SpargeStep(CBPiStep):
+    """Heat the sparge water, then leave the sparge to the brewer.
+
+    Scott, 10 Nov, walking a recipe on the simulator: "sparge step needs to let
+    the HLT get up to mash out temperature before pumping wort over to boil
+    kettle. I also may do a "batch sparge" - it should be flexible to let me do
+    either", then "I think the wort pump may need to be manual".
+
+    A Sparge step was a MashStep on the mash tun. Its HERMS ran on, so the wort
+    pump ran from the step's first second, and the rig page said to set that
+    pump's valves for the boil kettle as the step started: the wort went over
+    while the HLT was still on its way up from the mash.
+
+    So, as this step starts:
+    - the mash tun's AUTO goes off. Its HERMS stops, and the wort pump with it:
+      from here both pumps are the brewer's, for a fly or a batch sparge;
+    - the HLT heats on its own AUTO to the step's temperature, and holds it.
+    When the HLT is there, a prompt titled with the step's name says the sparge
+    water is ready, and waits on every page for Sparge started. Pressing it
+    switches the HLT's AUTO off, so its element can't run as the HLT empties
+    (Scott, 10 Nov, asked: the element off at Sparge started, rather than the
+    water held at temperature through the sparge), and starts the step's
+    timer; with no timer, the step runs until Next Step. From then on a Stop
+    and Start, or Resume after a restart, doesn't heat the HLT again. As the
+    step ends - its timer, Next Step or Stop - the HLT's AUTO goes off, even if
+    the brewer switched it on again, and the pumps are left as they are. With
+    no HLT, or its temperature blank, the step leaves the HLT alone and asks at
+    once.
+
+    A mash out through the coil before the sparge is a Mash Out step: the mash
+    tun's HERMS at about 168 F. Being a runoff step (StepController.
+    _collects_wort), this one asks for first-wort hops as it starts, makes the
+    HLT pump the brewer's (cbpi/extension/hltpump), and warns as it ends if the
+    HLT pump runs on with the wort pump off.
+    """
+
+    #: Kept with the step once the brewer has pressed Sparge started, so a Stop
+    #: and Start, or a restart, carries on with the sparge instead of asking
+    #: again (record()).
+    STARTED_PROP = "_sparge_started"
+
+    async def SpargeStarted(self, **kwargs):
+        step = self.cbpi.step.find_by_id(self.id)
+        if (step is None or step.instance is not self
+                or step.status != StepState.ACTIVE or not self.running):
+            logging.info("Ignoring an old sparge acknowledgement for %s", self.id)
+            return
+        if not getattr(self, "_started", False):
+            await self._start_sparge()
+
+    async def on_start(self):
+        self.kettle = self.get_kettle(self.props.get("Kettle", None))
+        self.temp = self._float_prop("Temp", 0)
+        # With no HLT or no temperature it heats nothing, and asks at once. A
+        # target of 0 would also be the no-target warning (cbpi/extension/notarget).
+        self._heats = self.kettle is not None and self.temp > 0
+        self._asked = False
+        self._started = bool(self.props.get(self.STARTED_PROP, False))
+        # The mash tun's logic first: stopping PID_HERMS puts back the HLT
+        # target it found, and the sparge temperature must come after that.
+        await self._stop_mash_tun()
+        # Once the sparge has started the HLT's heat is over: a Stop and Start,
+        # or Resume after a restart, leaves it off.
+        if self._heats and not self._started:
+            self.kettle.target_temp = self.temp
+            await self._hlt_auto(True)
+        minutes = self._int_prop("Timer", 0)
+        if self.timer is None and minutes > 0:
+            self.timer = Timer(
+                self.remaining_for(minutes * 60),
+                on_update=self.on_timer_update,
+                on_done=self.on_timer_done,
+            )
+        if self._started:
+            await self._start_sparge(resumed=True)
+        else:
+            self.summary = "Waiting for Target Temp" if self._heats else ""
+        await self.push_update()
+
+    async def _stop_mash_tun(self):
+        """Switch the mash tun's AUTO off, so its HERMS stops and its pump is the brewer's."""
+        mt_id = self.props.get("Mash_Tun", None)
+        mt = self.get_kettle(mt_id) if mt_id else None
+        if mt is None:
+            try:
+                from cbpi.extension.hltpump import kettle_roles
+
+                mt = kettle_roles(self.cbpi)["mt"]
+            except Exception:  # noqa: BLE001 - nothing to stop then
+                mt = None
+        if mt is None or mt is self.kettle:
+            return
+        instance = getattr(mt, "instance", None)
+        if instance is None or getattr(instance, "state", False) is not True:
+            return
+        try:
+            await self.cbpi.kettle.stop(mt.id)
+            logging.info("Sparge: the mash tun's AUTO is off, so its pump is the brewer's")
+        except Exception as e:  # noqa: BLE001
+            logging.error("Sparge: could not switch the mash tun's AUTO off: %s", e)
+
+    async def _hlt_auto(self, on):
+        """The HLT's AUTO on or off - only when this step heats it."""
+        kettle = self.kettle
+        if kettle is None or not getattr(self, "_heats", False):
+            return
+        try:
+            running = kettle.instance is not None and kettle.instance.state is True
+            if on and not running:
+                await self.cbpi.kettle.toggle(kettle.id)
+            elif not on and running:
+                await self.cbpi.kettle.stop(kettle.id)
+        except Exception as e:  # noqa: BLE001
+            logging.error("Sparge: could not switch the HLT's AUTO %s: %s", "on" if on else "off", e)
+
+    def _degrees(self):
+        unit = str(self.get_config_value("TEMP_UNIT", "C") or "C").upper()
+        value = round(float(self.temp), 1)
+        text = str(int(value)) if value == int(value) else "{:.1f}".format(value)
+        return "{} °{}".format(text, "F" if unit.startswith("F") else "C")
+
+    def _ask_ready(self, heated=True):
+        """The sparge water is ready - or nothing heats it: ask, on every page, until Sparge started."""
+        self._asked = True
+        self.summary = ""
+        text = str(self.props.get("Notification", "") or "").strip()
+        if not text:
+            text = SPARGE_READY_TEXT.format(temp=self._degrees()) if heated else SPARGE_NOW_TEXT
+        # Kept for a page opened later; taken down when the step is paused or
+        # ends, and asked again when it starts again.
+        _kept_for(self, self.cbpi.notify(
+            self.name, text,
+            action=[NotificationAction("Sparge started", self.SpargeStarted)],
+            **_keep(self.cbpi),
+        ), "sparge")
+
+    async def _start_sparge(self, resumed=False):
+        self._started = True
+        if not resumed:
+            await self.record(self.STARTED_PROP, True)
+            # Scott, 10 Nov: the element off once the sparge starts, so it
+            # can't run as the HLT empties.
+            await self._hlt_auto(False)
+        if self.timer is not None:
+            self.timer.start()
+            self.timer.is_running = True
+        else:
+            self.summary = ""
+        if not resumed:
+            said = []
+            if getattr(self, "_heats", False):
+                said.append(SPARGE_HLT_OFF_TEXT)
+            if self.timer is not None:
+                said.append("Sparge timer started. Estimated completion: {}".format(
+                    _completion_time(self.timer)))
+            if said:
+                self.cbpi.notify(self.name, " ".join(said), NotificationType.INFO)
+        await self.push_update()
+
+    async def on_timer_update(self, timer, seconds):
+        self.summary = Timer.format_time(seconds)
+        await self.note_progress(seconds, self._int_prop("Timer", 0) * 60)
+        await self.push_update()
+
+    async def on_timer_done(self, timer):
+        self.summary = ""
+        await self._hlt_auto(False)
+        if getattr(self, "_heats", False):
+            self.kettle.target_temp = 0
+        if self.STARTED_PROP in self.props:
+            try:
+                del self.props[self.STARTED_PROP]
+            except Exception:  # noqa: BLE001
+                self.props[self.STARTED_PROP] = False
+        self.cbpi.notify(self.name, "Step finished", NotificationType.SUCCESS)
+        self.clear_progress()
+        await self.next()
+
+    async def on_stop(self):
+        if self.timer is not None:
+            await self.timer.stop()
+        self.summary = ""
+        await self._hlt_auto(False)
+        await self.push_update()
+
+    async def reset(self):
+        minutes = self._int_prop("Timer", 0)
+        self.timer = Timer(
+            minutes * 60, on_update=self.on_timer_update, on_done=self.on_timer_done
+        ) if minutes > 0 else None
+
+    async def run(self):
+        while self.running == True:
+            # Brewing time, so a simulator at any speed finds the water ready
+            # at the same brewing moment.
+            await clock.sleep(1)
+            if self._started or self._asked:
+                continue
+            sensor = self.props.get("Sensor", None) or getattr(self.kettle, "sensor", None)
+            if not self._heats or not sensor:
+                # Nothing heated, or nothing to read it with: the sparge is the
+                # brewer's at once, with no word of a temperature.
+                self._ask_ready(heated=False)
+                await self.push_update()
+                continue
+            value = self.get_sensor_value(sensor).get("value")
+            self.note_heat_progress(value, self.temp)
+            if self.target_reached(value, self.temp):
+                self._ask_ready()
+                await self.push_update()
+        return StepResult.DONE
+
+
 @parameters(
     [Property.Number(label="Timer", description="Time in Minutes", configurable=True)]
 )
@@ -1848,6 +2101,7 @@ def setup(cbpi):
 
     cbpi.plugin.register("MashInStep", MashInStep)
     cbpi.plugin.register("MashStep", MashStep)
+    cbpi.plugin.register("SpargeStep", SpargeStep)
     cbpi.plugin.register("BoilStep", BoilStep)
     cbpi.plugin.register("CooldownStep", CooldownStep)
     cbpi.plugin.register("WaitStep", WaitStep)

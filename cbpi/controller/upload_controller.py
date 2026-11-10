@@ -2024,6 +2024,11 @@ class UploadController:
         self.AutoMode = self.cbpi.config.get("AutoMode", "Yes")
         self.mashin = self.cbpi.config.get("steps_mashin", "MashInStep")
         self.mash = self.cbpi.config.get("steps_mash", "MashStep")
+        # A mash step named for the sparge (Sparge, Fly Sparge, Batch Sparge,
+        # Lauter, Runoff) comes in as this type: SpargeStep heats the HLT and
+        # leaves both pumps to the brewer (Scott, 10 Nov). Set it to MashStep
+        # for the sparge as a mash rest, as before.
+        self.sparge = self.cbpi.config.get("steps_sparge", "SpargeStep") or "SpargeStep"
         self.mashout = self.cbpi.config.get(
             "steps_mashout", None
         )  # Currently used only for the Braumeister
@@ -2105,8 +2110,57 @@ class UploadController:
         # remove empty recipe from recipe book
         await self.cbpi.recipe.remove(self.recipeID)
 
+    def _as_sparge(self, step_string):
+        """A mash step named for the sparge, made a SpargeStep (Scott, 10 Nov).
+
+        Every recipe source makes its mash steps with the steps_mash type. The
+        one named for the runoff (StepController._collects_wort: Sparge, Fly
+        Sparge, Batch Sparge, Lauter, Runoff, not "Sparge Water") becomes the
+        steps_sparge type instead, SpargeStep unless the setting says other:
+        it heats the HLT to the step's temperature, with the mash tun's AUTO
+        off and both pumps left to the brewer. It needs an HLT, found as the
+        hltpump extension finds it - the kettle the mash tun's HERMS works on.
+        Without one, or with steps_sparge set to the mash type, the step comes
+        in as before. Never raises: the step then comes in as it was.
+        """
+        try:
+            mash = getattr(self, "mash", None) or "MashStep"
+            sparge = getattr(self, "sparge", None) or "SpargeStep"
+            if not isinstance(step_string, dict) or step_string.get("type") != mash or sparge == mash:
+                return step_string
+            from types import SimpleNamespace
+
+            from cbpi.controller.step_controller import StepController
+
+            if not StepController._collects_wort(
+                    SimpleNamespace(name=step_string.get("name"), type=step_string.get("type"))):
+                return step_string
+            from cbpi.extension.hltpump import kettle_roles
+
+            hlt = kettle_roles(self.cbpi)["hlt"]
+            props = step_string.get("props") or {}
+            mash_tun = props.get("Kettle")
+            if hlt is None or hlt.id == mash_tun:
+                return step_string
+            converted = dict(step_string)
+            converted["type"] = sparge
+            converted["props"] = {
+                "Kettle": hlt.id,
+                "Sensor": hlt.sensor,
+                "Mash_Tun": mash_tun,
+                "Temp": props.get("Temp"),
+                "Timer": props.get("Timer"),
+                "Notification": "",
+            }
+            return converted
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not make '%s' a sparge step: %s",
+                            (step_string or {}).get("name") if isinstance(step_string, dict) else "?", e)
+            return step_string
+
     # function to create json to be send to api to add a step to the current mash profile. Currently all properties are send to each step which does not cuase an issue
     async def create_step(self, step_string):
+        step_string = self._as_sparge(step_string)
         if self._staging:
             if self._staged is None:
                 raise RuntimeError("a step came before its recipe")

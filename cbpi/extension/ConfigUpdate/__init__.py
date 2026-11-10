@@ -49,6 +49,7 @@ class ConfigUpdate(CBPiExtension):
         whirlpool_temp = self.cbpi.config.get("steps_whirlpool_temp", None)
         mashin_step = self.cbpi.config.get("steps_mashin", None)
         mash_step = self.cbpi.config.get("steps_mash", None)
+        sparge_step = self.cbpi.config.get("steps_sparge", None)
         mashout_step = self.cbpi.config.get("steps_mashout", None)
         boil_step = self.cbpi.config.get("steps_boil", None)
         cooldown_step = self.cbpi.config.get("steps_cooldown", None)
@@ -322,6 +323,36 @@ class ConfigUpdate(CBPiExtension):
                     mash_step,
                     type=ConfigType.STEP,
                     description="Mash step type",
+                    source="steps",
+                )
+
+        # The type a recipe's sparge step comes in as. Added in 4.7.7.post35
+        # (Scott, 10 Nov): SpargeStep heats the HLT and leaves the pumps to the
+        # brewer; MashStep keeps the sparge as a mash rest, as before.
+        sparge_description = (
+            "Sparge step type for recipe creation: SpargeStep heats the HLT to the "
+            "sparge temperature and leaves both pumps to you, for a fly or a batch "
+            "sparge; MashStep runs the sparge as a mash rest, as before"
+        )
+        if sparge_step is None:
+            logger.info("INIT Sparge Step Type")
+            try:
+                await self.cbpi.config.add(
+                    "steps_sparge",
+                    "SpargeStep",
+                    type=ConfigType.STEP,
+                    description=sparge_description,
+                    source="steps",
+                )
+            except:
+                logger.warning("Unable to update database")
+        else:
+            if CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+                await self.cbpi.config.add(
+                    "steps_sparge",
+                    sparge_step,
+                    type=ConfigType.STEP,
+                    description=sparge_description,
                     source="steps",
                 )
 

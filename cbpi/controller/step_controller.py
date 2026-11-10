@@ -1448,9 +1448,12 @@ class StepController:
 
     @classmethod
     def _collects_wort(cls, step):
-        """Is `step` the runoff to the boil kettle, by its name?"""
+        """Is `step` the runoff to the boil kettle, by its type or its name?"""
         if getattr(step, "type", None) == "HeatStep":
             return False
+        # A SpargeStep is the runoff whatever it is called (Scott, 10 Nov).
+        if getattr(step, "type", None) == "SpargeStep":
+            return True
         name = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(getattr(step, "name", "") or ""))
         name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
         return bool(cls._RUNOFF_NAME.match(name)) and not cls._NOT_RUNOFF.search(name)
