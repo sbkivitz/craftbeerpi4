@@ -3,6 +3,7 @@ import logging
 import time
 from abc import ABCMeta, abstractmethod
 
+from cbpi.api.automation import automation
 from cbpi.api.config import ConfigType
 
 
@@ -70,7 +71,9 @@ class CBPiBase(metaclass=ABCMeta):
     async def actor_on(self, id, power=100, output=None):
 
         try:
-            await self.cbpi.actor.on(id, power, output)
+            # A logic's or step's level is not the brewer's (cbpi/api/automation.py).
+            with automation():
+                await self.cbpi.actor.on(id, power, output)
         except Exception as e:
             # Never silent: this is how every kettle logic and step drives hardware,
             # so a swallowed failure just looks like "the element didn't come on".
@@ -85,12 +88,14 @@ class CBPiBase(metaclass=ABCMeta):
 
     async def actor_set_power(self, id, power):
         try:
-            await self.cbpi.actor.set_power(id, power)
+            with automation():
+                await self.cbpi.actor.set_power(id, power)
         except Exception as e:
             logging.error("Failed to set power on actor %s: %s", id, e)
 
     async def actor_set_output(self, id, output):
         try:
-            await self.cbpi.actor.set_output(id, output)
+            with automation():
+                await self.cbpi.actor.set_output(id, output)
         except Exception as e:
             logging.error("Failed to set output on actor %s: %s", id, e)

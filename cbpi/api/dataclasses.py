@@ -76,6 +76,10 @@ class Actor:
     timer: int = 0
     type: str = None
     instance: str = None
+    # The level the brewer set, used when it is switched on without one. `power`
+    # is the level it runs at now, which a kettle logic changes every cycle
+    # (cbpi/api/automation.py). None: not known yet, so `power`.
+    manual_power: int = None
 
     def __str__(self):
         return "name={} props={}, state={}, type={}, power={}, output={}, maxoutput={}, timer={}".format(
@@ -103,6 +107,7 @@ class Actor:
             props=self.props.to_dict(),
             state=state,
             power=self.power,
+            manual_power=self.power if self.manual_power is None else self.manual_power,
             output=self.output,
             maxoutput=self.maxoutput,
             timer=self.timer,

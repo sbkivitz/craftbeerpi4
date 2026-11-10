@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 
+from cbpi.api.automation import by_automation
 from cbpi.api.dataclasses import Actor, Props
 from cbpi.api.tasks import cancellation_is_real, spawn, wait_within
 from cbpi.controller.basic_controller2 import BasicController
@@ -196,12 +197,21 @@ class ActorController(BasicController):
         # what an actor was doing, but restoring it would switch a heater or pump
         # back on by itself after a restart or a power cut. Actors always come up
         # off, and something has to ask for them explicitly.
+        #
+        # It comes up at the brewer's level (manual_power), not at the level a
+        # logic last drove it at, which is what 'power' holds if the file was
+        # saved while one ran. A file from before manual_power has only 'power'.
+        manual = data.get("manual_power")
+        if manual is None:
+            manual = data.get("power")
+        manual = self._clamp_power(100 if manual is None else manual)
         return Actor(
             data.get("id"),
             data.get("name"),
             type=data.get("type"),
             props=Props(data.get("props", {})),
-            power=data.get("power", 100),
+            power=manual,
+            manual_power=manual,
             maxoutput=data.get("maxoutput", 100),
             output=data.get("output", data.get("maxoutput", 100)),
             timer=data.get("timer", 0),
@@ -379,10 +389,14 @@ class ActorController(BasicController):
                 # next time anything called on() without an explicit level.
                 # The dataclass already defaults power to 100, so a fresh actor
                 # still starts fully on - nothing needs truthiness to get that.
-                if item.power is not None:
-                    power = item.power
-                else:
-                    power = 100
+                #
+                # The brewer's level, not `power`: a kettle logic sets `power`
+                # every cycle, so the element came back on at whatever duty the
+                # logic last asked for. Scott, 10 Nov, heating strike water by
+                # hand after the HLT's AUTO had run: "I see the power is capped
+                # at 25%" (cbpi/api/automation.py).
+                level = item.manual_power if item.manual_power is not None else item.power
+                power = level if level is not None else 100
 
             if output is None:
                 if item.output is not None:
@@ -474,6 +488,10 @@ class ActorController(BasicController):
                 # figure rather than the last one asked for.
                 item.power = self._clamp_power(power)
                 item.output = output
+                # A level the brewer asked for is the one his next switch-on
+                # gets; a logic's is not (cbpi/api/automation.py).
+                if power_given and not by_automation():
+                    item.manual_power = item.power
                 # await self.push_udpate()
                 self.cbpi.ws.send(
                     dict(
@@ -498,8 +516,11 @@ class ActorController(BasicController):
                 # nothing.
                 if output_given and not power_given:
                     await self.set_output(id, output)
-                else:
+                elif power_given:
                     await self.set_power(id, power)
+                # Neither: switching on something already on changes nothing.
+                # The default level is the brewer's, and an element a logic is
+                # driving must not jump to it until the logic's next cycle.
             return True
         except Exception as e:
             logging.error("Failed to switch on Actor {} {}".format(id, e))
@@ -647,6 +668,8 @@ class ActorController(BasicController):
             await item.instance.set_power(safe_power)
             # See on(): this is the field the interface and other logics read.
             item.power = safe_power
+            if not by_automation():
+                item.manual_power = safe_power
             output = round(item.maxoutput * item.power / 100)
             if item.output != output:
                 item.output = output
@@ -685,6 +708,8 @@ class ActorController(BasicController):
                 if item.power != power:
                     item.power = self._clamp_power(power)
                     await item.instance.set_power(item.power)
+                    if not by_automation():
+                        item.manual_power = item.power
         except Exception as e:
             logging.error("Failed to set output {} {}".format(id, e))
 
