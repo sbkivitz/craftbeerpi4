@@ -78,6 +78,7 @@ class ConfigUpdate(CBPiExtension):
         ActorInterlockMode = self.cbpi.config.get("ACTOR_INTERLOCK_MODE", None)
         ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", None)
         BrewdayOverrideActor = self.cbpi.config.get("BREWDAY_OVERRIDE_ACTOR", None)
+        HltPumpWithHeat = self.cbpi.config.get("HLT_PUMP_WITH_HEAT", None)
         MASH_TUN = self.cbpi.config.get("MASH_TUN", None)
         AutoMode = self.cbpi.config.get("AutoMode", None)
         AddMashIn = self.cbpi.config.get("AddMashInStep", None)
@@ -967,6 +968,35 @@ class ConfigUpdate(CBPiExtension):
                     ],
                 )
                 ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", "Yes")
+            except Exception:
+                logging.warning("Unable to update database")
+
+        # Scott, 9 Nov: "The HLT pump should be going to prevent
+        # stratification any time I'm using the HLT heat ... any time before
+        # the sparge, really". See cbpi/extension/hltpump.
+        if HltPumpWithHeat is None:
+            logging.info("INIT HLT_PUMP_WITH_HEAT")
+            try:
+                await self.cbpi.config.add(
+                    "HLT_PUMP_WITH_HEAT",
+                    "Yes",
+                    type=ConfigType.SELECT,
+                    description="Start the HLT pump (the HLT kettle's agitator) "
+                                "whenever the HLT starts heating, until the "
+                                "recipe reaches its sparge, so the water does "
+                                "not settle into hot and cool layers. Also when "
+                                "BrewStart heats the water before you are up: "
+                                "starting a BrewStart step asks you to check "
+                                "the pump and its valves. It is left running "
+                                "when the heating stops. You can still stop "
+                                "it; it starts again the next time the HLT "
+                                "starts heating.",
+                    source="steps",
+                    options=[
+                        {"label": "Yes", "value": "Yes"},
+                        {"label": "No", "value": "No"},
+                    ],
+                )
             except Exception:
                 logging.warning("Unable to update database")
 
