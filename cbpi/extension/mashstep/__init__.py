@@ -72,12 +72,16 @@ class NotificationStep(CBPiStep):
             )
             await self.next()
         else:
-            self.cbpi.notify(
+            # Kept for a page opened later; taken down when the step is
+            # paused or ends - its button acts on this step. Started again, it
+            # asks again.
+            _kept_for(self, self.cbpi.notify(
                 self.name,
                 self.props.get("Notification", ""),
                 NotificationType.INFO,
                 action=[NotificationAction("Next Step", self.NextStep)],
-            )
+                **_keep(self.cbpi),
+            ), "notification")
             await self.push_update()
 
     async def on_timer_update(self, timer, seconds):
@@ -239,14 +243,17 @@ class MashInStep(CBPiStep):
         self._ask_for_malt()
 
     def _ask_for_malt(self):
-        self.cbpi.notify(
+        # Kept for a page opened later; taken down when the step is paused or
+        # ends. Started again, it asks again (_resume_waiting_for_malt).
+        _kept_for(self, self.cbpi.notify(
             self.name,
             self.props.get(
                 "Notification",
                 "Target Temp reached. Please add malt and click next to move on.",
             ),
             action=[NotificationAction("Next Step", self.NextStep)],
-        )
+            **_keep(self.cbpi),
+        ), "malt")
 
     async def on_timer_update(self, timer, seconds):
         await self.push_update()
@@ -986,6 +993,29 @@ def _notify_kept(cbpi, title, message, type, action):
     return cbpi.notify(title, message, type, action=action)
 
 
+def _keep(cbpi):
+    """keep=True for a step's prompt, where CraftBeerPi can keep it for every
+    page; nothing where it cannot. Passed to notify() itself, so each prompt's
+    call - and its button - stays where test_sticky_alerts.py reads it."""
+    try:
+        return {"keep": True} if "keep" in inspect.signature(cbpi.notify).parameters else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _kept_for(step, notification_id, kind, while_paused=False):
+    """Hand a kept prompt to the step controller, which takes it down once it
+    no longer applies (StepController.keep_step_prompt). Nothing to do where
+    there is no controller to take it."""
+    keep = getattr(getattr(getattr(step, "cbpi", None), "step", None), "keep_step_prompt", None)
+    if notification_id is None or not callable(keep):
+        return
+    try:
+        keep(getattr(step, "id", None), kind, notification_id, while_paused)
+    except Exception as e:  # noqa: BLE001 - a reminder never stops the brew
+        logging.debug("%s: could not keep the '%s' prompt: %s", getattr(step, "name", "?"), kind, e)
+
+
 @parameters(
     [
         Property.Select(
@@ -1415,14 +1445,15 @@ class BoilStep(CBPiStep):
             # Stop here and ask. The action is what arms the element; until it
             # is pressed this step heats nothing and its timer cannot start.
             self.summary = "Waiting for wort transfer"
-            self.cbpi.notify(
+            _kept_for(self, self.cbpi.notify(
                 self.name,
                 "Is the wort in the boil kettle? Nothing will be heated until "
                 "you confirm. (Set CONFIRM_BEFORE_BOIL to No to skip this.)",
                 NotificationType.WARNING,
                 action=[NotificationAction("Wort transferred",
                                            self.confirm_transfer)],
-            )
+                **_keep(self.cbpi),
+            ), "transfer")
         await self.push_update()
 
     async def next_hop_timer(self):
@@ -1459,20 +1490,26 @@ class BoilStep(CBPiStep):
                 # grain, or ten feet away with a pump running, a five second
                 # toast for a 60/20/10/5/0 schedule is simply missed - and a
                 # missed hop cannot be added late.
+                #
+                # Kept for a page opened later, and through a pause: the boil
+                # does not give it again (M36). Gone once answered, or the boil
+                # is over or reset.
                 if text is not None and text != "":
-                    self.cbpi.notify(
+                    _kept_for(self, self.cbpi.notify(
                         "Hop Alert",
                         "Please add %s (%s)" % (text, number),
                         NotificationType.WARNING,
                         action=[NotificationAction("Added")],
-                    )
+                        **_keep(self.cbpi),
+                    ), "hop-%d" % number, while_paused=True)
                 else:
-                    self.cbpi.notify(
+                    _kept_for(self, self.cbpi.notify(
                         "Hop Alert",
                         "Please add Hop %s" % number,
                         NotificationType.WARNING,
                         action=[NotificationAction("Added")],
-                    )
+                        **_keep(self.cbpi),
+                    ), "hop-%d" % number, while_paused=True)
 
     async def on_stop(self):
         await self.timer.stop()
@@ -1519,19 +1556,21 @@ class BoilStep(CBPiStep):
             if self.props.get(self.FIRST_WORT_HELD_PROP, False):
                 pass
             elif self.first_wort_hop_text is not None and self.first_wort_hop_text != "":
-                self.cbpi.notify(
+                _kept_for(self, self.cbpi.notify(
                     "First Wort Hop Addition!",
                     "Please add %s for first wort" % self.first_wort_hop_text,
                     NotificationType.WARNING,
                     action=[NotificationAction("Added")],
-                )
+                    **_keep(self.cbpi),
+                ), "first-wort", while_paused=True)
             else:
-                self.cbpi.notify(
+                _kept_for(self, self.cbpi.notify(
                     "First Wort Hop Addition!",
                     "Please add hops for first wort",
                     NotificationType.WARNING,
                     action=[NotificationAction("Added")],
-                )
+                    **_keep(self.cbpi),
+                ), "first-wort", while_paused=True)
 
         while self.running == True:
             # Brewing time, because this loop measures with its own cadence: the
@@ -1598,12 +1637,14 @@ class BoilStep(CBPiStep):
                 # difference between lifting the lid and mopping a boilover off
                 # the floor, and it fires exactly once. Its words are a setting
                 # (steps_boil_lid_alert), so its button says only that it is done.
-                self.cbpi.notify(
+                # Kept like the hop alerts, through a pause: it is not given again.
+                _kept_for(self, self.cbpi.notify(
                     self.lid_alert_text,
                     "Reached temp close to boiling",
                     NotificationType.WARNING,
                     action=[NotificationAction("Done")],
-                )
+                    **_keep(self.cbpi),
+                ), "lid", while_paused=True)
                 self.lid_flag = False
                 await self.record(self.LID_ALERT_DONE_PROP, True)
 

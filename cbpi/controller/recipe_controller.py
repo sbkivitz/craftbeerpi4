@@ -121,6 +121,9 @@ class RecipeController:
                     data = yaml.load(file, Loader=yaml.FullLoader)
                     dataset = data["basic"]
                     dataset["file"] = filename
+                    # When it last changed, so a list can put the newest first:
+                    # the brew-day screen's Recipe Book (Scott's layout B, 9 Nov).
+                    dataset["modified"] = os.path.getmtime(recipe_path)
                     result.append(dataset)
                 except Exception as e:
                     self.cbpi.notify(

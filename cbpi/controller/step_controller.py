@@ -466,6 +466,32 @@ class StepController:
             prompts[notification_id] = (kind, step.id, still_applies)
         return notification_id
 
+    def keep_step_prompt(self, step_id, kind, notification_id, while_paused=False):
+        """Take a step's own prompt down from every page once it no longer applies.
+
+        For the prompts a step sends itself with notify(keep=True): the malt,
+        a notification step's question, the wort transfer, the boil's hop, lid
+        and first-wort reminders. Kept, they reach a page opened later - a
+        phone opened mid-boil, or a page reloaded, showed no hop alert waiting
+        (the dashboard agent's review of the brew-day screen, 9 Nov). And they
+        go when the step ends, is reset, or the profile is replaced; and when
+        it is paused or fails, unless `while_paused`: the boil does not give a
+        reminder again when it is started again (DEFECTS M36), so its
+        reminders stay until answered. A question whose button acts on the
+        step goes with the pause: after ALL OFF a notification step's "Next
+        Step" stayed on screen, and pressing it did nothing. One prompt of a
+        kind for a step at a time.
+        """
+        if not notification_id or self.find_by_id(step_id) is None:
+            return
+        states = ((StepState.ACTIVE, StepState.STOP, StepState.ERROR) if while_paused
+                  else (StepState.ACTIVE,))
+        prompts = self.__dict__.setdefault("_kept_prompts", {})
+        for earlier, (k, other, _) in list(prompts.items()):
+            if k == kind and other == step_id and earlier != notification_id:
+                self._retire_prompt(earlier)
+        prompts[notification_id] = (kind, step_id, lambda step: step.status in states)
+
     def _retire_prompts(self, everything=False):
         """Take down the kept prompts that no longer apply - or, when the profile
         is reset or replaced, all of them. Run on every save, which follows
@@ -1452,7 +1478,10 @@ class StepController:
                 if hops is None:
                     return
                 later.instance.first_wort_asked()
-                self.cbpi.notify(
+                # Kept for a page opened later, until answered or the boil is
+                # over: it is not asked again this brew.
+                self._ask_kept(
+                    "first-wort", later, lambda boil: boil.status != StepState.DONE,
                     "First Wort Hop Addition!",
                     "Please add {} to the boil kettle before the first runnings "
                     "reach it".format(hops or "the first-wort hops"),

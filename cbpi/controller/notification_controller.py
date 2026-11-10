@@ -211,7 +211,7 @@ class NotificationController:
         task.add_done_callback(background_tasks.discard)
         return notifcation_id
 
-    def retire(self, notification_id) -> bool:
+    def retire(self, notification_id, reason="withdrawn") -> bool:
         """Take a prompt down: it has been answered, or no longer applies.
 
         From every page showing it, and from those shown to pages that open
@@ -219,12 +219,17 @@ class NotificationController:
         this, they would act on a profile that has moved on - "Skip this step"
         on a "Resume brew?" left over skips whatever step runs by then.
 
+        `reason` goes to the pages with it: "answered" when a button was
+        pressed (notify_callback), else "withdrawn". A page that did not
+        answer it can then say which: the brew-day screen's event line said
+        only "no longer waiting".
+
         True if it was still waiting for an answer.
         """
         waiting = self.callback_cache.pop(notification_id, None) is not None
         kept = self._open().pop(notification_id, None) is not None
         if waiting or kept:
-            self.cbpi.ws.send(dict(topic=self.RETIRED_TOPIC, id=notification_id))
+            self.cbpi.ws.send(dict(topic=self.RETIRED_TOPIC, id=notification_id, reason=reason))
         return waiting or kept
 
     def kept_prompts(self):
@@ -268,7 +273,7 @@ class NotificationController:
             # Answered: gone from every page, not just the one it was
             # answered on, where a phone kept showing it with a button that
             # no longer did anything.
-            self.retire(notification_id)
+            self.retire(notification_id, reason="answered")
             return True
         except Exception as e:
             self.logger.error("Failed to call notification callback")
