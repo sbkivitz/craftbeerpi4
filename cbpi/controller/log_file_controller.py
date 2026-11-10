@@ -427,6 +427,80 @@ class LogController:
                 pass
         return result
 
+    # Points per series a graph asks for when it does not say, and the most it
+    # may ask for. The brew-day screen's graphs are a few hundred pixels wide.
+    WINDOW_POINTS = 600
+    WINDOW_POINTS_MAX = 2000
+
+    async def get_window(self, names, since=None, points=None) -> dict:
+        """Each named log from `since` on, thinned to about `points` readings.
+
+        For the brew-day screen's temperature graphs (Scott chose them on 10
+        Nov): the last 10 or 30 minutes, or the brew day. get_data() reads a
+        whole log and thins it to about 500 points, a point every 43 s over six
+        hours: too coarse for a 10-minute graph, and mostly older than the graph
+        shows. This keeps only what is newer than `since`, and thins each series
+        the way get_data() does, by the highest reading in each slice of time.
+
+        Times are seconds on the brewing clock (cbpi.api.clock), the clock the
+        logs are stamped in (_emit): on the rig, the wall clock; in a simulation
+        it runs SIM_TIME_SCALE times as fast. `now` and `scale` say where that
+        clock is, so a page can line up the readings it is sent live with the
+        log. A name with no log comes back empty, never as an error.
+        """
+        if isinstance(names, str):
+            names = [names]
+        names = list(dict.fromkeys(n for n in (names or []) if isinstance(n, str) and n))
+        try:
+            points = int(points) if points is not None else self.WINDOW_POINTS
+        except (TypeError, ValueError):
+            points = self.WINDOW_POINTS
+        points = max(10, min(self.WINDOW_POINTS_MAX, points))
+        try:
+            since = float(since) if since is not None else None
+        except (TypeError, ValueError):
+            since = None
+        if since is not None and not math.isfinite(since):
+            since = None
+        # As _emit wrote it: the brewing clock's seconds as local time.
+        start = datetime.fromtimestamp(since) if since is not None else None
+
+        series = {}
+        for name in names:
+            # Buffered readings are not on disk yet, and this reads the files.
+            await self._flush_datalogger(name)
+            try:
+                s = self._read_sensor_log(name, "v")["v"].dropna()
+            except Exception as e:  # noqa: BLE001 - one bad log never blanks the others
+                self.logger.warning("Could not read the log %s for a graph: %s", name, e)
+                s = pd.Series(dtype="float64", index=pd.DatetimeIndex([]))
+            if start is not None:
+                s = s[s.index > start]
+            s = self._thin(s, points)
+            series[name] = {
+                # A naive datetime's timestamp() reads it as local time, as
+                # fromtimestamp() wrote it, daylight saving and all.
+                "t": [round(t.to_pydatetime().timestamp(), 3) for t in s.index],
+                "v": [round(float(v), 3) for v in s.tolist()],
+            }
+        return {"now": sim_clock.now(), "scale": sim_clock.scale(), "series": series}
+
+    @staticmethod
+    def _thin(s, points):
+        """At most about `points` readings: the highest in each slice of time,
+        and always the latest reading, so a line reaches the present."""
+        if len(s) <= points:
+            return s
+        span = (s.index[-1] - s.index[0]).total_seconds()
+        if span <= 0:
+            return s.iloc[-points:]
+        slice_ms = max(1, int(span * 1000 / points))
+        # Slices from the first reading, so there are `points` of them, give or take one.
+        thinned = s.resample("{}ms".format(slice_ms), origin="start").max().dropna()
+        if len(thinned) and thinned.index[-1] < s.index[-1]:
+            thinned = pd.concat([thinned.iloc[:-1], s.iloc[-1:]])
+        return thinned
+
     def get_logfile_names(self, name: str) -> list:
         """
         Get all log file names

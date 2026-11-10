@@ -248,3 +248,43 @@ class LogHttpEndpoints:
         # print(json.dumps(result, cls=ComplexEncoder))
         # print("JSON----")
         return web.json_response(result, dumps=json_dumps)
+
+    @request_mapping(path="/window", method="POST", auth_required=False)
+    async def get_window(self, request):
+        """
+        ---
+        description: Logs from a time on, thinned for a graph (the brew-day screen's temperature graphs)
+        tags:
+        - Log
+        parameters:
+        - in: body
+          name: body
+          description: The logs, from when (brewing clock seconds), and about how many points each
+          required: true
+          schema:
+            type: object
+            properties:
+              names:
+                type: array
+                items:
+                  type: string
+              since:
+                type: number
+              points:
+                type: integer
+        produces:
+        - application/json
+        responses:
+            "200":
+                description: "{now, scale, series: {name: {t: [seconds], v: [values]}}}"
+            "400":
+                description: the body is not a JSON object with a list of names
+        """
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        if not isinstance(body, dict) or not isinstance(body.get("names"), list):
+            return web.json_response({"error": 'send {"names": [...], "since": seconds, "points": n}'}, status=400)
+        result = await self.cbpi.log.get_window(body.get("names"), body.get("since"), body.get("points"))
+        return web.json_response(result, dumps=json_dumps)

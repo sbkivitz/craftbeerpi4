@@ -79,6 +79,11 @@ class StepController:
     MASH_PH_REMINDER_KEY = "_mash_ph_reminder"
     MASH_PH_REMINDER_DELAY = 900
 
+    # When a step first started, in brewing clock seconds: the brew-day screen's
+    # graphs tag where each step started, and start DAY at the first. Kept with
+    # the step, so a reload or a restart still shows them.
+    STARTED_AT_PROP = "_started_at"
+
     #: What a listener is told (add_listener).
     LISTENER_EVENTS = ("step_started", "step_held", "timer_started", "timer_changed",
                        "timer_stopped", "timer_done", "step_done", "step_failed",
@@ -1517,6 +1522,15 @@ class StepController:
                 step.instance.started_by_brewer = bool(by_brewer)
             await step.instance.start()
             step.status = StepState.ACTIVE
+            # Only the first start: a stop and a resume, or a restart, is the
+            # same step going on. Underscored, so an edit keeps it and starting
+            # over or loading another recipe clears it (update, reset_all,
+            # load_recipe).
+            try:
+                if step.props is not None and not step.props.get(self.STARTED_AT_PROP, None):
+                    step.props[self.STARTED_AT_PROP] = round(clock.now(), 3)
+            except Exception as e:  # noqa: BLE001 - a graph's tag never stops a step
+                logging.warning("Could not note when '%s' started: %s", step.name, e)
             if self._held_step_id == step.id:
                 self._held_step_id = None
             self._tell("step_started", step)
