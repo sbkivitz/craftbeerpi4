@@ -152,6 +152,18 @@ class KettleController(BasicController):
         except Exception as e:  # noqa: BLE001
             logging.debug("shared-heater check skipped: %s", e)
         await super().start(id, preset=preset)
+        # Tell every page, as stop() does. Only toggle() did: started through
+        # here - POST /kettle/{id}/on, which the brew-day screen's AUTO sends,
+        # or a step starting its kettle - every open page went on showing the
+        # kettle in MANUAL while its logic ran. Scott, 9 Nov, on the HLT: a tap
+        # on its element switched it off, and the logic the screen did not show
+        # switched it straight back on at 29 %. The logic is running by now, so
+        # a failure to tell the pages is logged, never the reason a start
+        # fails: the screen would say DID NOT START for a kettle that did.
+        try:
+            await self.push_udpate()
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Kettle %s started, but the pages could not be told: %s", id, e)
 
     async def _warn_if_heater_shared(self, id):
         item = self.find_by_id(id)
