@@ -1099,6 +1099,36 @@ class ConfigUpdate(CBPiExtension):
             except Exception:
                 logging.warning("Unable to update database")
 
+        # The timers' alarm sound (Scott, 11 Nov: "The alert sound is kinda weak", then "Make the alarm
+        # timer sound configurable like I had asked"). The brew-day screen plays it (brewday/alarm.js).
+        # Added when missing; its description and choices are brought up to date with each version.
+        alarm_options = [
+            {"label": "Kitchen timer", "value": "kitchen"},
+            {"label": "Alarm", "value": "alarm"},
+            {"label": "High beep", "value": "high"},
+            {"label": "Soft ping", "value": "soft"},
+        ]
+        alarm_entry = self.cbpi.config.cache.get("BREWDAY_ALARM_SOUND")
+        alarm_now = getattr(alarm_entry, "value", None)
+        if alarm_entry is None or CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+            if alarm_entry is None:
+                logging.info("INIT BREWDAY_ALARM_SOUND")
+            try:
+                await self.cbpi.config.add(
+                    "BREWDAY_ALARM_SOUND",
+                    alarm_now if alarm_now in [o["value"] for o in alarm_options] else "kitchen",
+                    type=ConfigType.SELECT,
+                    description="Brew-day screen: the sound of a timer that has run out, played every 3 seconds "
+                                "until you answer it; a new message plays its first two beeps. Kitchen timer: four "
+                                "quick, bright beeps. Alarm: a fuller, lower tone, three beeps then two. High beep: "
+                                "three high, pure beeps, the soft ping at full strength. Soft ping: the first sound, "
+                                "quiet. Switching SOUND on at the screen plays it. (default: Kitchen timer)",
+                    source="craftbeerpi",
+                    options=alarm_options,
+                )
+            except Exception:
+                logging.warning("Unable to update database")
+
         if ActorInterlock is None:
             logging.info("INIT ACTOR_INTERLOCK_GROUPS")
             try:
