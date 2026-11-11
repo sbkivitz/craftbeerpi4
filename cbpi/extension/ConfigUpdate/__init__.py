@@ -83,6 +83,7 @@ class ConfigUpdate(CBPiExtension):
         MASH_TUN = self.cbpi.config.get("MASH_TUN", None)
         AutoMode = self.cbpi.config.get("AutoMode", None)
         AddMashIn = self.cbpi.config.get("AddMashInStep", None)
+        AddMashOut = self.cbpi.config.get("AddMashOutStep", None)
         bfuserid = self.cbpi.config.get("brewfather_user_id", None)
         bfapikey = self.cbpi.config.get("brewfather_api_key", None)
         bflistlength = self.cbpi.config.get("brewfather_list_length", None)
@@ -513,6 +514,31 @@ class ConfigUpdate(CBPiExtension):
                         {"label": "No", "value": "No"},
                     ],
                 )
+
+        # Scott, 11 Nov: a sparge step heats only the HLT, so an import adds a
+        # Mash Out before it when the recipe has none (UploadController.
+        # _with_mash_out). Description and options refreshed with each version.
+        mash_out_description = (
+            "Yes: when an imported recipe has a sparge step but no Mash Out before it, add one: "
+            "the mash heated to 168 °F (76 °C) and held 10 minutes, just before the sparge. "
+            "No: only the recipe's own steps")
+        if AddMashOut is None or CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+            if AddMashOut is None:
+                logger.info("INIT AddMashOutStep")
+            try:
+                await self.cbpi.config.add(
+                    "AddMashOutStep",
+                    AddMashOut if AddMashOut is not None else "Yes",
+                    type=ConfigType.SELECT,
+                    description=mash_out_description,
+                    source="steps",
+                    options=[
+                        {"label": "Yes", "value": "Yes"},
+                        {"label": "No", "value": "No"},
+                    ],
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Unable to update config: %s", e)
 
         ## Check if Brewfather UserID is in config
 

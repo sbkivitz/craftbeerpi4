@@ -645,17 +645,26 @@ class MashStep(CBPiStep):
 
 
 #: What a sparge step says once the sparge water is ready, when its
-#: Notification is blank. {temp} is the step's temperature with its unit.
+#: Notification is blank. {temp} is the step's temperature with its unit, and
+#: {pumps} says which pumps are off for the brewer's hoses: ", and both pumps
+#: are off" (SPARGE_PUMPS_OFF, by SpargeStep._pumps_off).
 SPARGE_READY_TEXT = (
-    "The sparge water is ready at {temp}. Set the valves and start the pumps by "
-    "hand, for a fly or a batch sparge, then press Sparge started, which "
+    "The sparge water is ready at {temp}{pumps}. Set the hoses or valves for a fly "
+    "or a batch sparge, start the pumps by hand, then press Sparge started, which "
     "switches the HLT's AUTO off.")
 #: And what it says at once when it heats nothing: no HLT, or no temperature.
+#: {pumps} here is a sentence: "Both pumps are off. "
 SPARGE_NOW_TEXT = (
-    "Set the valves and start the pumps by hand, for a fly or a batch sparge, "
-    "then press Sparge started.")
+    "{pumps}Set the hoses or valves for a fly or a batch sparge, start the pumps by "
+    "hand, then press Sparge started.")
 #: Said as Sparge started switches the HLT's AUTO off.
 SPARGE_HLT_OFF_TEXT = "The HLT's AUTO is off now, so its element won't run as the HLT empties."
+#: The pumps a sparge step has switched off, as words, by which are off.
+SPARGE_PUMPS_OFF = {
+    ("hlt", "wort"): "both pumps are off",
+    ("hlt",): "the HLT pump is off",
+    ("wort",): "the wort pump is off",
+}
 
 
 @parameters(
@@ -675,12 +684,12 @@ SPARGE_HLT_OFF_TEXT = "The HLT's AUTO is off now, so its element won't run as th
         Property.Sensor(label="Sensor", description="The HLT's sensor. Blank: its kettle's"),
         Property.Kettle(
             label="Mash_Tun",
-            description="Its AUTO goes off as the step starts, so its pump is yours",
+            description="Its AUTO goes off as the step starts, and its pump with it, so its pump is yours",
         ),
         Property.Text(
             label="Notification",
             configurable=True,
-            description="What to say when the sparge water is ready. Blank: set the valves and start the pumps",
+            description="What to say when the sparge water is ready. Blank: set the hoses and start the pumps",
         ),
     ]
 )
@@ -709,21 +718,35 @@ class SpargeStep(CBPiStep):
     timer; with no timer, the step runs until Next Step. From then on a Stop
     and Start, or Resume after a restart, doesn't heat the HLT again. As the
     step ends - its timer, Next Step or Stop - the HLT's AUTO goes off, even if
-    the brewer switched it on again, and the pumps are left as they are. With
-    no HLT, or its temperature blank, the step leaves the HLT alone and asks at
+    the brewer switched it on again; the pumps are as below. With no HLT, or
+    its temperature blank, the step leaves the HLT's heat alone and asks at
     once.
 
+    The pumps are off whenever the brewer has hoses to move (Scott, 11 Nov:
+    "Any time I need to change hoses or "valves" that respective pump should
+    be off"; M71). As the step starts, the wort pump - the mash tun's - is
+    switched off too, should it run by hand rather than under the HERMS: its
+    hoses go over from recirculating to the runoff. The HLT pump keeps the HLT
+    stirred while it heats, and is switched off when the water is ready, or as
+    the step asks at once: its hose goes over to the mash tun. Each once a run
+    of the step (HOSES_PROP), so a Stop and Start never stops a pump the
+    brewer has since started by hand. The prompt says which pumps are off.
+
     A mash out through the coil before the sparge is a Mash Out step: the mash
-    tun's HERMS at about 168 F. Being a runoff step (StepController.
-    _collects_wort), this one asks for first-wort hops as it starts, makes the
-    HLT pump the brewer's (cbpi/extension/hltpump), and warns as it ends if the
-    HLT pump runs on with the wort pump off.
+    tun's HERMS at about 168 F, which an import adds when the recipe has none
+    (AddMashOutStep). Being a runoff step (StepController._collects_wort), this
+    one asks for first-wort hops as it starts, makes the HLT pump the brewer's
+    (cbpi/extension/hltpump), which switches it off as the step ends - its time
+    up or Next Step - leaving the wort pump to finish the runoff.
     """
 
     #: Kept with the step once the brewer has pressed Sparge started, so a Stop
     #: and Start, or a restart, carries on with the sparge instead of asking
     #: again (record()).
     STARTED_PROP = "_sparge_started"
+    #: The pumps already switched off this run of the step for the brewer's
+    #: hoses: "wort" as it starts, "hlt" when the water is ready (record()).
+    HOSES_PROP = "_hoses"
 
     async def SpargeStarted(self, **kwargs):
         step = self.cbpi.step.find_by_id(self.id)
@@ -745,6 +768,10 @@ class SpargeStep(CBPiStep):
         # The mash tun's logic first: stopping PID_HERMS puts back the HLT
         # target it found, and the sparge temperature must come after that.
         await self._stop_mash_tun()
+        if not self._started:
+            # Its hoses go over from recirculating to the runoff.
+            mt = self._mash_tun()
+            await self._hose_off("wort", getattr(mt, "agitator", None) if mt is not None else None)
         # Once the sparge has started the HLT's heat is over: a Stop and Start,
         # or Resume after a restart, leaves it off.
         if self._heats and not self._started:
@@ -763,8 +790,8 @@ class SpargeStep(CBPiStep):
             self.summary = "Waiting for Target Temp" if self._heats else ""
         await self.push_update()
 
-    async def _stop_mash_tun(self):
-        """Switch the mash tun's AUTO off, so its HERMS stops and its pump is the brewer's."""
+    def _mash_tun(self):
+        """The mash tun: Mash_Tun, else as the hltpump extension finds it; never the HLT."""
         mt_id = self.props.get("Mash_Tun", None)
         mt = self.get_kettle(mt_id) if mt_id else None
         if mt is None:
@@ -772,9 +799,14 @@ class SpargeStep(CBPiStep):
                 from cbpi.extension.hltpump import kettle_roles
 
                 mt = kettle_roles(self.cbpi)["mt"]
-            except Exception:  # noqa: BLE001 - nothing to stop then
+            except Exception:  # noqa: BLE001 - none then
                 mt = None
-        if mt is None or mt is self.kettle:
+        return None if mt is None or mt is self.kettle else mt
+
+    async def _stop_mash_tun(self):
+        """Switch the mash tun's AUTO off, so its HERMS stops and its pump is the brewer's."""
+        mt = self._mash_tun()
+        if mt is None:
             return
         instance = getattr(mt, "instance", None)
         if instance is None or getattr(instance, "state", False) is not True:
@@ -805,13 +837,20 @@ class SpargeStep(CBPiStep):
         text = str(int(value)) if value == int(value) else "{:.1f}".format(value)
         return "{} °{}".format(text, "F" if unit.startswith("F") else "C")
 
-    def _ask_ready(self, heated=True):
-        """The sparge water is ready - or nothing heats it: ask, on every page, until Sparge started."""
+    async def _ask_ready(self, heated=True):
+        """The sparge water is ready - or nothing heats it: the HLT pump off for
+        its hose, then ask, on every page, until Sparge started."""
         self._asked = True
         self.summary = ""
+        await self._hose_off("hlt", self._hlt_pump_id())
+        pumps = SPARGE_PUMPS_OFF.get(self._pumps_off(), "")
         text = str(self.props.get("Notification", "") or "").strip()
-        if not text:
-            text = SPARGE_READY_TEXT.format(temp=self._degrees()) if heated else SPARGE_NOW_TEXT
+        if text:
+            text = "{} {}.".format(text, pumps[:1].upper() + pumps[1:]) if pumps else text
+        elif heated:
+            text = SPARGE_READY_TEXT.format(temp=self._degrees(), pumps=", and " + pumps if pumps else "")
+        else:
+            text = SPARGE_NOW_TEXT.format(pumps=pumps[:1].upper() + pumps[1:] + ". " if pumps else "")
         # Kept for a page opened later; taken down when the step is paused or
         # ends, and asked again when it starts again.
         _kept_for(self, self.cbpi.notify(
@@ -819,6 +858,51 @@ class SpargeStep(CBPiStep):
             action=[NotificationAction("Sparge started", self.SpargeStarted)],
             **_keep(self.cbpi),
         ), "sparge")
+
+    def _hlt_pump_id(self):
+        """The HLT's pump: its kettle's agitator, else the HLT's as the hltpump extension finds it."""
+        if self.kettle is not None:
+            return getattr(self.kettle, "agitator", None) or None
+        try:
+            from cbpi.extension.hltpump import find_hlt
+
+            hlt = find_hlt(self.cbpi)
+        except Exception:  # noqa: BLE001 - none then
+            return None
+        return getattr(hlt, "agitator", None) or None if hlt is not None else None
+
+    async def _hose_off(self, which, pump_id):
+        """Switch a pump off for the brewer to move its hose: once a run of the
+        step, whether or not it was running. True if it was switched off."""
+        done = list(self.props.get(self.HOSES_PROP, None) or [])
+        if which in done:
+            return False
+        await self.record(self.HOSES_PROP, done + [which])
+        if not pump_id:
+            return False
+        try:
+            from cbpi.extension.hltpump import pump_off
+
+            switched = await pump_off(self.cbpi, pump_id)
+        except Exception as e:  # noqa: BLE001 - the sparge goes on
+            logging.error("Sparge: could not switch the %s pump off: %s", which, e)
+            return False
+        if switched:
+            logging.info("Sparge: the %s pump is off, for the brewer to move its hose", which)
+        return switched
+
+    def _pumps_off(self):
+        """Which of the HLT pump and the wort pump are off now, as a key of SPARGE_PUMPS_OFF."""
+        mt = self._mash_tun()
+        found = (("hlt", self._hlt_pump_id()), ("wort", getattr(mt, "agitator", None) if mt is not None else None))
+        off = []
+        for which, pump_id in found:
+            pump = self.cbpi.actor.find_by_id(pump_id) if pump_id else None
+            if pump is not None and getattr(getattr(pump, "instance", None), "state", False) is not True:
+                off.append(which)
+        if len(off) == 2 and found[0][1] == found[1][1]:
+            return ("wort",)
+        return tuple(off)
 
     async def _start_sparge(self, resumed=False):
         self._started = True
@@ -853,11 +937,12 @@ class SpargeStep(CBPiStep):
         await self._hlt_auto(False)
         if getattr(self, "_heats", False):
             self.kettle.target_temp = 0
-        if self.STARTED_PROP in self.props:
-            try:
-                del self.props[self.STARTED_PROP]
-            except Exception:  # noqa: BLE001
-                self.props[self.STARTED_PROP] = False
+        for prop in (self.STARTED_PROP, self.HOSES_PROP):
+            if prop in self.props:
+                try:
+                    del self.props[prop]
+                except Exception:  # noqa: BLE001
+                    self.props[prop] = None
         self.cbpi.notify(self.name, "Step finished", NotificationType.SUCCESS)
         self.clear_progress()
         await self.next()
@@ -886,13 +971,13 @@ class SpargeStep(CBPiStep):
             if not self._heats or not sensor:
                 # Nothing heated, or nothing to read it with: the sparge is the
                 # brewer's at once, with no word of a temperature.
-                self._ask_ready(heated=False)
+                await self._ask_ready(heated=False)
                 await self.push_update()
                 continue
             value = self.get_sensor_value(sensor).get("value")
             self.note_heat_progress(value, self.temp)
             if self.target_reached(value, self.temp):
-                self._ask_ready()
+                await self._ask_ready()
                 await self.push_update()
         return StepResult.DONE
 
@@ -1491,6 +1576,10 @@ class BoilStep(CBPiStep):
     #: Add ... for first wort"), so its start does not. A restart during the
     #: hold asks again, in the hold.
     FIRST_WORT_HELD_PROP = "_first_wort_held"
+    #: The runoff's pumps were switched off as the brewer started the boil
+    #: (_runoff_over), once a brew: a Stop and Start mid-boil leaves alone a
+    #: pump the brewer has since started.
+    RUNOFF_OFF_PROP = "_runoff_pumps_off"
 
     def _hops_done(self):
         done = self.props.get(self.HOPS_DONE_PROP, None) or []
@@ -1589,6 +1678,7 @@ class BoilStep(CBPiStep):
             )
             return
         self.transfer_confirmed = True
+        await self._runoff_over()
         if self.kettle is not None:
             self.kettle.target_temp = float(self.props.get("Temp", 0))
         if self.AutoMode == True:
@@ -1625,6 +1715,39 @@ class BoilStep(CBPiStep):
         """
         return self.get_config_value("CONFIRM_BEFORE_BOIL", "Yes") != "No"
 
+    def _has_wort_pump(self):
+        """Is there a wort pump - the mash tun's - for starting the boil to switch off?"""
+        try:
+            from cbpi.extension.hltpump import kettle_roles
+
+            mt = kettle_roles(self.cbpi)["mt"]
+        except Exception:  # noqa: BLE001
+            return False
+        return mt is not None and bool(getattr(mt, "agitator", None))
+
+    async def _runoff_over(self):
+        """The brewer has said the wort is in the boil kettle - Start the boil,
+        Start, or Wort transferred - so the runoff is over: the wort pump and
+        the HLT pump go off, whichever run, once a brew. Their hoses can then
+        be moved for the chill during the boil (Scott, 11 Nov: "Any time I need
+        to change hoses or "valves" that respective pump should be off"; M71).
+        Never raises: the boil starts whatever this does."""
+        if self.props.get(self.RUNOFF_OFF_PROP, False):
+            return
+        await self.record(self.RUNOFF_OFF_PROP, True)
+        try:
+            from cbpi.extension.hltpump import runoff_pumps_off
+
+            done = await runoff_pumps_off(self.cbpi)
+        except Exception as e:  # noqa: BLE001
+            logging.warning("%s: could not switch the runoff's pumps off: %s", self.name, e)
+            return
+        if done:
+            words = " and ".join(done)
+            self.cbpi.notify(self.name, "{} {} off, so you can move {} hoses.".format(
+                words[:1].upper() + words[1:], "are" if len(done) > 1 else "is",
+                "their" if len(done) > 1 else "its"), NotificationType.INFO)
+
     def wait_for_brewer(self):
         """Why the profile should stop before this step until the brewer starts
         it, as (message, button) - or None to start it like any other step.
@@ -1645,8 +1768,10 @@ class BoilStep(CBPiStep):
         return (
             "Ready to boil? " + first + " - the dashboard "
             "is yours meanwhile. The boil kettle stays off until you press Start "
-            "the boil, or Start on the Brew Steps page. (Set CONFIRM_BEFORE_BOIL to "
-            "No to go straight on.)",
+            "the boil, or Start on the Brew Steps page." + (
+                " That also switches the wort pump off, so you can move its hoses."
+                if self._has_wort_pump() else "") +
+            " (Set CONFIRM_BEFORE_BOIL to No to go straight on.)",
             "Start the boil",
         )
 
@@ -1715,6 +1840,9 @@ class BoilStep(CBPiStep):
 
         if self.transfer_confirmed:
             self.summary = "Waiting for Target Temp"
+            if self._needs_transfer_confirmation():
+                # Started by the brewer, who has said where the wort is.
+                await self._runoff_over()
             if self.AutoMode == True:
                 await self.setAutoMode(True)
         else:
@@ -1724,7 +1852,9 @@ class BoilStep(CBPiStep):
             _kept_for(self, self.cbpi.notify(
                 self.name,
                 "Is the wort in the boil kettle? Nothing will be heated until "
-                "you confirm. (Set CONFIRM_BEFORE_BOIL to No to skip this.)",
+                "you confirm." + (" That also switches the wort pump off, so you "
+                                  "can move its hoses." if self._has_wort_pump() else "") +
+                " (Set CONFIRM_BEFORE_BOIL to No to skip this.)",
                 NotificationType.WARNING,
                 action=[NotificationAction("Wort transferred",
                                            self.confirm_transfer)],

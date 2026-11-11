@@ -68,6 +68,12 @@ class UploadController:
     #: Minutes of whirlpool when the recipe gives no steep time.
     DEFAULT_WHIRLPOOL_MINUTES = 15
 
+    #: The Mash Out an import adds before a sparge step when the recipe has
+    #: none (AddMashOutStep; Scott, 11 Nov): the mash to 168 F, 76 C, for 10
+    #: minutes.
+    MASH_OUT_TEMP = {"C": 76, "F": 168}
+    MASH_OUT_MINUTES = 10
+
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.logger = logging.getLogger(__name__)
@@ -134,6 +140,7 @@ class UploadController:
             if error is not None:
                 return self._not_imported(
                     "The {} recipe was not imported: {}.".format(label, error))
+            staged["steps"] = self._with_mash_out(staged["steps"])
             try:
                 await self.cbpi.step.load_recipe({
                     "basic": {"name": staged["name"],
@@ -2058,6 +2065,8 @@ class UploadController:
             self.boilid = self.id
         # If next parameter is Yes, MashIn Ste will be added before first mash step if not included in recipe
         self.addmashin = self.cbpi.config.get("AddMashInStep", "Yes")
+        # Yes: a Mash Out before a sparge step, if the recipe has none (_with_mash_out).
+        self.addmashout = self.cbpi.config.get("AddMashOutStep", "Yes")
 
         try:
             self.kettle = self.cbpi.kettle.find_by_id(self.id)
@@ -2157,6 +2166,71 @@ class UploadController:
             logging.warning("Could not make '%s' a sparge step: %s",
                             (step_string or {}).get("name") if isinstance(step_string, dict) else "?", e)
             return step_string
+
+    def _with_mash_out(self, steps):
+        """The recipe's steps with a Mash Out before its sparge step, if it has none.
+
+        Scott, 11 Nov: a Sparge that came in as a mash rest at 168 F did a mash
+        out through the HERMS; as a SpargeStep (_as_sparge) it heats only the
+        HLT. Asked whether imports should add a 10-minute Mash Out at 168 F when
+        the recipe has none, he chose yes. So with AddMashOutStep Yes, a recipe
+        with a steps_sparge step - a SpargeStep, not a mash rest - after a mash
+        step, and before it no step named for a mash out (StepController.
+        _ends_mash) and no rest already as hot, gets one right before the
+        sparge: a mash step on the mash tun at MASH_OUT_TEMP for
+        MASH_OUT_MINUTES. Heating the mash through the coil leaves the HLT hot
+        too, so the sparge water is ready almost at once. Never raises: the
+        steps then come in as they were.
+        """
+        try:
+            if str(getattr(self, "addmashout", "Yes")) != "Yes":
+                return steps
+            mash = getattr(self, "mash", None) or "MashStep"
+            mashin = getattr(self, "mashin", None) or "MashInStep"
+            sparge = getattr(self, "sparge", None) or "SpargeStep"
+            if sparge == mash:
+                return steps
+            at = next((i for i, s in enumerate(steps) if s.get("type") == sparge), None)
+            if at is None:
+                return steps
+            from types import SimpleNamespace
+
+            from cbpi.controller.step_controller import StepController
+
+            before = steps[:at]
+            if any(StepController._ends_mash(SimpleNamespace(name=s.get("name"))) for s in before):
+                return steps
+            temps = []
+            for s in before:
+                if s.get("type") in (mash, mashin):
+                    try:
+                        temps.append(float((s.get("props") or {}).get("Temp")))
+                    except (TypeError, ValueError):
+                        pass
+            unit = "F" if str(getattr(self, "TEMP_UNIT", "C")).upper().startswith("F") else "C"
+            temp = self.MASH_OUT_TEMP[unit]
+            if not temps or max(temps) >= temp:
+                return steps
+            kettle = getattr(self, "kettle", None)
+            mash_out = {
+                "name": "Mash Out",
+                "props": {
+                    "AutoMode": self.AutoMode,
+                    "Kettle": self.id,
+                    "Sensor": getattr(kettle, "sensor", None) if kettle is not None else None,
+                    "Temp": self._format_temp(temp),
+                    "Timer": str(self.MASH_OUT_MINUTES),
+                    "Notification": "",
+                },
+                "status_text": "",
+                "status": "I",
+                "type": mash,
+            }
+            logging.info("Import: a Mash Out at %s %s before '%s'", temp, unit, steps[at].get("name"))
+            return steps[:at] + [mash_out] + steps[at:]
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not add a Mash Out to the imported recipe: %s", e)
+            return steps
 
     # function to create json to be send to api to add a step to the current mash profile. Currently all properties are send to each step which does not cuase an issue
     async def create_step(self, step_string):

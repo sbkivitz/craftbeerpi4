@@ -1445,6 +1445,16 @@ class StepController:
         r"(?:sparge|sparging|lauter|lautering|run ?off)(?: |$)")
     _NOT_RUNOFF = re.compile(
         r"\b(?:water|heat|heating|prepare|preparation|salts|treatment)\b")
+    #: A step that ends the mash, by its name: the names BrewScribe reads for it
+    #: and the BeerSmith guide asks for - Mash Out, Mashout, Mash-Out, End of
+    #: Mash - and MMuM's MashOut.
+    _MASH_OUT_NAME = re.compile(r"^(?:step \d+ )?(?:mash ?out|end of mash)(?: |$)")
+
+    @staticmethod
+    def _plain_name(step):
+        """A step's name in lower case, its words split: "MashOut" -> "mash out"."""
+        name = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(getattr(step, "name", "") or ""))
+        return re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
 
     @classmethod
     def _collects_wort(cls, step):
@@ -1454,9 +1464,13 @@ class StepController:
         # A SpargeStep is the runoff whatever it is called (Scott, 10 Nov).
         if getattr(step, "type", None) == "SpargeStep":
             return True
-        name = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(getattr(step, "name", "") or ""))
-        name = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+        name = cls._plain_name(step)
         return bool(cls._RUNOFF_NAME.match(name)) and not cls._NOT_RUNOFF.search(name)
+
+    @classmethod
+    def _ends_mash(cls, step):
+        """Is `step` a mash out, by its name?"""
+        return bool(cls._MASH_OUT_NAME.match(cls._plain_name(step)))
 
     def _first_wort_at_runoff(self, step):
         """Ask for the boil's first-wort hops as the runoff to the boil kettle starts.

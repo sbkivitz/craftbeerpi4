@@ -35,15 +35,22 @@ So, on the server, with no page open too:
   done, counts as none.
 - HLT_PUMP_WITH_HEAT = No turns all of this off.
 
-And whatever the setting, a warning as the runoff step ends. Walking Test
-Recipe v5 through on the simulator for Scott (9 Nov: "analyze which pumps are
-turned on and why"): the Sparge step runs the mash tun's HERMS, which runs the
-wort pump - in his fly sparge, the runoff to the boil kettle. When the step's
-time is up the HERMS stops, and the wort pump with it, while the HLT pump runs
-on, sending sparge water to the mash tun with nothing taking wort out. So when
-a step named for the runoff ends with the HLT pump running and the wort pump
-(the mash tun's agitator) off, a prompt says so on every page. It switches
-nothing, and goes once the wort pump is running again or the HLT pump is off.
+And whatever the setting, the HLT pump is switched off as the runoff ends.
+Walking Test Recipe v5 through on the simulator for Scott (9 Nov: "analyze
+which pumps are turned on and why") found the HLT pump running on after the
+Sparge step's time was up, sending sparge water to the mash tun with nothing
+taking wort out, and a kept warning said so (M60). Scott, 11 Nov: "Any time I
+need to change hoses or "valves" that respective pump should be off", and he
+chose the HLT pump off both when the sparge water is ready (SpargeStep) and
+when the sparge ends. So when the last step named for the runoff ends - its
+time up, or NEXT - with the HLT pump running, it is switched off and a
+notification says so (M71). The wort pump is left as it is, to finish
+draining the mash tun; starting the boil switches it off (BoilStep). A
+runoff step followed by another - Sparge, then Lautering - is one runoff. A
+Stop is a pause, and leaves both pumps as they are.
+
+The steps switch pumps off for the brewer's hoses through pump_off and
+runoff_pumps_off below.
 
 The HLT is found as the brew-day screen finds it (brewday/live.js
 kettleRoles): the kettle the mash tun's HERMS works on - its HLT_Kettle, else
@@ -76,10 +83,12 @@ CHECK_TEXT = ("The HLT pump will start when the heating does, and nobody may be 
               "open to recirculate the HLT. ({} in Settings)")
 STARTED_TEXT = ("Switched on with the HLT heat, to keep the water from settling into hot "
                 "and cool layers. Check its valves are set to recirculate the HLT. ({} in Settings)")
-RUNOFF_TITLE = "HLT pump still running"
-RUNOFF_TEXT = ("{} has ended. The wort pump is off, but the HLT pump is still running. If it is "
-               "still sending sparge water to the mash tun, the mash tun will fill up: switch the "
-               "wort pump on to keep the runoff going, or stop the HLT pump.")
+RUNOFF_TITLE = "HLT pump"
+RUNOFF_OFF_TEXT = "{} has ended, so the HLT pump is off."
+RUNOFF_WORT_TEXT = "The wort pump is still running, to finish draining the mash tun."
+RUNOFF_FAILED_TITLE = "HLT pump still running"
+RUNOFF_FAILED_TEXT = ("{} has ended, but the HLT pump could not be switched off. If it is still sending "
+                      "sparge water to the mash tun, the mash tun will fill up: stop it by hand.")
 
 
 def _setting(cbpi, key, default=None):
@@ -188,14 +197,31 @@ def hlt_pump(cbpi):
     return hlt, pump_id
 
 
-def runoff_pumps(cbpi):
-    """(the HLT pump's id, the wort pump's id) - the HLT's agitator and the mash
-    tun's - if both are there and are two pumps; else None."""
+async def pump_off(cbpi, pump_id):
+    """Switch a pump off if it is running. True if it was, and the switch
+    answered; never raises."""
+    pump = cbpi.actor.find_by_id(pump_id) if pump_id else None
+    if pump is None or not _on(pump):
+        return False
+    try:
+        return await cbpi.actor.off(pump_id) is not False
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not switch %s off: %s", getattr(pump, "name", pump_id), e)
+        return False
+
+
+async def runoff_pumps_off(cbpi):
+    """The runoff is over: switch the wort pump (the mash tun's agitator) and
+    the HLT pump (the HLT's) off, whichever are running, so the brewer can move
+    their hoses. The boil kettle's own pump is left alone. Returns the words
+    for those switched off, the wort pump first."""
     roles = kettle_roles(cbpi)
-    hlt, mt = roles["hlt"], roles["mt"]
-    hp = getattr(hlt, "agitator", None) if hlt is not None else None
-    wp = getattr(mt, "agitator", None) if mt is not None else None
-    return (hp, wp) if hp and wp and hp != wp else None
+    done = []
+    for word, kettle in (("the wort pump", roles["mt"]), ("the HLT pump", roles["hlt"])):
+        pump_id = getattr(kettle, "agitator", None) if kettle is not None else None
+        if pump_id and await pump_off(cbpi, pump_id):
+            done.append(word)
+    return done
 
 
 class HLTPumpWithHeat(CBPiExtension):
@@ -203,8 +229,8 @@ class HLTPumpWithHeat(CBPiExtension):
     def __init__(self, cbpi, watch=True):
         self.cbpi = cbpi
         self._source = None
-        # The warning given as the runoff step ended: (notification id, HLT pump, wort pump), or None.
-        self._runoff_warning = None
+        # The switch-off as the runoff ends, while it runs: for a test to wait on.
+        self._runoff_task = None
         add = getattr(getattr(cbpi, "step", None), "add_listener", None)
         if callable(add):
             add(self.step_event)
@@ -227,8 +253,7 @@ class HLTPumpWithHeat(CBPiExtension):
 
     async def look(self):
         """Switch the HLT pump on if the HLT has just started heating, before the
-        sparge; and take the runoff warning down once it no longer applies."""
-        self._check_runoff_warning()
+        sparge."""
         if not self.enabled():
             self._source = None
             return
@@ -255,8 +280,8 @@ class HLTPumpWithHeat(CBPiExtension):
         itself - ask for the HLT pump and its valves to be checked, kept on
         every page until answered, or until that step is stopped or over.
 
-        When a step named for the runoff ends, warn if the HLT pump is still
-        running with the wort pump off (see the module's notes)."""
+        When a step named for the runoff ends, and the next step is not one,
+        switch the HLT pump off (see the module's notes)."""
         if event == "step_done":
             self._runoff_ended(snapshot or {})
             return
@@ -275,6 +300,8 @@ class HLTPumpWithHeat(CBPiExtension):
             keep(step_id, "hlt-pump-check", notification_id)
 
     def _runoff_ended(self, snapshot):
+        """A step named for the runoff has ended: switch the HLT pump off, unless
+        the next step carries the runoff on."""
         step_id = snapshot.get("step_id")
         step = next((s for s in snapshot.get("steps") or [] if s.get("id") == step_id), None)
         collects = getattr(getattr(self.cbpi, "step", None), "_collects_wort", None)
@@ -282,44 +309,40 @@ class HLTPumpWithHeat(CBPiExtension):
             return
         if not collects(types.SimpleNamespace(name=step.get("name"), type=step.get("type"))):
             return
-        pumps = runoff_pumps(self.cbpi)
-        if pumps is None or not self._runoff_risk(pumps):
+        if self._runoff_goes_on(step_id, collects):
             return
-        self._retire_runoff_warning()
-        notification_id = self.cbpi.notify(
-            RUNOFF_TITLE, RUNOFF_TEXT.format(step.get("name") or "The runoff step"), NotificationType.WARNING,
-            action=[NotificationAction("OK")], keep=True)
-        if notification_id:
-            self._runoff_warning = (notification_id, *pumps)
+        self._runoff_task = asyncio.ensure_future(self._end_runoff(step.get("name") or "The runoff step"))
 
-    def _runoff_risk(self, pumps):
-        """The HLT pump running and the wort pump not."""
-        hp, wp = (self.cbpi.actor.find_by_id(p) for p in pumps)
-        return hp is not None and wp is not None and _on(hp) and not _on(wp)
-
-    def _check_runoff_warning(self):
-        """Forget the runoff warning once answered; take it down once the pumps
-        no longer leave the mash tun filling, or a new brew has started."""
-        if self._runoff_warning is None:
-            return
-        notification_id, hp, wp = self._runoff_warning
-        waiting = getattr(getattr(self.cbpi, "notification", None), "waiting_prompts", None)
-        if callable(waiting) and notification_id not in (waiting() or []):
-            self._runoff_warning = None
-            return
+    def _runoff_goes_on(self, step_id, collects):
+        """Is the step after `step_id` in the profile also named for the runoff?"""
         profile = list(getattr(getattr(self.cbpi, "step", None), "profile", None) or [])
-        fresh = all(getattr(s, "status", None) == StepState.INITIAL for s in profile)
-        if fresh or not self._runoff_risk((hp, wp)):
-            self._retire_runoff_warning()
+        index = next((i for i, s in enumerate(profile) if getattr(s, "id", None) == step_id), None)
+        if index is None or index + 1 >= len(profile):
+            return False
+        try:
+            return bool(collects(profile[index + 1]))
+        except Exception:  # noqa: BLE001 - unknown: the runoff is taken as over
+            return False
 
-    def _retire_runoff_warning(self):
-        if self._runoff_warning is None:
-            return
-        notification_id = self._runoff_warning[0]
-        self._runoff_warning = None
-        retire = getattr(getattr(self.cbpi, "notification", None), "retire", None)
-        if callable(retire):
-            retire(notification_id)
+    async def _end_runoff(self, name):
+        try:
+            _, pump_id = hlt_pump(self.cbpi)
+            pump = self.cbpi.actor.find_by_id(pump_id) if pump_id else None
+            if pump is None or not _on(pump):
+                return
+            logger.info("HLT pump off: %s has ended, so the runoff is over", name)
+            if not await pump_off(self.cbpi, pump_id):
+                self.cbpi.notify(RUNOFF_FAILED_TITLE, RUNOFF_FAILED_TEXT.format(name), NotificationType.WARNING,
+                                 action=[NotificationAction("OK")], keep=True)
+                return
+            text = RUNOFF_OFF_TEXT.format(name)
+            mt = kettle_roles(self.cbpi)["mt"]
+            wort = self.cbpi.actor.find_by_id(mt.agitator) if mt is not None and mt.agitator else None
+            if wort is not None and _on(wort):
+                text += " " + RUNOFF_WORT_TEXT
+            self.cbpi.notify(RUNOFF_TITLE, text, NotificationType.INFO)
+        except Exception as e:  # noqa: BLE001 - the brew goes on whatever this does
+            logger.warning("HLT pump: could not switch it off as the runoff ended: %s", e)
 
 
 def setup(cbpi):
