@@ -129,6 +129,8 @@ class CBPiWebSocket:
         # The brew-day screen's rest timer: a screen opened mid-rest counts down
         # with the others from its first message.
         add("resttimer", lambda: self.cbpi.resttimer.get_state())
+        # Its timers, the same way: a screen opened while one counts down shows it at once.
+        add("timers", lambda: self.cbpi.timers.get_state())
         # Prompts. First which ones still wait for an answer: a page drops any
         # other it shows - left from before a restart, its buttons now doing
         # nothing. Then the ones kept for every page (notify(keep=True)), shown

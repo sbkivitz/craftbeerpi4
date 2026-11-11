@@ -55,6 +55,7 @@ class SystemHttpEndpoints:
                 config=self.cbpi.config.get_state(),
                 notifications=self.cbpi.notification.get_state(),
                 resttimer=self.cbpi.resttimer.get_state(),
+                timers=self.cbpi.timers.get_state(),
                 bf_recipes=await self.cbpi.upload.get_brewfather_recipes(0),
                 version=__version__,
                 spindledata=spindledata,

@@ -79,6 +79,7 @@ class ConfigUpdate(CBPiExtension):
         ActorInterlockMode = self.cbpi.config.get("ACTOR_INTERLOCK_MODE", None)
         ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", None)
         BrewdayOverrideActor = self.cbpi.config.get("BREWDAY_OVERRIDE_ACTOR", None)
+        BrewdayTimerNames = self.cbpi.config.get("BREWDAY_TIMER_NAMES", None)
         HltPumpWithHeat = self.cbpi.config.get("HLT_PUMP_WITH_HEAT", None)
         MASH_TUN = self.cbpi.config.get("MASH_TUN", None)
         AutoMode = self.cbpi.config.get("AutoMode", None)
@@ -1046,6 +1047,25 @@ class ConfigUpdate(CBPiExtension):
                                 "CraftBeerPi says. The screen then warns that "
                                 "it may still run after it is switched off. "
                                 "(default: None)",
+                    source="craftbeerpi",
+                )
+            except Exception:
+                logging.warning("Unable to update database")
+
+        # The names the brew-day screen offers for a timer (Scott, 11 Nov 2026: "an easy config
+        # setting to choose the default timer names from the setup"). TimersController reads it.
+        if BrewdayTimerNames is None:
+            logging.info("INIT BREWDAY_TIMER_NAMES")
+            try:
+                await self.cbpi.config.add(
+                    "BREWDAY_TIMER_NAMES",
+                    "Hop stand, Yeast, Vorlauf",
+                    type=ConfigType.STRING,
+                    description="Brew-day screen: the names it offers for a "
+                                "timer, separated by commas. Any timer can "
+                                "still be given another name on brew day. "
+                                "Blank offers none. (default: Hop stand, "
+                                "Yeast, Vorlauf)",
                     source="craftbeerpi",
                 )
             except Exception:
