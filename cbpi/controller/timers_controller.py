@@ -156,7 +156,7 @@ class TimersController:
             raise ValueError(f"A timer's time is 1 to {self.MAX_SET // 60} minutes.")
         return seconds
 
-    def _name(self, value, fallback: str) -> str:
+    def _name(self, value, fallback: str, t: Timer = None) -> str:
         if value is None:
             return fallback
         if not isinstance(value, str):
@@ -166,11 +166,20 @@ class TimersController:
             return fallback
         if len(name) > self.NAME_LEN:
             raise ValueError(f"A timer's name is {self.NAME_LEN} characters at most.")
+        twin = self._twin(name, t)
+        if twin is not None:
+            raise TimerRefused(f"Another timer is already called {twin.name}. Give this one another name, "
+                               "so you can tell their alarms apart.")
         return name
+
+    def _twin(self, name: str, t: Timer = None):
+        """Another timer of this name, whatever its capitals: two alarms titled alike are hard to tell apart."""
+        key = name.casefold()
+        return next((z for z in self.timers if z is not t and z.name.casefold() == key), None)
 
     def _default_name(self) -> str:
         n = len(self.timers) + 1
-        while any(t.name == f"Timer {n}" for t in self.timers):
+        while self._twin(f"Timer {n}") is not None:
             n += 1
         return f"Timer {n}"
 
@@ -262,7 +271,7 @@ class TimersController:
         or paused changes its time left with add_time; one whose alarm waits is answered
         by a new time and stopped at it."""
         t = self._find(ident)
-        new_name = self._name(name, t.name)
+        new_name = self._name(name, t.name, t)
         if seconds is not None:
             seconds = self._own_time(seconds)
             if t.state in ("running", "paused"):
