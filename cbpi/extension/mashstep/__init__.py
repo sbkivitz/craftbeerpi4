@@ -978,13 +978,14 @@ class WhirlpoolStep(WaitStep):
     Now, if the wort falls more than 2 C / 3.6 F below Temp, the brewer is
     asked, once a stand, in a prompt kept until it is answered: heat it back
     and hold it there until the stand ends? Heat and hold sets a hold on the
-    kettle's logic - BoilPower's Hold a temperature where the logic has one,
-    the kettle's target where it has not - and then switches the logic on: in
-    that order, so BoilPower never runs a moment without its hold, which would
-    be a boil. When the stand ends, or is stopped or skipped, the logic is
-    switched off and then the hold cleared, so the chill that follows starts
-    with the element off. Stopped and started again, the stand holds again
-    without asking.
+    kettle's logic - its Hold a temperature where the logic has one, else the
+    kettle's target, as for BoilPower from 0.0.3.post7 - and then switches the
+    logic on: in that order, so the logic never runs a moment without its hold,
+    which would be a boil. When the stand ends, or is stopped or skipped, the
+    logic is switched off and then the hold cleared - the target put back to
+    the one the stand found - so the chill that follows starts with the
+    element off, and the kettle switched on later boils. Stopped and started
+    again, the stand holds again without asking.
 
     The stand's time runs on while the wort reheats: the stand lasts what the
     recipe says.
@@ -1002,6 +1003,7 @@ class WhirlpoolStep(WaitStep):
     _hold_wanted = False  # the brewer said Heat and hold
     _holding = False  # this step set the hold and switched the logic on
     _held_by_action = False  # through the logic's Hold a temperature
+    _target_before = None  # the kettle's target before the hold set it
 
     async def on_start(self):
         await super().on_start()
@@ -1032,6 +1034,7 @@ class WhirlpoolStep(WaitStep):
         self._retire_prompt()
         self._asked = self._declined = self._hold_wanted = False
         self._holding = self._held_by_action = False
+        self._target_before = None
 
     def _whirlpool_temp(self):
         """Temp as a number, or None: blank, or unreadable."""
@@ -1152,6 +1155,11 @@ class WhirlpoolStep(WaitStep):
                 if held is False:
                     raise RuntimeError("its logic refused the hold")
             else:
+                # The hold is the kettle's target - BoilPower from 0.0.3.post7,
+                # like PIDBoil and every other logic - so the target the stand
+                # found is kept, to be put back when it ends (_end_hold).
+                if not self._holding:
+                    self._target_before = getattr(kettle, "target_temp", None)
                 await self.cbpi.kettle.set_target_temp(kettle.id, target)
             self._held_by_action = by_action
             instance = getattr(kettle, "instance", None)
@@ -1202,6 +1210,18 @@ class WhirlpoolStep(WaitStep):
                     kettle.id, "set_hold_target", {"Hold_Target": "", "Quiet": True})
             except Exception as e:  # noqa: BLE001
                 logging.warning("%s: could not clear the hold: %s", self.name, e)
+        else:
+            # The hold was the kettle's target: put back the one the stand
+            # found - the boil's, as a rule - after the logic is off, so the
+            # element never heads for a boil on the way. Left at the hold, a
+            # BoilPower kettle switched on later would hold it, perhaps on the
+            # next brew day, instead of boiling.
+            before, self._target_before = self._target_before, None
+            if before is not None:
+                try:
+                    await self.cbpi.kettle.set_target_temp(kettle.id, before)
+                except Exception as e:  # noqa: BLE001
+                    logging.warning("%s: could not put the target back: %s", self.name, e)
         name = getattr(kettle, "name", None) or "The kettle"
         target = self._whirlpool_temp()
         held = ("{} \u00b0{}".format(_fmt_temp(target), self._unit())
