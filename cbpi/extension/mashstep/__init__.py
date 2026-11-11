@@ -1159,7 +1159,10 @@ class WhirlpoolStep(WaitStep):
                 # like PIDBoil and every other logic - so the target the stand
                 # found is kept, to be put back when it ends (_end_hold).
                 if not self._holding:
-                    self._target_before = getattr(kettle, "target_temp", None)
+                    # No target at all goes back as 0, CraftBeerPi's own "no
+                    # target". Kept as None, nothing would be put back, and the
+                    # kettle would still aim at the hold.
+                    self._target_before = getattr(kettle, "target_temp", None) or 0
                 await self.cbpi.kettle.set_target_temp(kettle.id, target)
             self._held_by_action = by_action
             instance = getattr(kettle, "instance", None)
