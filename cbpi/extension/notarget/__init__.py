@@ -30,11 +30,13 @@ logger = logging.getLogger(__name__)
 GRACE = 5
 
 TITLE = "No target for the {}"
-TEXT = ("AUTO is on, but it has no target temperature, so it won't heat. "
-        "Set a target, or switch it to MANUAL.")
+# The dashboard agent's words (10 Nov), as its brew-day mockup shows them:
+# what is wrong first, then what to do.
+TEXT = ("AUTO is on with no target temperature, so it won't heat. "
+        "Set a target, or switch to MANUAL.")
 #: For a mash tun whose logic runs a HERMS: what it heats with is the HLT.
-TEXT_HERMS = ("AUTO is on, but it has no target temperature, so the HLT won't heat for it. "
-              "Set a target, or switch it to MANUAL.")
+TEXT_HERMS = ("AUTO is on with no target temperature, so the HLT won't heat. "
+              "Set a target, or switch to MANUAL.")
 
 
 def has_no_target(kettle):
