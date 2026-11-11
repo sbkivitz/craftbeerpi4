@@ -99,16 +99,17 @@ class TimersController:
     # -- what every screen is told --------------------------------------------------------
 
     def names(self):
-        """The names the screen offers for a timer, from the TIMER_NAMES setting.
+        """The names the screen offers for a timer, from the BREWDAY_TIMER_NAMES setting.
 
         A list separated by commas; blank gives none. Each is trimmed and kept to
-        a name's length; repeats are dropped."""
+        a name's length; repeats are dropped. Read as the setting is kept, not with
+        config.get(), which takes a blank setting for a missing one: Scott's blank
+        list would offer the usual names again."""
         try:
-            raw = self.cbpi.config.get(self.NAMES_SETTING, None)
-        except Exception:  # noqa: BLE001 - a setting that can't be read offers the usual names
-            raw = None
-        if raw is None:
-            raw = self.NAMES_DEFAULT
+            entry = self.cbpi.config.cache.get(self.NAMES_SETTING)
+        except Exception:  # noqa: BLE001 - settings that can't be read offer the usual names
+            entry = None
+        raw = self.NAMES_DEFAULT if entry is None or entry.value is None else entry.value
         names = []
         for part in str(raw).split(","):
             name = " ".join(part.split())[: self.NAME_LEN].strip()

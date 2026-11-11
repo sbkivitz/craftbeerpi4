@@ -79,7 +79,6 @@ class ConfigUpdate(CBPiExtension):
         ActorInterlockMode = self.cbpi.config.get("ACTOR_INTERLOCK_MODE", None)
         ConfirmBeforeBoil = self.cbpi.config.get("CONFIRM_BEFORE_BOIL", None)
         BrewdayOverrideActor = self.cbpi.config.get("BREWDAY_OVERRIDE_ACTOR", None)
-        BrewdayTimerNames = self.cbpi.config.get("BREWDAY_TIMER_NAMES", None)
         HltPumpWithHeat = self.cbpi.config.get("HLT_PUMP_WITH_HEAT", None)
         MASH_TUN = self.cbpi.config.get("MASH_TUN", None)
         AutoMode = self.cbpi.config.get("AutoMode", None)
@@ -1054,18 +1053,21 @@ class ConfigUpdate(CBPiExtension):
 
         # The names the brew-day screen offers for a timer (Scott, 11 Nov 2026: "an easy config
         # setting to choose the default timer names from the setup"). TimersController reads it.
-        if BrewdayTimerNames is None:
+        # Added only when it isn't there: config.get() takes a blank setting for a missing one,
+        # and adding it again would put the usual names back over Scott's blank list.
+        if "BREWDAY_TIMER_NAMES" not in self.cbpi.config.cache:
             logging.info("INIT BREWDAY_TIMER_NAMES")
             try:
                 await self.cbpi.config.add(
                     "BREWDAY_TIMER_NAMES",
                     "Hop stand, Yeast, Vorlauf",
                     type=ConfigType.STRING,
-                    description="Brew-day screen: the names it offers for a "
-                                "timer, separated by commas. Any timer can "
-                                "still be given another name on brew day. "
-                                "Blank offers none. (default: Hop stand, "
-                                "Yeast, Vorlauf)",
+                    description="Brew-day screen: names to pick with one tap "
+                                "when you add or change a timer, separated by "
+                                "commas, up to 24 characters each. The first "
+                                "six show, in this order. You can still type "
+                                "any name on brew day. Blank shows none. "
+                                "(default: Hop stand, Yeast, Vorlauf)",
                     source="craftbeerpi",
                 )
             except Exception:
