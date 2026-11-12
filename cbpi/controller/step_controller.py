@@ -1038,11 +1038,26 @@ class StepController:
             await self.start_step(step, by_brewer=by_brewer)
             await self.save()
             return
-        self.cbpi.notify(
-            "Brewing Complete",
-            "Now the yeast will take over",
-            action=[NotificationAction("OK")],
-        )
+        # Kept, as the steps' own questions are, so a page opened after the
+        # brew - a phone, or the monitor reloaded - is shown it too: the
+        # brew-day screen's line for it said "waiting for you", and its title
+        # bar "No alarms", with nothing to answer it with (DEFECTS M81). Until
+        # OK, Reset or another recipe.
+        last = self.profile[-1] if self.profile else None
+        if last is not None:
+            self._ask_kept(
+                "complete", last, lambda step: step.status == StepState.DONE,
+                "Brewing Complete",
+                "Now the yeast will take over",
+                NotificationType.INFO,
+                action=[NotificationAction("OK")],
+            )
+        else:
+            self.cbpi.notify(
+                "Brewing Complete",
+                "Now the yeast will take over",
+                action=[NotificationAction("OK")],
+            )
         self.cbpi.push_update(
             topic="cbpi/notification",
             data=dict(
