@@ -1122,7 +1122,7 @@ class ConfigUpdate(CBPiExtension):
                                 "until you answer it; a new message plays its first two beeps. Kitchen timer: four "
                                 "quick, bright beeps. Alarm: a fuller, lower tone, three beeps then two. High beep: "
                                 "three high, pure beeps, the soft ping at full strength. Soft ping: the first sound, "
-                                "quiet. Switching SOUND on at the screen plays it. (default: Kitchen timer)",
+                                "quiet. Switching SOUND on at the screen makes no sound. (default: Kitchen timer)",
                     source="craftbeerpi",
                     options=alarm_options,
                 )
