@@ -131,11 +131,14 @@ class StepHttpEndpoints:
         )
         saved = await self.controller.update(step)
         if saved is None:
-            # Refused: the step is running (DEFECTS M33). The brewer is told
-            # why in a notification; the form stays open with their changes.
+            # Refused: the step is running (DEFECTS M33). The form stays open
+            # with their changes and shows why: these words. The other pages
+            # are told in a warning, which the old pages show for 5 s.
+            existing = self.controller.find_by_id(id)
             return web.json_response(
                 status=409,
-                data=dict(error="Stop the profile before changing a running step"),
+                data=dict(error=self.controller.EDIT_WHILE_RUNNING.format(
+                    existing.name if existing is not None else step.name)),
             )
         return web.json_response(saved.to_dict())
 

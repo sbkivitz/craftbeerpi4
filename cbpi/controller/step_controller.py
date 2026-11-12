@@ -789,11 +789,17 @@ class StepController:
         if existing is not None and existing.status == StepState.ACTIVE:
             logging.warning("Refused to change step '%s' while it runs", existing.name)
             try:
+                # A warning, not a question: it answers whoever made the
+                # change, and the step form shows them why (http_update's
+                # 409). With an OK that told CraftBeerPi nothing, the
+                # brew-day screen logged it as a question waiting for every
+                # screen, and a page reloaded showed that line in amber with
+                # nothing to press (the dashboard agent, 12 Nov, late
+                # afternoon).
                 self.cbpi.notify(
                     existing.name,
                     self.EDIT_WHILE_RUNNING.format(existing.name),
                     NotificationType.WARNING,
-                    action=[NotificationAction("OK")],
                 )
             except Exception as e:  # noqa: BLE001
                 logging.warning("Could not say why the change was refused: %s", e)

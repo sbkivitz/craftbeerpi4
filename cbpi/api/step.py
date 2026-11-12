@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import math
 import time
@@ -263,6 +264,8 @@ class CBPiStep(_TargetArrival, CBPiBase):
         self._stall_anchor_value = None
         self._stall_anchor_at = 0.0
         self._stall_reported = False
+        # "Heating is not working", while it is up: its notification's id.
+        self._stall_prompt = None
 
     def _elapsed_seconds(self):
         """Seconds of this step already run, as recorded by a previous run."""
@@ -349,10 +352,29 @@ class CBPiStep(_TargetArrival, CBPiBase):
                 "Could not record %s for %s: %s", key, getattr(self, "name", "?"), e)
 
     def reset_heat_watch(self):
-        """Forget what the stall watch has seen so far."""
+        """Forget what the stall watch has seen so far, and take down what it
+        said, if that is still up."""
         self._stall_anchor_value = None
         self._stall_anchor_at = 0.0
         self._stall_reported = False
+        self._retire_stall_prompt()
+
+    def _retire_stall_prompt(self):
+        """Take "Heating is not working" down from every page: it no longer
+        applies. The pages are told it was withdrawn, so the brew-day screen's
+        line for it says "no longer needed"."""
+        prompt = getattr(self, "_stall_prompt", None)
+        self._stall_prompt = None
+        if prompt is None:
+            return
+        retire = getattr(getattr(self.cbpi, "notification", None), "retire", None)
+        if retire is None:
+            return
+        try:
+            retire(prompt)
+        except Exception as e:  # noqa: BLE001 - never the reason a step fails
+            logging.getLogger(__name__).debug(
+                "%s: could not take the stalled-heating alert down: %s", getattr(self, "name", "?"), e)
 
     def _heat_is_available(self):
         """Can the vessel's heat source actually deliver right now?
@@ -393,6 +415,13 @@ class CBPiStep(_TargetArrival, CBPiBase):
         legitimately slow heat-up on a cold day keeps re-anchoring and never
         trips. Reports once per stall, not once per second.
 
+        The report waits on every page, open now or opened later, until Keep
+        waiting or Stop the profile is pressed, the wort warms again (a rise,
+        or near target), or the step is stopped or ends: the dashboard agent,
+        12 Nov, late afternoon - a page reloaded while it waited showed its
+        line in amber with nothing to press, and a phone opened later was not
+        told the element had stopped heating the wort.
+
         Returns True if a stall was reported on this call.
         """
         try:
@@ -420,6 +449,9 @@ class CBPiStep(_TargetArrival, CBPiBase):
         # Only the kettle logic knows whether it can deliver heat right now, so
         # it is asked. A logic that does not answer is assumed able, which keeps
         # every directly-heated vessel behaving exactly as before.
+        #
+        # A report already up stays up: the wort has not warmed, and the HLT
+        # falling to the mash is what a dead HLT element looks like.
         if not self._heat_is_available():
             self._stall_anchor_value = value
             self._stall_anchor_at = now
@@ -437,6 +469,7 @@ class CBPiStep(_TargetArrival, CBPiBase):
                     self._stall_anchor_value = value
                     self._stall_anchor_at = now
                     self._stall_reported = False
+                    self._retire_stall_prompt()
                     return False
             except (TypeError, ValueError):
                 pass
@@ -450,6 +483,7 @@ class CBPiStep(_TargetArrival, CBPiBase):
             self._stall_anchor_value = value
             self._stall_anchor_at = now
             self._stall_reported = False
+            self._retire_stall_prompt()
             return False
 
         if self._stall_reported:
@@ -479,7 +513,13 @@ class CBPiStep(_TargetArrival, CBPiBase):
             # breaks startup outright.
             from cbpi.api.dataclasses import NotificationAction, NotificationType
 
-            self.cbpi.notify(
+            notify = self.cbpi.notify
+            try:
+                kept = {"keep": True} if "keep" in inspect.signature(notify).parameters else {}
+            except (TypeError, ValueError):
+                kept = {}
+            self._retire_stall_prompt()
+            prompt = notify(
                 "Heating is not working",
                 message,
                 NotificationType.WARNING,
@@ -487,7 +527,16 @@ class CBPiStep(_TargetArrival, CBPiBase):
                     NotificationAction("Keep waiting"),
                     NotificationAction("Stop the profile", self.cbpi.step.stop),
                 ],
+                **kept,
             )
+            # Handed to the step controller, which takes it down once the step
+            # is no longer running: paused, its buttons do nothing. Start again
+            # gives a fresh window (start), so a kettle still cold is reported
+            # again. One at a time: a new report takes the last one down.
+            self._stall_prompt = prompt
+            keep = getattr(getattr(self.cbpi, "step", None), "keep_step_prompt", None)
+            if prompt is not None and callable(keep):
+                keep(self.id, "heat", prompt)
         except Exception as e:
             self.logger.warning("Could not raise the stalled-heating alert: %s", e)
         return True
@@ -517,6 +566,10 @@ class CBPiStep(_TargetArrival, CBPiBase):
 
     async def start(self):
         self.logger.info("Start {}".format(self.name))
+        # A fresh window each time the step starts. Stop takes "Heating is not
+        # working" down (note_heat_progress), so a step started again with the
+        # kettle still cold must be able to say so again, a full window later.
+        self.reset_heat_watch()
         self.running = True
         self.task = asyncio.create_task(self._run())
         self.task.add_done_callback(self._done)
