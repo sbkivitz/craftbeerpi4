@@ -477,15 +477,11 @@ class SystemController:
         #     if (data.meminfo.availmem < data.meminfo.minmem)
         #         window.location.reload(true);
         #
-        # An earlier version of this method bound `meminfo` only on the success
-        # path inside a block ending in `except: pass`, so a failed read raised
-        # UnboundLocalError and the endpoint returned 500. Binding it first
-        # fixed the crash and introduced a worse fault: the fallback carried
-        # availmem = 0, and 0 < 200, so an *unknown* statistic was read as
-        # genuinely exhausted memory and forced a page reload - every five
-        # minutes for as long as the fault lasted, discarding whatever the
-        # brewer had on screen. On a rig that can include an unanswered
-        # notification or a prompt waiting on them.
+        # A fallback of availmem = 0 would be read as genuinely exhausted
+        # memory, since 0 < 200, and force a page reload - every five minutes
+        # for as long as the fault lasted, discarding whatever the brewer had
+        # on screen. On a rig that can include an unanswered notification or a
+        # prompt waiting on them.
         #
         # So an unavailable measurement omits the numbers entirely rather than
         # substituting one. `undefined < 200` is false in JavaScript, so the

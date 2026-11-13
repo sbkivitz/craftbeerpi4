@@ -151,7 +151,7 @@ class Hysteresis(CBPiKettleLogic):
 
                 if sensor_value is None or target_temp is None:
                     # Cannot know the temperature, so do not heat - but stay alive.
-                    # Exiting here used to end temperature control for the rest of
+                    # Exiting here would end temperature control for the rest of
                     # the brew after a single bad read, silently.
                     sensor_failures += 1
                     if self.heater and (heater_state == True):

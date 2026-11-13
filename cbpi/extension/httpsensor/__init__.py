@@ -46,7 +46,7 @@ class HTTPSensor(CBPiSensor):
     def __init__(self, cbpi, id, props):
         super(HTTPSensor, self).__init__(cbpi, id, props)
         self.running = True
-        # No reading yet. This used to be 0, a number no probe produced: on a
+        # No reading yet: None, not 0, a number no probe produces. On a
         # Fahrenheit rig 0 sits far below every target, so a consumer acting on
         # it calls for full heat - at startup, before anything has confirmed
         # what is in the vessel. None cannot be mistaken for a measurement.

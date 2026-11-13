@@ -131,7 +131,7 @@ class StepHttpEndpoints:
         )
         saved = await self.controller.update(step)
         if saved is None:
-            # Refused: the step is running (DEFECTS M33). The brewer is told
+            # Refused: the step is running. The brewer is told
             # why in a notification; the form stays open with their changes.
             return web.json_response(
                 status=409,

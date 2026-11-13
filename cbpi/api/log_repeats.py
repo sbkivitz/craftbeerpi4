@@ -1,10 +1,10 @@
 """Keep one fault from flooding the log it will be diagnosed from.
 
 Control loops tick once a second, and a fault that lasts - an actor that will
-not switch off, a sensor that is gone - logged the same line on every tick:
+not switch off, a sensor that is gone - would log the same line on every tick:
 "Actor pump reports still ON after being switched off", eighty-six thousand
 times a day. The log rotates at 1 MB, four files deep, so an overnight fault
-pushed its own beginning out of the log before anyone read it (DEFECTS F40).
+would push its own beginning out of the log before anyone read it.
 
 RepeatFilter lets the first copy of a line through at once and then at most
 one identical copy per `window` seconds, saying how many were held back.

@@ -622,10 +622,10 @@ def main(context, config_folder_path, logs_folder_path, debug_log_level):
     # running system, and an SD card is the part that wears out. Putting them
     # on a USB stick or a network share moves that wear off the card entirely.
     #
-    # It could only be set on the command line, which on a systemd install
-    # means editing the unit file. config.yaml is the file a brewer already
-    # edits, so it is read from there too - with the command line still
-    # winning, since it is the more specific instruction.
+    # On the command line alone it would mean editing the unit file on a
+    # systemd install. config.yaml is the file a brewer already edits, so it
+    # is read from there too - with the command line still winning, since it
+    # is the more specific instruction.
     cli_logs_folder = logs_folder_path
     default_logs_folder = os.path.join(
         Path(config_folder_path).absolute().parent, "logs"
@@ -694,7 +694,7 @@ def main(context, config_folder_path, logs_folder_path, debug_log_level):
             logging.critical(e, exc_info=True)
 
     # Every handler, whichever set it up: a lasting fault must not flood the
-    # log it will be diagnosed from (DEFECTS F40).
+    # log it will be diagnosed from.
     log_repeats.install(logger)
 
     cbpi_cli = CraftBeerPiCli(config)

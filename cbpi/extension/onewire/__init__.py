@@ -12,15 +12,13 @@ from cbpi.api.dataclasses import NotificationAction, NotificationType
 
 # Publish cadence in seconds when a sensor's props carry no "Interval" key.
 #
-# This must stay equal to the Property.Select default_value below, and exists
-# so the two cannot drift apart again. They had: the Select was changed to 1
-# in April 2025 while the lookup kept the 60 it was given in March 2023, so a
-# sensor created in the UI published every second while one whose props lacked
-# the key published every minute. Worse, SensorController.expected_max_age()
-# falls back to a 30 s floor for a sensor that declares no interval, so the
-# 60 s sensor was stale by construction - is_fresh() answered False
-# permanently, and anything gated on freshness refused to run against a probe
-# that was working perfectly.
+# This must stay equal to the Property.Select default_value below, so the
+# two cannot drift apart. If they differ, a sensor created in the UI publishes
+# at one cadence and one whose props lack the key at another. Worse,
+# SensorController.expected_max_age() falls back to a 30 s floor for a sensor
+# that declares no interval, so a 60 s sensor would be stale by construction -
+# is_fresh() answering False permanently, and anything gated on freshness
+# refusing to run against a probe that was working perfectly.
 DEFAULT_INTERVAL = 1
 
 
@@ -44,14 +42,14 @@ def _scratchpad_is_empty(crc_line):
     YES. **An all-zero scratchpad passes CRC**, and `t=0` then parses to a
     confident 0 C.
 
-    That is not a theoretical concern. On 11 Oct a failing probe branch on the
-    rig did exactly this to two physically healthy probes: both reported 0 C,
-    both passed CRC, and both published with a fresh age, because the read
-    "succeeded" and refreshed last_success. Every staleness protection
-    downstream keys off last_success, so all of them were satisfied by a
-    reading that was pure fiction. On a Fahrenheit rig that is 32 F on every
-    probe at once - and a kettle logic reading 32 F against a mash target sees
-    a vessel 120 F cold and calls for full power.
+    That is not a theoretical concern: a failing probe branch can do exactly
+    this to physically healthy probes. Each reports 0 C, passes CRC, and
+    publishes with a fresh age, because the read "succeeded" and refreshed
+    last_success. Every staleness protection downstream keys off
+    last_success, so all of them are satisfied by a reading that is pure
+    fiction. On a Fahrenheit rig that is 32 F on every probe at once - and a
+    kettle logic reading 32 F against a mash target sees a vessel 120 F cold
+    and calls for full power.
 
     A genuine 0 C reading is NOT rejected by this. Real scratchpads carry the
     alarm registers, the configuration byte and the reserved bytes in positions
@@ -127,8 +125,7 @@ class ReadThread(threading.Thread):
                             self.value = temp
                             self.last_success = time.time()
                             # What its age is judged by: a clock set back an
-                            # hour made an hour-old reading look fresh
-                            # (DEFECTS F45).
+                            # hour would make an hour-old reading look fresh.
                             self.last_success_monotonic = time.monotonic()
                             if self.failing:
                                 self.failing = False
@@ -207,11 +204,9 @@ class OneWire(CBPiSensor):
 
     def __init__(self, cbpi, id, props):
         super(OneWire, self).__init__(cbpi, id, props)
-        # Nothing has been read from the bus yet. This used to be 200, which is
-        # not a temperature this probe can produce and not one any consumer
-        # should act on. A placeholder that looks like a plausible reading is
-        # worse than no reading, because nothing downstream can tell them
-        # apart.
+        # Nothing has been read from the bus yet. Not a placeholder such as
+        # 200: a placeholder that looks like a plausible reading is worse than
+        # no reading, because nothing downstream can tell them apart.
         self.value = None
 
     def resolve_interval(self):
@@ -355,8 +350,8 @@ class OneWire(CBPiSensor):
 
             # Only publish a reading the probe actually produced. The reader thread
             # keeps its previous value when a read fails, so publishing
-            # unconditionally meant a disconnected probe reported a plausible
-            # temperature forever - and kept refreshing its own freshness while
+            # unconditionally would have a disconnected probe report a plausible
+            # temperature forever - and keep refreshing its own freshness while
             # doing it, defeating any staleness check downstream.
             #
             # Staying quiet is what makes the reading age, which is what lets

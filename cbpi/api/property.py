@@ -15,8 +15,7 @@ class PropertyType(object):
     A blank setting matches "" only, so a field that applies to a setting's
     default should list "" as well. It is a hint to the interface and nothing
     more: a hidden field keeps its value, and the server never refuses a
-    setting because of it. None, the default, shows the field always - which
-    is how every property written before this existed is displayed.
+    setting because of it. None, the default, shows the field always.
 
     display_label, also accepted by every property, is what the form shows in
     place of the label. The label stays the setting's name - the key its value
@@ -140,8 +139,8 @@ class Property(object):
         A calendar date, picked with the browser's own date picker.
 
         The value is text, "YYYY-MM-DD" - what a browser's date input gives
-        whatever the brewer's locale shows. Typed free text was the old way, and
-        every plugin parsed its own handful of formats. A Text underneath, so
+        whatever the brewer's locale shows, so no plugin has to parse its own
+        handful of typed formats. A Text underneath, so
         code that handles text properties handles this one, and an interface
         that predates it shows an ordinary text field.
         """

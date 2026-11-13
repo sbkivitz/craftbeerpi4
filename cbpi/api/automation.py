@@ -2,10 +2,9 @@
 
 An actor's `power` is the level it runs at now. Kettle logics change it every
 control cycle - PIDBoil, PID_HERMS and BoilPower set the element's duty with
-actor_set_power() - so it also ended up being the level a brewer got when he
-next switched the element on by hand. Scott, 10 Nov 2026, heating strike water
-by hand on the simulator after the HLT's AUTO had run: "I see the power is
-capped at 25%. Why?" The 25 % was PIDBoil's last duty.
+actor_set_power() - so on its own it would also be the level a brewer gets on
+next switching the element on by hand: heating strike water by hand after the
+HLT's AUTO has run would be capped at PIDBoil's last duty, 25% say.
 
 So the actor controller keeps the brewer's own level apart (Actor.manual_power)
 and changes it only for commands that do not come through a logic or step.

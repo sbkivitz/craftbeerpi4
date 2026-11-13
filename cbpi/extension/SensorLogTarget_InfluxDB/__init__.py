@@ -14,35 +14,28 @@ logger = logging.getLogger(__name__)
 class SensorLogTargetInfluxDB(CBPiExtension):
     """Mirror sensor readings into InfluxDB, without blocking the control loop.
 
-    This used to call urllib3's synchronous http.request() from inside an async
-    function:
+    Nothing here blocks: synchronous I/O inside a coroutine - urllib3's
+    http.request(), say - blocks the entire event loop, not just the task it
+    runs in; asyncio.create_task() does not isolate it. Every reading would
+    stall the loop that runs the PIDs, the step engine and the actor shutdown
+    paths - three sensors at one reading a second is three stalls a second -
+    and with no read timeout an InfluxDB that accepted the connection and then
+    stopped answering would hang the controller indefinitely, with a kettle
+    element still energized.
 
-        timeout = Timeout(connect=2.0, read=None)
-        http = PoolManager(timeout=timeout)
-        req = http.request("POST", self.influxdburl, ...)
-
-    Synchronous I/O inside a coroutine blocks the entire event loop, not just
-    the task it runs in - asyncio.create_task() does not isolate it. Every
-    reading therefore stalled the loop that runs the PIDs, the step engine and
-    the actor shutdown paths. Three sensors at one reading a second is three
-    stalls a second, and `read=None` means no read timeout at all: an InfluxDB
-    that accepted the connection and then stopped answering would hang the
-    controller indefinitely, with a kettle element still energized.
-
-    That is the whole reason this is rewritten. The rest follows from it:
+    So:
 
       * aiohttp, which the server already depends on, with a bounded total
         timeout so a slow endpoint costs one reading rather than the brew.
-      * one shared session instead of a new PoolManager per reading.
+      * one shared session, not a new connection pool per reading.
       * the real timestamp, at millisecond precision, instead of letting
         InfluxDB stamp on receive. Receive time is wrong by however long the
-        write queued, and the previous cloud path asked for `precision=s`,
-        which discarded sub-second resolution outright.
+        write queued, and `precision=s` would discard sub-second resolution
+        outright.
       * configuration read once per change rather than six times per reading.
 
-    Failures are counted and backed off exactly as before: after max_retries
-    the target goes quiet for three minutes. The difference is that the backoff
-    no longer runs inside the listener chain.
+    Failures are counted and backed off: after max_retries the target goes
+    quiet for three minutes. The backoff never runs inside the listener chain.
     """
 
     # A write is a mirror, not the brew. If InfluxDB cannot answer in this many

@@ -43,13 +43,12 @@ class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
     def log_data(self, series, value):
         """Write a control signal to the log store, under its own series name.
 
-        Kettle logics had no way to log anything. CBpiActor and CBpiSensor both
-        have log_data(); this class did not, which is why no plugin has ever
-        recorded a control signal and why a PID here cannot be evaluated after
-        the fact. You can see the temperature it produced, but not the duty it
-        asked for - and those two curves are what separate "badly tuned" from
-        "undersized element" from "laggy probe", which look alike from the
-        temperature alone.
+        CBpiActor and CBpiSensor both have log_data(); this is the kettle
+        logic's, so a control signal can be recorded and a PID evaluated after
+        the fact. The temperature log shows what a logic produced, not the
+        duty it asked for - and those two curves are what separate "badly
+        tuned" from "undersized element" from "laggy probe", which look alike
+        from the temperature alone.
 
         `series` is appended to this kettle's id, so one logic can record
         several signals - duty, setpoint, and for a cascade an inner pair -
@@ -67,8 +66,7 @@ class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
             series_id = "{}.{}".format(self.id, series)
             # Not log_data(): that resolves the id to a registered sensor to
             # get a display name and silently returns when it cannot, so every
-            # control write was dropped without a word. Found by running it -
-            # PID_LOGGING on, cascade running, not one file on disk.
+            # control write would be dropped without a word.
             self.cbpi.log.log_control_data(series_id, value, series_id)
         except Exception as e:  # noqa: BLE001 - telemetry never breaks control
             logging.getLogger(type(self).__name__).warning(

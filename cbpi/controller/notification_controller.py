@@ -67,9 +67,9 @@ class NotificationController:
             pass
 
     # Seconds before the same log message raises a notification again. With
-    # NOTIFY_ON_ERROR on, a fault that logs every control pass sent a
-    # notification every second - to the phone, through any listener - for as
-    # long as it lasted (DEFECTS F39).
+    # NOTIFY_ON_ERROR on, a fault that logs every control pass would otherwise
+    # send a notification every second - to the phone, through any listener -
+    # for as long as it lasted.
     LOG_NOTIFY_REPEAT_EVERY = 3600
     LOG_NOTIFY_REMEMBERED = 200
 
@@ -156,7 +156,7 @@ class NotificationController:
             is pressed or retire() takes it down, and show it to every page
             that opens meanwhile. Otherwise a prompt reaches only the pages
             open when it is sent: one sent while the server starts reaches
-            none (DEFECTS M47).
+            none.
         :return: the notification's id
         """
         notifcation_id = shortuuid.uuid()
@@ -220,9 +220,8 @@ class NotificationController:
         on a "Resume brew?" left over skips whatever step runs by then.
 
         `reason` goes to the pages with it: "answered" when a button was
-        pressed (notify_callback), else "withdrawn". A page that did not
-        answer it can then say which: the brew-day screen's event line said
-        only "no longer waiting".
+        pressed (notify_callback), else "withdrawn", so a page that did not
+        answer it can say which.
 
         True if it was still waiting for an answer.
         """
@@ -253,8 +252,7 @@ class NotificationController:
                 # Evicted, already handled, or never had actions. Clicking a
                 # stale alert is a normal thing for a brewer to do and must not
                 # look like a fault, but it should be diagnosable rather than
-                # silent - this used to raise KeyError into the handler below
-                # and be logged as an error.
+                # silent: logged, not a KeyError raised into the handler below.
                 self.logger.info(
                     "Notification %s is no longer pending; ignoring action %s",
                     notification_id,
@@ -271,8 +269,8 @@ class NotificationController:
                 background_tasks.add(task)
                 task.add_done_callback(background_tasks.discard)
             # Answered: gone from every page, not just the one it was
-            # answered on, where a phone kept showing it with a button that
-            # no longer did anything.
+            # answered on, or a phone would keep showing it with a button
+            # that no longer does anything.
             self.retire(notification_id, reason="answered")
             return True
         except Exception as e:

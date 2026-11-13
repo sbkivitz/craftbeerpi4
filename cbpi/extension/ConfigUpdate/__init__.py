@@ -184,8 +184,8 @@ class ConfigUpdate(CBPiExtension):
                     source="steps",
                 )
 
-        # What the boil step's lid alert says. Added in 4.7.7.post23 for a rig
-        # with a steam condenser, whose lid stays on for the whole boil.
+        # What the boil step's lid alert says - for a rig with a steam
+        # condenser, whose lid stays on for the whole boil.
         lid_alert_description = (
             "What the boil step says as the wort nears boiling, when its LidAlert "
             "is Yes. With a steam condenser on the lid, say to turn it on instead."
@@ -327,9 +327,9 @@ class ConfigUpdate(CBPiExtension):
                     source="steps",
                 )
 
-        # The type a recipe's sparge step comes in as. Added in 4.7.7.post35
-        # (Scott, 10 Nov): SpargeStep heats the HLT and leaves the pumps to the
-        # brewer; MashStep keeps the sparge as a mash rest, as before.
+        # The type a recipe's sparge step comes in as: SpargeStep heats the HLT
+        # and leaves the pumps to the brewer; MashStep keeps the sparge as a
+        # mash rest.
         sparge_description = (
             "Sparge step type for recipe creation: SpargeStep heats the HLT to the "
             "sparge temperature and leaves both pumps to you, for a fly or a batch "
@@ -515,7 +515,7 @@ class ConfigUpdate(CBPiExtension):
                     ],
                 )
 
-        # Scott, 11 Nov: a sparge step heats only the HLT, so an import adds a
+        # A sparge step heats only the HLT, so an import adds a
         # Mash Out before it when the recipe has none (UploadController.
         # _with_mash_out). Description and options refreshed with each version.
         mash_out_description = (
@@ -1028,9 +1028,8 @@ class ConfigUpdate(CBPiExtension):
             except Exception:
                 logging.warning("Unable to update database")
 
-        # Scott, 9 Nov: "The HLT pump should be going to prevent
-        # stratification any time I'm using the HLT heat ... any time before
-        # the sparge, really". See cbpi/extension/hltpump.
+        # The HLT pump runs whenever the HLT heats before the sparge, so the
+        # water does not stratify. See cbpi/extension/hltpump.
         if HltPumpWithHeat is None:
             logging.info("INIT HLT_PUMP_WITH_HEAT")
             try:
@@ -1059,7 +1058,7 @@ class ConfigUpdate(CBPiExtension):
 
         # The brew-day screen warns that a pump it switched off may still run
         # when the rig has an override switch for it, which CraftBeerPi cannot
-        # see: on Scott's rig the HLT pump, Recirc_PUMP (rig record, 9 Oct).
+        # see: on the rig, the HLT pump, Recirc_PUMP.
         if BrewdayOverrideActor is None:
             logging.info("INIT BREWDAY_OVERRIDE_ACTOR")
             try:
@@ -1077,10 +1076,9 @@ class ConfigUpdate(CBPiExtension):
             except Exception:
                 logging.warning("Unable to update database")
 
-        # The names the brew-day screen offers for a timer (Scott, 11 Nov 2026: "an easy config
-        # setting to choose the default timer names from the setup"). TimersController reads it.
+        # The names the brew-day screen offers for a timer. TimersController reads it.
         # Added only when it isn't there: config.get() takes a blank setting for a missing one,
-        # and adding it again would put the usual names back over Scott's blank list.
+        # and adding it again would put the usual names back over a blank list.
         if "BREWDAY_TIMER_NAMES" not in self.cbpi.config.cache:
             logging.info("INIT BREWDAY_TIMER_NAMES")
             try:
@@ -1099,8 +1097,7 @@ class ConfigUpdate(CBPiExtension):
             except Exception:
                 logging.warning("Unable to update database")
 
-        # The timers' alarm sound (Scott, 11 Nov: "The alert sound is kinda weak", then "Make the alarm
-        # timer sound configurable like I had asked"). The brew-day screen plays it (brewday/alarm.js).
+        # The timers' alarm sound, chosen in Settings. The brew-day screen plays it (brewday/alarm.js).
         # Added when missing; its description and choices are brought up to date with each version.
         alarm_options = [
             {"label": "Kitchen timer", "value": "kitchen"},

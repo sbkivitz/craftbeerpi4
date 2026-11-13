@@ -26,10 +26,10 @@ class DummyActor(CBPiActor):
 
     async def on(self, power=0, output=0):
         logger.info("ACTOR %s ON " % self.id)
-        # Honour the requested power. Ignoring it made every simulated heater
-        # full-on/full-off regardless of what the PID asked for, so a cascade
-        # commanding 30% delivered 100% and the simulation showed a limit cycle
-        # that the real control loop does not have.
+        # Honour the requested power. Ignoring it would make every simulated
+        # heater full-on/full-off regardless of what the PID asked for, so a
+        # cascade commanding 30% would deliver 100% and the simulation would
+        # show a limit cycle that the real control loop does not have.
         if power is not None:
             await self.set_power(power)
         self.state = True

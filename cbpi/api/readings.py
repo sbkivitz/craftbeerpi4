@@ -1,16 +1,16 @@
 """Whether a sensor reading is one that control may act on.
 
 One definition, shared by the fermenter logics and the fermentation steps.
-They used to judge readings differently: the logic held heating and cooling
-off for a DS18B20's 85 C power-on value, while a ramp step took the same
-reading as its starting point, kept commanding targets from it after the
-probe recovered, and the logic - finding those targets plausible - heated a
-beer that was being cold-crashed (DEFECTS F15).
+Judged differently, the logic would hold heating and cooling off for a
+DS18B20's 85 C power-on value while a ramp step took the same reading as its
+starting point, kept commanding targets from it after the probe recovered, and
+the logic - finding those targets plausible - heated a beer that was being
+cold-crashed.
 
 A reading is trusted only on affirmative evidence: a finite value, a finite
 age within the sensor's own limit, and a value the vessel can have. A sensor
 that has never published reports its initial value with no age at all, and
-that is "not yet", not "fresh" (F16).
+that is "not yet", not "fresh".
 """
 
 import math
@@ -71,8 +71,8 @@ def assess(state, what="temperature", label="", unit=None, celsius=FERMENTER_C,
     limit = finite(state.get("max_age")) or default_max_age
     if age is None:
         # Never published, whatever its placeholder value - OneWire's is
-        # None, and judging that first raised the boot-time alarm F27 was
-        # meant to remove (DEFECTS F49). The third element is how long this
+        # None, and judging the value first would raise an alarm at every
+        # boot. The third element is how long this
         # may last before it is worth an alert: a sensor's first publish can
         # be a whole interval after start-up (OneWire skips its first cycle
         # until the bus has read), and alerting on every boot teaches the
@@ -85,7 +85,7 @@ def assess(state, what="temperature", label="", unit=None, celsius=FERMENTER_C,
         return None, ("stale", "{} sensor{} has not updated for {:.0f}s".format(name, who, age))
     if age < -1.0:
         # A reading from the future: its time came from a clock that has since
-        # moved back. Not evidence of anything (DEFECTS F29).
+        # moved back. Not evidence of anything.
         return None, ("stale", "{} sensor{} reading is timestamped {:.0f}s in the future - "
                                "the clock moved".format(name, who, -age))
     if celsius is not None:

@@ -102,15 +102,14 @@ def action(key, parameters, allow_stopped=False):
 def resolve_action(instance, name):
     """The bound method for a *declared* action, or None.
 
-    `call_action` used to do `instance.__getattribute__(name)(**parameter)`
-    with `name` taken straight from a JSON request body, on endpoints some of
-    which are `auth_required=False`. That is not "call an action", it is "call
-    anything on this object by name, with arbitrary keyword arguments", on a
-    box that switches several kilowatts.
+    `name` comes straight from a JSON request body, on endpoints some of which
+    are `auth_required=False`. Looking it up with `__getattribute__` would not
+    be "call an action" but "call anything on this object by name, with
+    arbitrary keyword arguments", on a box that switches several kilowatts.
 
     An action is already a declared thing: `@action(key, parameters)` sets
     `.action` on the function, and `plugin_controller` enumerates exactly those
-    to tell the interface which actions exist. Anything not so declared was
+    to tell the interface which actions exist. Anything not so declared is
     never offered to a caller and has no business being reachable by one.
 
     Resolved from the type rather than the instance, so an attribute in the

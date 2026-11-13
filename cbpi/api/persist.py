@@ -81,9 +81,9 @@ def atomic_write_json(path, data, **dump_kwargs):
     """Serialise `data` to `path` atomically.
 
     Serialising to a string first is deliberate: if the data cannot be encoded,
-    that raises here, before the existing file has been touched. The old
-    truncate-then-dump pattern destroyed the previous contents first and only
-    then discovered it could not write the new ones.
+    that raises here, before the existing file has been touched. Truncating
+    and then dumping would destroy the previous contents first and only then
+    discover it could not write the new ones.
     """
     dump_kwargs.setdefault("indent", 4)
     atomic_write_text(path, json.dumps(data, **dump_kwargs))
