@@ -1,15 +1,14 @@
 """Raise an alarm when an element heats by hand past its target, or near the boil.
 
-Scott, 13 Nov, on the simulator. First the boil kettle in MANUAL for a brew in
-a bag: "I set the temperature for 150 and it is now at 212." Then: "Oh! I
-turned the HLT element on without using 'Auto'... that is dangerous", and
-"same issue with HLT, I see. Maybe a warning?" In MANUAL nothing compares the
-temperature with the target, so an element switched on by hand runs until
-someone turns it off. MANUAL stays MANUAL: taking over by hand is what it is
+In MANUAL nothing compares the temperature with the target, so an element
+switched on by hand runs until someone turns it off: a boil kettle set to 150
+for a brew in a bag reaches 212, and an HLT element switched on without AUTO
+heats without limit. MANUAL stays MANUAL: taking over by hand is what it is
 for. The brew-day screen says so under the vessel's window, and this raises an
 alarm on every page, with no page open too.
 
-The dashboard agent's design (BUILD-NOTES, "Heating by hand", 13 Nov):
+The rules, as the brew-day design sets them out (craftbeerpi4-ui,
+design/brewday/BUILD-NOTES.md, "Heating by hand"):
 
 - By hand: the element is on and no AUTO runs it: not its own kettle's, and
   for the HLT not the mash tun's HERMS either. The kettles are found as the
@@ -165,7 +164,7 @@ class HeatingByHand(CBPiExtension):
     def boil_from(self, bk, unit):
         """Where BoilPower boils (the screen's boilFrom): the boil kettle's
         Boil_Threshold, or BoilPower's default. An older BoilPower, without
-        set_boil_at, took the kettle's target as its boil point."""
+        set_boil_at, takes the kettle's target as its boil point."""
         default = BOIL_POINT[unit]
         if bk is None:
             return default

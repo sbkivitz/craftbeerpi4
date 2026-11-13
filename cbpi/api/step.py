@@ -416,10 +416,9 @@ class CBPiStep(_TargetArrival, CBPiBase):
 
         The report waits on every page, open now or opened later, until Keep
         waiting or Stop the profile is pressed, the wort warms again (a rise,
-        or near target), or the step is stopped or ends: the dashboard agent,
-        12 Nov, late afternoon - a page reloaded while it waited showed its
-        line in amber with nothing to press, and a phone opened later was not
-        told the element had stopped heating the wort.
+        or near target), or the step is stopped or ends, so a page reloaded
+        while it waits still has the buttons, and a phone opened later is told
+        the element has stopped heating the wort.
 
         Returns True if a stall was reported on this call.
         """

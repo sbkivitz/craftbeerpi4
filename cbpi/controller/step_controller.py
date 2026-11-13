@@ -785,10 +785,9 @@ class StepController:
                 # A warning, not a question: it answers whoever made the
                 # change, and the step form shows them why (http_update's
                 # 409). With an OK that told CraftBeerPi nothing, the
-                # brew-day screen logged it as a question waiting for every
-                # screen, and a page reloaded showed that line in amber with
-                # nothing to press (the dashboard agent, 12 Nov, late
-                # afternoon).
+                # brew-day screen would log it as a question waiting for every
+                # screen, and a page reloaded would show that line in amber with
+                # nothing to press.
                 self.cbpi.notify(
                     existing.name,
                     self.EDIT_WHILE_RUNNING.format(existing.name),
@@ -1033,10 +1032,9 @@ class StepController:
             await self.save()
             return
         # Kept, as the steps' own questions are, so a page opened after the
-        # brew - a phone, or the monitor reloaded - is shown it too: the
-        # brew-day screen's line for it said "waiting for you", and its title
-        # bar "No alarms", with nothing to answer it with (DEFECTS M81). Until
-        # OK, Reset or another recipe.
+        # brew - a phone, or the monitor reloaded - is shown it too, with an OK
+        # to answer it, rather than a line saying "waiting for you" and a title
+        # bar saying "No alarms". Until OK, Reset or another recipe.
         last = self.profile[-1] if self.profile else None
         if last is not None:
             self._ask_kept(

@@ -138,8 +138,8 @@ class CBPiWebSocket:
         # starts, before any page is open, and would otherwise reach nobody.
         add("notification_waiting", lambda: self.cbpi.notification.waiting_prompts())
         # And the warnings and errors OK'd on another page or in BrewScribe:
-        # a page asleep in a background tab missed notification_retired for
-        # them (Porter, 13 Nov).
+        # a page asleep in a background tab misses notification_retired for
+        # them.
         add("notification_seen", lambda: self.cbpi.notification.seen_ids())
         try:
             messages.extend(self.cbpi.notification.kept_prompts())

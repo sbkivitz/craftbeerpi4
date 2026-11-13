@@ -46,12 +46,12 @@ class KettleController(BasicController):
 
         Each brewing second, from what the controllers hold, so that what
         changes them by any path reaches the logs. The steps set a kettle's
-        target directly, not through set_target_temp, so the target a recipe
-        set was never logged, and a graph loaded mid-recipe drew the last one
-        set by hand (review of the graphs, 10 Nov). And the first look after a
-        start-up logs every kettle's AUTO and every switch as they are then,
-        off: nothing logged them going off at a restart or a power cut, so the
-        target and the element's level drawn from before it ran on through it.
+        target directly, not through set_target_temp, so logging only there
+        would miss the target a recipe sets, and a graph loaded mid-recipe would
+        draw the last one set by hand. And the first look after a start-up logs
+        every kettle's AUTO and every switch as they are then, off: otherwise
+        nothing logs them going off at a restart or a power cut, and the target
+        and the element's level drawn from before it would run on through it.
         """
         log = getattr(self.cbpi, "log", None)
         if log is None or not hasattr(log, "log_change"):

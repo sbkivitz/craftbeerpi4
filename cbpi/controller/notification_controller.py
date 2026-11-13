@@ -33,12 +33,11 @@ class NotificationController:
     RETIRED_TOPIC = "notification_retired"
 
     # A plain warning or error - one with no buttons - is remembered, so an OK
-    # on one page can take it down on the others (seen). Scott, 13 Nov: "the
-    # alerts that I've already acknowledged in BrewDay are there waiting for
-    # me in BrewScribe.. that's annoying". Bounded as the callbacks are.
+    # on one page - the brew-day screen, say - can take it down on the others,
+    # BrewScribe's too (seen). Bounded as the callbacks are.
     MAX_PLAIN = 100
     # The ids seen, newest last, sent to each page as it connects: a page
-    # asleep in a background tab misses the broadcast (Porter, 13 Nov).
+    # asleep in a background tab misses the broadcast.
     MAX_SEEN = 100
     SEEN_TOPIC = "notification_seen"
 

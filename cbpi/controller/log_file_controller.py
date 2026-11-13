@@ -87,8 +87,8 @@ class LogController:
     def log_change(self, series_id: str, value) -> None:
         """Log a value only when it differs from the last one logged for its series.
 
-        For what the brew-day screen's graphs draw besides the temperature
-        (Scott chose them on 10 Nov): each kettle's target and whether its AUTO
+        For what the brew-day screen's graphs draw besides the temperature:
+        each kettle's target and whether its AUTO
         is on, and each switch's level, 0 when off. They change a few times a
         brew day, or every control cycle at most while a PID moves a level, so
         writing them only on a change costs less than any temperature log.
@@ -452,8 +452,8 @@ class LogController:
     async def get_window(self, names, since=None, points=None) -> dict:
         """Each named log from `since` on, thinned to about `points` readings, with its last reading before `since`.
 
-        For the brew-day screen's temperature graphs (Scott chose them on 10
-        Nov): the last 10 or 30 minutes, or the brew day. get_data() reads a
+        For the brew-day screen's temperature graphs: the last 10 or 30
+        minutes, or the brew day. get_data() reads a
         whole log and thins it to about 500 points, a point every 43 s over six
         hours: too coarse for a 10-minute graph, and mostly older than the graph
         shows. This keeps only what is newer than `since`, and thins each series
