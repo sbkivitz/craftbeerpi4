@@ -1,12 +1,10 @@
 """Warn when a kettle's AUTO runs with no target.
 
-Scott, 10 Nov, on the simulator: "What went wrong? I have Mash Tun "Auto" on
-but HLT is off. I think a "SV" was not set - but it should pop up a warning in
-that case". The mash tun's target was 0, left from the last recipe. PID_HERMS
-takes 0 as a real target, so it held the mash at 0 °F, never asked the HLT for
-heat, and nothing said so. PIDBoil and Hysteresis do the same. BoilPower is
-the one logic that runs without one: as it starts, it puts its boil threshold
-in as the kettle's target.
+A kettle's target can be 0, left from the last recipe. PID_HERMS takes 0 as a
+real target: the mash tun's AUTO would hold the mash at 0 °F and never ask the
+HLT for heat, and nothing would say so. PIDBoil and Hysteresis do the same.
+BoilPower is the one logic that runs without one: as it starts, it puts its
+boil threshold in as the kettle's target.
 
 So, on the server, with no page open too: when a kettle's AUTO has run for
 GRACE brewing seconds with no target - none, 0 or below, or not a number - a
@@ -30,8 +28,7 @@ logger = logging.getLogger(__name__)
 GRACE = 5
 
 TITLE = "No target for the {}"
-# The dashboard agent's words (10 Nov), as its brew-day mockup shows them:
-# what is wrong first, then what to do.
+# The brew-day design's words: what is wrong first, then what to do.
 TEXT = ("AUTO is on with no target temperature, so it won't heat. "
         "Set a target, or switch to MANUAL.")
 #: For a mash tun whose logic runs a HERMS: what it heats with is the HLT.

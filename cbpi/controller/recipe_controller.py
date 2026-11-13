@@ -82,12 +82,11 @@ class RecipeController:
     async def keep_import(self, data, source):
         """Keep an imported recipe in the book. Returns (file id, replaced an earlier copy?).
 
-        Scott, 5 Nov: "As soon as I loaded the v4 recipe, I cannot see the v3
-        recipe any longer in my recipe book." An import only replaced the brew
-        steps, and the Upload page keeps one file, so a recipe was gone once
-        another was uploaded: the book held only what the brewer saved by hand.
+        An import replaces the brew steps, and the Upload page keeps one file,
+        so without this a recipe would be gone once another was uploaded: the
+        book would hold only what the brewer saved by hand.
 
-        Now every import is kept, marked with where it came from. Importing a
+        So every import is kept, marked with where it came from. Importing a
         recipe of the same name again - changed in BeerSmith and exported again
         - replaces the copy the earlier import made, and never a recipe the
         brewer saved, edited or cloned, which carries no mark. Written in one
@@ -122,7 +121,7 @@ class RecipeController:
                     dataset = data["basic"]
                     dataset["file"] = filename
                     # When it last changed, so a list can put the newest first:
-                    # the brew-day screen's Recipe Book (Scott's layout B, 9 Nov).
+                    # the brew-day screen's Recipe Book.
                     dataset["modified"] = os.path.getmtime(recipe_path)
                     result.append(dataset)
                 except Exception as e:

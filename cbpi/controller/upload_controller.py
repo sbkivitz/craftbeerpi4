@@ -41,17 +41,16 @@ LOCAL_API_TIMEOUT = aiohttp.ClientTimeout(total=15, connect=5)
 class UploadController:
     # Fallback step temperatures, in the unit the system is configured for.
     #
-    # These used to be bare numbers inline - `config.get("steps_boil_temp", 98)`
-    # and `config.get("steps_cooldown_temp", 25)` - which is the Interval defect
-    # a third time (see RIG-NOTES 24). ConfigUpdate seeds these settings with
-    # UNIT-AWARE values, 99 C / 212 F for boil and 20 C / 68 F for cooldown, so
-    # the two disagreed in both directions:
+    # ConfigUpdate seeds these settings with UNIT-AWARE values, 99 C / 212 F
+    # for boil and 20 C / 68 F for cooldown, and a fallback must agree with
+    # them. A bare `config.get("steps_boil_temp", 98)` would not:
     #
-    #   * On a Fahrenheit rig with the setting absent, the importer built a boil
-    #     step targeting 98 F. A kettle cannot boil at 98 F, so the step either
-    #     never starts its timer or runs the whole boil far below boiling - and
-    #     nothing reports an error, because 98 is a perfectly valid number.
-    #   * Even in Celsius they disagreed: 98 against 99, and 25 against 20.
+    #   * On a Fahrenheit rig with the setting absent, the importer would build
+    #     a boil step targeting 98 F. A kettle cannot boil at 98 F, so the step
+    #     either never starts its timer or runs the whole boil far below
+    #     boiling - and nothing reports an error, because 98 is a perfectly
+    #     valid number.
+    #   * Even in Celsius it would disagree: 98 against 99.
     #
     # A fallback that contradicts the value the application seeds is not a
     # fallback, it is a second configuration. One definition, unit-aware.
@@ -69,7 +68,7 @@ class UploadController:
     DEFAULT_WHIRLPOOL_MINUTES = 15
 
     #: The Mash Out an import adds before a sparge step when the recipe has
-    #: none (AddMashOutStep; Scott, 11 Nov): the mash to 168 F, 76 C, for 10
+    #: none (AddMashOutStep): the mash to 168 F, 76 C, for 10
     #: minutes.
     MASH_OUT_TEMP = {"C": 76, "F": 168}
     MASH_OUT_MINUTES = 10
@@ -98,17 +97,15 @@ class UploadController:
 
         Returns (True, the recipe's name) or (False, why not).
 
-        The importers built the profile as they read the recipe. They emptied
-        the mash profile first, then added its steps one at a time through the
-        server's own /step2/ endpoint, and the request answered 200 whatever
-        happened. From the 2 Nov review of the recipe flow (DEFECTS M39):
-        - a recipe they could not read left the mash profile empty: GPT's copy
-          of Scott's file with one temperature "not-a-number";
-        - two imports at once - Create clicked twice - each emptied the profile,
-          then both added their steps: twelve steps, every rest and the boil
-          twice, and both reported success.
+        Building the profile while reading the recipe - emptying the mash
+        profile first, then adding its steps one at a time - would go wrong two
+        ways:
+        - a recipe that cannot be read, such as one with a temperature of
+          "not-a-number", would leave the mash profile empty;
+        - two imports at once - Create clicked twice - would each empty the
+          profile, then both add their steps: every rest and the boil twice.
 
-        Now one import runs at a time. Its steps are gathered as the recipe is
+        So one import runs at a time. Its steps are gathered as the recipe is
         read (create_recipe, create_step) and replace the mash profile in one
         write, only once the whole recipe has been read. A failure says so,
         leaves the profile as it was, and is reported to the caller.
@@ -160,8 +157,7 @@ class UploadController:
     async def _keep_in_book(self, label, name):
         """Keep the recipe just imported in the Recipe Book, and say so in a sentence.
 
-        See RecipeController.keep_import (Scott, 5 Nov: v3 vanished from his
-        recipe book when he uploaded v4). The import has already succeeded -
+        See RecipeController.keep_import. The import has already succeeded -
         the brew steps are the recipe - so a book that cannot be written is a
         warning, not a failed import.
         """
@@ -193,10 +189,10 @@ class UploadController:
         """Why the settings must not be imported with, or None. Read before the
         recipe is.
 
-        A blank BoilKettle setting put the boil on the mash kettle. On a HERMS
-        that is the Mash Tun, whose logic is PID_HERMS: the Boil step drove the
-        HLT element and the pump towards 210 F, and nothing heated the boil
-        kettle (DEFECTS M40, GPT's G5). Right for a one-vessel system, so it is
+        A blank BoilKettle setting puts the boil on the mash kettle. On a HERMS
+        that is the Mash Tun, whose logic is PID_HERMS: the Boil step would
+        drive the HLT element and the pump towards 210 F, and nothing would
+        heat the boil kettle. Right for a one-vessel system, so it is
         refused only when there is more than one kettle, naming the vessel the
         boil would have gone on.
         """
@@ -375,8 +371,8 @@ class UploadController:
 
     #: What an uploaded recipe file is: by its name first, then by the type the
     #: browser sent. Browsers disagree about the type: Firefox and Safari send
-    #: application/xml for a .xml file, which was refused as "Wrong content
-    #: type" (DEFECTS C5, M45; Gemini's R9 on 2 Nov).
+    #: application/xml for a .xml file, which checking the type alone would
+    #: refuse as "Wrong content type".
     UPLOAD_KINDS = {
         "xml": ("beer.xml", ("text/xml", "application/xml")),
         "json": ("mmum.json", ("application/json",)),
@@ -395,15 +391,15 @@ class UploadController:
     def _kept_bytes(kind, content):
         """What is kept of an uploaded BeerXML or MMuM file: the bytes as sent.
 
-        They used to be decoded as UTF-8 and written back as text, which is not
-        what was sent. On Windows every line ending gained a carriage return:
-        Scott's test recipe v3 sat on his simulator as CR CR LF (4 Nov). And a
-        BeerXML file declares its own encoding - BeerSmith's says ISO-8859-1 -
-        so a raw degree sign in one came back as a replacement character.
+        Decoded as UTF-8 and written back as text, a file would not be what
+        was sent: on Windows every line ending would gain a carriage return
+        (CR CR LF), and a BeerXML file declares its own encoding - BeerSmith's
+        says ISO-8859-1 - so a raw degree sign in one would come back as a
+        replacement character.
 
         A file that cannot be read as sent - XML that does not parse, JSON that
-        is not UTF-8 - is still decoded leniently, as every upload used to be,
-        so it imports with odd characters rather than not at all.
+        is not UTF-8 - is still decoded leniently, so it imports with odd
+        characters rather than not at all.
         """
         try:
             if kind == "xml":
@@ -418,7 +414,7 @@ class UploadController:
         """Keep an uploaded recipe file. Returns True if it was kept.
 
         Reported to the caller, so the Upload page does not reload over the
-        error: it reloads on success, and this always looked like success.
+        error: it reloads on success.
         """
         fileData = data["File"]
         filename = fileData.filename
@@ -1097,9 +1093,9 @@ class UploadController:
                     step_name = str(row.get("name"))
                     step_timer = str(int(row.get("timer")))
                     # Rounded to a tenth, not cut to a whole degree: a 152.5 F
-                    # rest came in as 152, and on a Celsius server Scott's
-                    # 152 F (66.67 C) as 66 C, 150.8 F (DEFECTS C3, M44; review
-                    # item 15). Whole numbers stay as they were: "152".
+                    # rest would come in as 152, and on a Celsius server a
+                    # 152 F (66.67 C) rest as 66 C, 150.8 F. Whole numbers stay
+                    # as they were: "152".
                     step_temp = self._format_temp(row.get("temp"))
                     sensor = self.kettle.sensor
                     if MashIn_Flag == True:
@@ -1304,7 +1300,7 @@ class UploadController:
                     await self.create_step(step_string)
 
                 # The stand runs for the recipe's longest steep time, 15 minutes
-                # when it gives none - always 15 until 4.7.7.post22.
+                # when it gives none.
                 await self.create_Whirlpool_Cooldown(
                     str(self._whirlpool_minutes(whirlpool_additions)),
                     temp=step_temp if Whirlpool != [] else None,
@@ -1781,8 +1777,8 @@ class UploadController:
     def _xml_addition_label(self, element):
         """'6.00 oz Willamette': what a hop prompt names, amount first.
 
-        The prompts used to name the hop alone. On brew day, with the recipe
-        sheet somewhere else, the amount is the part you need.
+        On brew day, with the recipe sheet somewhere else, the amount is the
+        part you need.
         """
         name = element.find("NAME").text
         amount = self._xml_amount(element)
@@ -1822,8 +1818,7 @@ class UploadController:
     def _xml_misc_label(self, misc):
         """'1 Whirlfloc Tablet': a misc boil addition, amount first, like a hop.
 
-        Scott, 4 Nov, brewing his test recipe v4 on the simulator: the Whirlfloc
-        prompt named the tablet but not how many - hops said "6.00 oz Willamette".
+        The prompt says how many, as a hop prompt says "6.00 oz Willamette".
         """
         name = misc.find("NAME").text
         amount = self._xml_misc_amount(misc)
@@ -1968,9 +1963,9 @@ class UploadController:
     async def create_Whirlpool_Cooldown(self, time: str = "15", temp=None):
         # The whirlpool stand: a WhirlpoolStep, a WaitStep that knows the
         # whirlpool temperature. If the wort cools more than 2 C / 3.6 F below
-        # it, the brewer is asked whether to heat it back and hold it (Scott, 4
-        # Nov: "whirlpool step cooled too far"). `temp` only with whirlpool hops:
-        # without them the stand only settles the trub, and nothing need ask.
+        # it, the brewer is asked whether to heat it back and hold it. `temp`
+        # only with whirlpool hops: without them the stand only settles the
+        # trub, and nothing need ask.
         if self.cooldown != "WaiStep" and self.cooldown != "":
             props = {"Kettle": self.boilid, "Timer": time}
             if temp is not None:
@@ -2033,8 +2028,8 @@ class UploadController:
         self.mash = self.cbpi.config.get("steps_mash", "MashStep")
         # A mash step named for the sparge (Sparge, Fly Sparge, Batch Sparge,
         # Lauter, Runoff) comes in as this type: SpargeStep heats the HLT and
-        # leaves both pumps to the brewer (Scott, 10 Nov). Set it to MashStep
-        # for the sparge as a mash rest, as before.
+        # leaves both pumps to the brewer. Set it to MashStep for the sparge
+        # as a mash rest.
         self.sparge = self.cbpi.config.get("steps_sparge", "SpargeStep") or "SpargeStep"
         self.mashout = self.cbpi.config.get(
             "steps_mashout", None
@@ -2107,7 +2102,7 @@ class UploadController:
 
         Inside import_recipe nothing is changed yet: the steps that follow are
         gathered, and replace the mash profile only once the whole recipe has
-        been read (DEFECTS M39).
+        been read.
         """
         if self._staging:
             self._staged = {"name": name, "steps": []}
@@ -2120,7 +2115,7 @@ class UploadController:
         await self.cbpi.recipe.remove(self.recipeID)
 
     def _as_sparge(self, step_string):
-        """A mash step named for the sparge, made a SpargeStep (Scott, 10 Nov).
+        """A mash step named for the sparge, made a SpargeStep.
 
         Every recipe source makes its mash steps with the steps_mash type. The
         one named for the runoff (StepController._collects_wort: Sparge, Fly
@@ -2130,7 +2125,7 @@ class UploadController:
         off and both pumps left to the brewer. It needs an HLT, found as the
         hltpump extension finds it - the kettle the mash tun's HERMS works on.
         Without one, or with steps_sparge set to the mash type, the step comes
-        in as before. Never raises: the step then comes in as it was.
+        in as a mash step. Never raises: the step then comes in as it was.
         """
         try:
             mash = getattr(self, "mash", None) or "MashStep"
@@ -2170,10 +2165,9 @@ class UploadController:
     def _with_mash_out(self, steps):
         """The recipe's steps with a Mash Out before its sparge step, if it has none.
 
-        Scott, 11 Nov: a Sparge that came in as a mash rest at 168 F did a mash
-        out through the HERMS; as a SpargeStep (_as_sparge) it heats only the
-        HLT. Asked whether imports should add a 10-minute Mash Out at 168 F when
-        the recipe has none, he chose yes. So with AddMashOutStep Yes, a recipe
+        A Sparge that comes in as a mash rest at 168 F does a mash out through
+        the HERMS; as a SpargeStep (_as_sparge) it heats only the HLT, so the
+        mash out has to be a step of its own. With AddMashOutStep Yes, a recipe
         with a steps_sparge step - a SpargeStep, not a mash rest - after a mash
         step, and before it no step named for a mash out (StepController.
         _ends_mash) and no rest already as hot, gets one right before the

@@ -141,18 +141,17 @@ class BasicController:
 
             # Cancelling is what actually stops it.
             #
-            # This set running=False and returned. For a GPIO actor that flag
+            # Setting running=False is not enough. For a GPIO actor that flag
             # is only read at the top of its pulse loop, and the loop spends
             # its time inside `await asyncio.sleep(heating_time)` with the pin
-            # HIGH - so at full duty the element stayed energized for the rest
-            # of the period, up to the whole sample time, after stop() had
+            # HIGH - so at full duty the element would stay energized for the
+            # rest of the period, up to the whole sample time, after stop() had
             # returned and the interface said it was off.
             #
             # delete() and update() both call this and then replace or discard
-            # the instance, so the abandoned task also outlived the registry
+            # the instance, so an abandoned task would also outlive the registry
             # entry: an old driver still holding a pin while a new one is
             # created for it.
-            #
             # CBPiActor._run() switches the output off in a finally, so
             # cancelling is what guarantees the pin goes low - and awaiting it
             # is what makes that true before this returns rather than
@@ -172,7 +171,7 @@ class BasicController:
         Starting builds a new logic instance, so a fact a step sets on the
         running one - a pump held for dough-in - is gone, and setting it after
         start() returns races the logic's own first pass, which may already
-        have switched the pump on (DEFECTS M35). Set here, before the instance
+        have switched the pump on. Set here, before the instance
         starts or runs, a logic that reads the attribute sees it from its first
         moment; one that has never heard of it is unaffected.
         """
@@ -299,8 +298,8 @@ class BasicController:
                 # the boil power before starting the boil.
                 #
                 # Opt-in per action via @action(..., allow_stopped=True), so
-                # nothing that was previously rejected starts running by
-                # accident. The instance built here is never started: running
+                # no other action reaches a stopped logic. The instance built
+                # here is never started: running
                 # stays False and its control loop never launches, so it can
                 # configure but not command.
                 transient = self._transient_instance(item, action)
@@ -315,16 +314,11 @@ class BasicController:
                 # Not a rejected action - there is nothing to dispatch to.
                 #
                 # Kettles have autostart False, so no logic instance exists
-                # until the brewer starts one. An action sent before that used
-                # to fall through to the allowlist check below and be reported
-                # as "undeclared action ... only methods decorated with
+                # until the brewer starts one. An action sent before that would
+                # otherwise fall through to the allowlist check below and be
+                # reported as "undeclared action ... only methods decorated with
                 # @action", which blames the plugin author for a decorator that
                 # is present and correct.
-                #
-                # Observed on the rig: the brewer set a boil power from the
-                # dashboard before starting the logic, got HTTP 204 and no
-                # message, and the value did nothing. The log then sent whoever
-                # read it looking for a missing decorator.
                 logging.error(
                     "%s cannot run action %r on %s: its logic is not running. "
                     "Start the kettle first.",

@@ -94,9 +94,9 @@ async def error_middleware(request, handler):
     except asyncio.exceptions.CancelledError:
         return web.json_response(status=500, data={'error': "CancelledError"})
 
-    # Not found stays not found. This previously returned 500, which made every
-    # missing route or file look like a server fault and left handlers unable to
-    # report "no such thing" at all.
+    # Not found stays not found. A 500 would make every missing route or file
+    # look like a server fault and leave handlers unable to report "no such
+    # thing" at all.
     return web.json_response(status=404, data={'error': message})
 
 
@@ -145,12 +145,11 @@ def _send_static_files_in_fresh_chunks():
     Python 3.12 the selector transport queues what it cannot send at once by
     reference, not as a copy (python/cpython#160321), so the next block
     overwrites data still waiting to go. A browser that reads slower than the
-    server writes - one busy parsing - received the 6 MB interface bundle at
-    the right length with stretches of it from further on in the file,
-    failed to parse it ("Unexpected token"), and showed a black page until
-    reloaded (DEFECTS O1). Six slow readers at once: 18 of 18 downloads
-    damaged. aiohttp's own fallback, which this switches on, reads a new bytes
-    object per chunk; 0 of 36 damaged.
+    server writes - one busy parsing - would receive the 6 MB interface
+    bundle at the right length with stretches of it from further on in the
+    file, fail to parse it ("Unexpected token"), and show a black page until
+    reloaded. aiohttp's own fallback, which this switches on, reads a new
+    bytes object per chunk.
 
     Linux - the Pi - has os.sendfile: the kernel sends the file with no buffer
     in between, so nothing changes there.
@@ -214,9 +213,9 @@ class CraftBeerPi:
         self.fermenterrecipe : FermenterRecipeController = FermenterRecipeController(self)
         self.upload : UploadController = UploadController(self)
         self.notification : NotificationController = NotificationController(self)
-        # The brew-day screen's rest timer, one for every screen (Scott, 9 Nov 2026).
+        # The brew-day screen's rest timer, one for every screen.
         self.resttimer : RestTimerController = RestTimerController(self)
-        # Its timers, up to four for every screen (Scott, 11 Nov 2026). The rest timer stays for the screen as first released.
+        # Its timers, up to four for every screen. The rest timer stays alongside.
         self.timers : TimersController = TimersController(self)
         self.satellite = None
         if str(self.static_config.get("mqtt", False)).lower() == "true":
@@ -429,8 +428,8 @@ class CraftBeerPi:
         return self.app
 
     # Seconds aiohttp waits for open requests when stopping, before its
-    # cleanup. Its default, 60, outlasted systemd's TimeoutStopSec (15), so
-    # the cleanup that saves state never ran on a stop (DEFECTS F22).
+    # cleanup. Its default, 60, outlasts systemd's TimeoutStopSec (15), so
+    # the cleanup that saves state would never run on a stop.
     SHUTDOWN_TIMEOUT = 5
 
     def start(self):

@@ -330,13 +330,11 @@ class StepController:
 
         A step persisted as ACTIVE has no task behind it after a reload, because a
         task cannot be serialised. Left alone that state is unrecoverable from the
-        UI: next() raised on task.cancel() against None and returned HTTP 500,
-        start() refused with "Steps already running", and reset_all() declines to
-        reset while a step is ACTIVE.
-
-        The lookup that was meant to handle this passed the raw string "A". Since
-        StepState is a plain Enum, StepState.ACTIVE == "A" is False, so it never
-        matched and the intent never took effect.
+        UI: next() would raise on task.cancel() against None and return HTTP 500,
+        start() refuses with "Steps already running", and reset_all() declines to
+        reset while a step is ACTIVE. The lookup is by StepState.ACTIVE, not the
+        raw string "A": StepState is a plain Enum, so StepState.ACTIVE == "A" is
+        False.
 
         Restarting the step automatically would be the wrong repair. A fresh
         instance re-runs on_start(), which may re-enable AutoMode and switch a
@@ -352,9 +350,8 @@ class StepController:
         minute rest from zero.
 
         Unless the step was allowed to carry on by itself (allow_resume) and the
-        time it was allowed until has not passed. Scott, 30 Oct: "BrewStart
-        should resume after an overnight power cut and attempt to honor the
-        contract to have hot water ready for me". BrewStart allows it for
+        time it was allowed until has not passed, so that BrewStart, after an
+        overnight power cut, still has the hot water ready. BrewStart allows it for
         itself and for the step it hands over to, until two hours after the
         time it was asked for; nothing else does. Such a step is still demoted
         here, and picked up again once start-up has finished, the clock has been
@@ -363,11 +360,9 @@ class StepController:
         interrupted = self.find_by_status(StepState.ACTIVE)
         if interrupted is None:
             # Paused when the server stopped - by the brewer, or by an earlier
-            # restart whose question was never answered. Scott, 3 Nov: "If we
-            # were in the middle of a recipe or current boil step, then an
-            # alert should pop-up and ask if I want to resume the interrupted
-            # step." It used to come back paused with no question. Asked,
-            # never carried on by itself: someone paused it.
+            # restart whose question was never answered. The brewer is asked
+            # whether to resume it, rather than finding it paused with no
+            # question; never carried on by itself: someone paused it.
             paused = self.find_by_status(StepState.STOP)
             if paused is not None:
                 logging.warning(
@@ -457,9 +452,9 @@ class StepController:
         answered some other way, with Start or Reset (_retire_prompts).
 
         For the questions asked as the server starts after a restart - "Resume
-        brew?", the boil waiting to be started - which reached only the pages
-        open at the time, and that is none: a page cannot connect before the
-        server is up (DEFECTS M47). One prompt of a kind for a step at a time.
+        brew?", the boil waiting to be started - which would otherwise reach
+        only the pages open at the time, and that is none: a page cannot
+        connect before the server is up. One prompt of a kind for a step at a time.
         Returns the notification's id.
         """
         prompts = self.__dict__.setdefault("_kept_prompts", {})
@@ -477,15 +472,14 @@ class StepController:
         For the prompts a step sends itself with notify(keep=True): the malt,
         a notification step's question, the wort transfer, the boil's hop, lid
         and first-wort reminders. Kept, they reach a page opened later - a
-        phone opened mid-boil, or a page reloaded, showed no hop alert waiting
-        (the dashboard agent's review of the brew-day screen, 9 Nov). And they
-        go when the step ends, is reset, or the profile is replaced; and when
-        it is paused or fails, unless `while_paused`: the boil does not give a
-        reminder again when it is started again (DEFECTS M36), so its
+        phone opened mid-boil, or a page reloaded, still shows the hop alert
+        waiting. And they go when the step ends, is reset, or the profile is
+        replaced; and when it is paused or fails, unless `while_paused`: the
+        boil does not give a reminder again when it is started again, so its
         reminders stay until answered. A question whose button acts on the
         step goes with the pause: after ALL OFF a notification step's "Next
-        Step" stayed on screen, and pressing it did nothing. One prompt of a
-        kind for a step at a time.
+        Step" would otherwise stay on screen, and pressing it would do nothing.
+        One prompt of a kind for a step at a time.
         """
         if not notification_id or self.find_by_id(step_id) is None:
             return
@@ -550,7 +544,7 @@ class StepController:
         happens. For a step that has promised something by a time - BrewStart's
         hot water by 07:00 - and for the step it hands that promise to.
         Everything else that was running when the server stopped waits for the
-        brewer, as it always has. A reset forgets it.
+        brewer. A reset forgets it.
 
         True when the step was found and marked.
         """
@@ -777,11 +771,10 @@ class StepController:
     async def update(self, item: Step):
         """Replace a step's settings. Returns the step as saved, or None if refused.
 
-        Not while it runs (DEFECTS M33, HC-CORE-01). This built a new instance
-        and swapped it in without stopping the running one, which went on
-        outside the profile: Stop found nothing active, an import could not
-        reach it, and its kettle logic - the HLT element and the pump - kept
-        going. Seen on 2 Nov at 100% after both.
+        Not while it runs. Building a new instance and swapping it in without
+        stopping the running one would leave that one going outside the
+        profile: Stop would find nothing active, an import could not reach it,
+        and its kettle logic - the HLT element and the pump - would keep going.
         """
 
         logging.info("update step")
@@ -814,8 +807,8 @@ class StepController:
             # has run, the hop reminders already given, a mash-in waiting for
             # its malt - belongs to the run, not the form. The step form sends
             # back the copy it loaded when it opened, which can be minutes old:
-            # taken, it would give a reminder again or run time again (DEFECTS
-            # M37). So the run's own values always win; the form's are dropped.
+            # taken, it would give a reminder again or run time again. So the
+            # run's own values always win; the form's are dropped.
             if item.props is None:
                 item.props = Props()
             incoming = item.props.to_dict() if hasattr(item.props, "to_dict") \
@@ -902,15 +895,11 @@ class StepController:
     def _hold_for_brewer(self, step, wait):
         """Leave `step` unstarted and ask the brewer to start it.
 
-        Scott, 1 Nov, at the boil on the simulator: "I need to be able to use
-        the dashboard to operate the pump. Right now, my only option is this
-        dialog box ... I think it should require a manual advance to boil step
-        instead of auto-advance". The boil step used to start by itself the
-        moment the mash out ended, hold its element off, and ask "Is the wort
-        in the boil kettle?" - in a dialog over the whole interface, with the
-        wort pump that moves the wort behind it.
+        The boil needs the brewer at the dashboard first, to run the wort pump
+        that moves the wort, rather than a dialog over the whole interface
+        asking "Is the wort in the boil kettle?" with the pump behind it.
 
-        Now the profile stops before the step. Nothing is active, so nothing
+        So the profile stops before the step. Nothing is active, so nothing
         heats and the dashboard is the brewer's. The step shows that it is
         waiting, and a notification says why, with a button that starts it;
         so do Start and Next. Asked again after a restart (_recover_hold). The
@@ -1001,11 +990,10 @@ class StepController:
             return
 
         # A failed step is where the profile stopped, and the brewer's Start
-        # retries it - what the failure notice tells them to do. Until
-        # 4.7.7.post24 Start passed over it to the next step not yet started,
-        # as the brewer, so after a failed mash out the boil began heating at
-        # once with no question (DEFECTS M32). Moving on by itself, the profile
-        # never passes a failed step.
+        # retries it - what the failure notice tells them to do. Passing over
+        # it to the next step not yet started, as the brewer, would begin the
+        # boil heating at once with no question after a failed mash out.
+        # Moving on by itself, the profile never passes a failed step.
         failed = self.find_by_status(StepState.ERROR)
         if failed is not None:
             if not by_brewer:
@@ -1091,7 +1079,7 @@ class StepController:
             else:
                 # An ACTIVE step with no task behind it is a violated invariant,
                 # normally left by a restart. Returning success here without
-                # changing anything would be worse than the old crash: the brewer
+                # changing anything would be worse than a crash: the brewer
                 # sees the button work while the profile stays stuck, and start()
                 # and reset() both remain blocked by the ACTIVE status.
                 #
@@ -1105,9 +1093,9 @@ class StepController:
                 step.status = StepState.STOP
                 await self.save()
 
-        # A failed step is skipped like a stopped one (DEFECTS M32). It used to
-        # fall through to the start() below, as the brewer, which passed over
-        # it and began the next step - a boil, heating with no question.
+        # A failed step is skipped like a stopped one. Falling through to the
+        # start() below, as the brewer, would pass over it and begin the next
+        # step - a boil, heating with no question.
         step = self.find_by_status(StepState.STOP) or self.find_by_status(StepState.ERROR)
         if step is not None:
             if step.instance is not None:
@@ -1128,11 +1116,6 @@ class StepController:
             logging.info("No Step is running")
 
     async def resume(self):
-        # Dead twice over before: find_by_status("P") never matched - StepState is a
-        # plain Enum so the string comparison fails, and there is no PAUSE member
-        # anyway - and had it matched, step.get("instance") would have raised, since
-        # Step is a dataclass with no .get().
-        #
         # Delegating to start() rather than calling start_step() directly keeps one
         # guarded path: start() refuses while another step is ACTIVE, notifies, and
         # persists the new status. Doing it here as well would duplicate that badly.
@@ -1199,7 +1182,7 @@ class StepController:
                         pass
             # And everything else a step kept about this brew - underscored by
             # convention: the mash-in waiting for its malt, the boil reminders
-            # already given (DEFECTS M35, M36). Left behind, the next brew's
+            # already given. Left behind, the next brew's
             # mash-in would ask for malt in cold water. The keys cleared above
             # are left to their own code and its fallbacks.
             cleared_above = (CBPiStep.ELAPSED_PROP, CBPiStep.RESUME_UNTIL_PROP,
@@ -1362,10 +1345,9 @@ class StepController:
     def add_listener(self, fn):
         """Tell `fn` about the brew steps as they change: fn(event, snapshot).
 
-        For a plugin that follows the brew without running it. Porter, for
-        BrewScribe, 5 Nov: "all of brewScribe's reminders should appear from
-        craftbeerpi: Check mash pH again before mash-out or transfer" - which
-        needs to know when a rest will end, and polling once a real second
+        For a plugin that follows the brew without running it - BrewScribe's
+        reminders, such as "Check mash pH again before mash-out or transfer",
+        need to know when a rest will end, and polling once a real second
         cannot tell that on a simulator running 60 times faster.
 
         `event` is one of LISTENER_EVENTS, and `snapshot` is snapshot(event),
@@ -1487,7 +1469,7 @@ class StepController:
         """Is `step` the runoff to the boil kettle, by its type or its name?"""
         if getattr(step, "type", None) == "HeatStep":
             return False
-        # A SpargeStep is the runoff whatever it is called (Scott, 10 Nov).
+        # A SpargeStep is the runoff whatever it is called.
         if getattr(step, "type", None) == "SpargeStep":
             return True
         name = cls._plain_name(step)
@@ -1501,9 +1483,9 @@ class StepController:
     def _first_wort_at_runoff(self, step):
         """Ask for the boil's first-wort hops as the runoff to the boil kettle starts.
 
-        Scott, 5 Nov: first-wort hops "should be correctly supported". The boil
-        asked for them as it started, and since the profile holds before the
-        boil (4.7.7.post23) that is after the wort is in the kettle. A step
+        First-wort hops go in before the wort reaches the boil kettle, and the
+        profile holds before the boil, so the boil's own start is too late to
+        ask. A step
         named for the runoff starts as the first runnings head for the kettle,
         so the first boil after it asks then, once a brew. With no such step,
         the hold before the boil asks (BoilStep.wait_for_brewer); with no hold
@@ -1610,8 +1592,8 @@ class StepController:
         list(map(lambda item: add_runtime_data(item), data.get("steps")))
         data.get("basic", {}).pop(self.MASH_PH_REMINDER_KEY, None)
         # In one write: an import or the recipe book replaces the whole profile,
-        # and a write broken part-way left an unreadable file, which load()
-        # then set aside for an empty profile (DEFECTS M39).
+        # and a write broken part-way would leave an unreadable file, which
+        # load() would then set aside for an empty profile.
         atomic_write_json(self.path, data, indent=4, sort_keys=True)
         self._held_step_id = None
         self.load()

@@ -1,27 +1,24 @@
 """Run the HLT pump whenever the HLT heats, until the sparge.
 
-Scott, 9 Nov, testing the brew-day screen: "The HLT pump should be going to
-prevent stratification any time I'm using the HLT heat", then "any time before
-the sparge, really". Water heated from below settles into layers, hot on top,
-so the HLT's probe and the HERMS coil each sit in different water. His HLT pump
-is "mainly for HLT recirculation" (7 Nov); on the rig it is Recirc_PUMP, the
-HLT kettle's agitator. From the sparge on it has another job: he fly sparges,
-and it moves the sparge water to the top of the mash tun (9 Nov).
+Water heated from below settles into layers, hot on top, so the HLT's probe
+and the HERMS coil each sit in different water. The HLT pump keeps the HLT
+stirred to prevent that; on the rig it is Recirc_PUMP, the HLT kettle's
+agitator. From the sparge on it has another job: for a fly sparge it moves
+the sparge water to the top of the mash tun.
 
-Nothing ran it. The HLT's own logic (PIDBoil) switches only the element, the
-mash tun's PID_HERMS only its own pump - the wort pump - and an element
-switched on by hand is just the element.
+The HLT's own logic (PIDBoil) switches only the element, the mash tun's
+PID_HERMS only its own pump - the wort pump - and an element switched on by
+hand is just the element: none of them runs the HLT pump.
 
 So, on the server, with no page open too:
 - Before the sparge, when the HLT starts heating - its own AUTO, the mash
   tun's HERMS, or its element switched on - the HLT pump is switched on, and
   a notification says why and asks for its valves to be checked.
 - Including when nobody is there: BrewStart heating the water before the
-  brewer is up. Asked, Scott said yes (9 Nov), and asked for "a corresponding
-  warning to check that the pump is ready to go and the valves are open when I
-  set up the brewStart": a BrewStart step starting asks for that, and waits for
-  an answer. Started with its valves set to move water to the mash tun, the
-  pump would empty the HLT into it and could leave the element dry.
+  brewer is up. A BrewStart step starting asks for the pump and its valves to
+  be checked, and waits for an answer. Started with its valves set to move
+  water to the mash tun, the pump would empty the HLT into it and could leave
+  the element dry.
 - It is left on when the heating stops, so it runs the whole time before the
   sparge rather than stopping and starting between rests.
 - The brewer can still stop it, and ALL OFF does. It starts again the next
@@ -36,16 +33,14 @@ So, on the server, with no page open too:
 - HLT_PUMP_WITH_HEAT = No turns all of this off.
 
 And whatever the setting, the HLT pump is switched off as the runoff ends.
-Walking Test Recipe v5 through on the simulator for Scott (9 Nov: "analyze
-which pumps are turned on and why") found the HLT pump running on after the
-Sparge step's time was up, sending sparge water to the mash tun with nothing
-taking wort out, and a kept warning said so (M60). Scott, 11 Nov: "Any time I
-need to change hoses or "valves" that respective pump should be off", and he
-chose the HLT pump off both when the sparge water is ready (SpargeStep) and
-when the sparge ends. So when the last step named for the runoff ends - its
-time up, or NEXT - with the HLT pump running, it is switched off and a
-notification says so (M71). The wort pump is left as it is, to finish
-draining the mash tun; starting the boil switches it off (BoilStep). A
+Running on after the Sparge step's time is up, it would send sparge water to
+the mash tun with nothing taking wort out; and a pump is off whenever the
+brewer has hoses or valves to change. So the HLT pump is switched off both
+when the sparge water is ready (SpargeStep) and when the sparge ends: when the
+last step named for the runoff ends - its time up, or NEXT - with the HLT pump
+running, it is switched off and a notification says so. The wort pump is left
+as it is, to finish draining the mash tun; starting the boil switches it off
+(BoilStep). A
 runoff step followed by another - Sparge, then Lautering - is one runoff. A
 Stop is a pause, and leaves both pumps as they are.
 

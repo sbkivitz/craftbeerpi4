@@ -516,11 +516,11 @@ class FermenterRampTempStep(CBPiFermentationStep):
         current_target_temp = (
             round((self.starttemp + delta_time * self.ratesecond) * 10) / 10
         )
-        # Never past the end of the ramp. The ramp stopped only when a sample
-        # landed exactly on the rounded endpoint, so a loop that missed that
-        # window - a host stall, a slow restart - kept going: a 68 -> 34 F
-        # crash commanded 33.6 F at 55 h and 23 F at 72 h (DEFECTS F5). Up a
-        # ramp with a heater, the same thing has no ceiling.
+        # Never past the end of the ramp. Stopping only when a sample lands
+        # exactly on the rounded endpoint, a loop that missed that window - a
+        # host stall, a slow restart - would keep going: a 68 -> 34 F crash
+        # would command 33.6 F at 55 h and 23 F at 72 h. Up a ramp with a
+        # heater, the same thing has no ceiling.
         if self.ratesecond >= 0:
             current_target_temp = min(current_target_temp, self.target_temp)
         else:

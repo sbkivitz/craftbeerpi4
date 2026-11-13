@@ -87,13 +87,13 @@ def _parse_frequency(value, actor_id=None):
 def _clamp_duty(value):
     """A duty percentage a GPIO actor can actually use. Never raises.
 
-    `power` was stored exactly as handed over, and the pulse loop then computed
-    its on and off phases from it. A NaN made both `heating_time > 0` and
-    `wait_time > 0` false, so neither branch slept and `run()` spun without
+    The pulse loop computes its on and off phases from `power`. Stored exactly
+    as handed over, a NaN would make both `heating_time > 0` and `wait_time >
+    0` false, so neither branch would sleep and `run()` would spin without
     awaiting anything - which starves the event loop. Nothing else could run:
     not the OFF this actor had been sent, not cancellation, not shutdown. The
-    pin stayed at whatever level it was last driven to, with several kilowatts
-    behind it.
+    pin would stay at whatever level it was last driven to, with several
+    kilowatts behind it.
 
     An unusable value fails to 0 rather than 100, for the same reason
     ActorController._clamp_power does: when the number is meaningless, the only
@@ -115,10 +115,10 @@ def _parse_duty(value):
       _clamp_duty  - "what should the output be?"  A control loop needs this,
                      and must always have an answer.
 
-    Conflating them is how a Set Power action carrying an empty string or a
-    stray word reported success while moving the element to zero: the clamp did
-    its job, failing an unusable value safely to 0, and the action then
-    presented that as the command the brewer had sent. Out of range is still a
+    Conflated, a Set Power action carrying an empty string or a stray word
+    would report success while moving the element to zero: the clamp does its
+    job, failing an unusable value safely to 0, and the action would then
+    present that as the command the brewer had sent. Out of range is still a
     level and is clamped; unparseable is not a level at all.
     """
     try:
@@ -501,14 +501,15 @@ class GPIOPWMActor(CBPiActor):
     )
     async def setpower(self, Power=None, **kwargs):
         logging.info(Power)
-        # Defaulting to 100 meant an action invoked with no value - an empty
-        # payload from the interface or an integration - drove the element to
-        # full power. ActorController.on() already refuses that inference for
-        # the same reason: treating "unset" as a level is how a deliberate 0
-        # became 100 there.
+        # Defaulting to 100 would let an action invoked with no value - an
+        # empty payload from the interface or an integration - drive the
+        # element to full power. ActorController.on() refuses that inference
+        # for the same reason: treating "unset" as a level turns a deliberate
+        # 0 into 100.
         #
-        # int(Power) also raised on a NaN or an empty string, so a malformed
-        # request failed inside the action rather than being rejected.
+        # int(Power) would also raise on a NaN or an empty string, so a
+        # malformed request would fail inside the action rather than being
+        # rejected.
         # Refused rather than reinterpreted. _clamp_duty would turn "" or a
         # stray word into 0, which is right for a control loop and wrong for a
         # command: the element would move and the brewer would be told the
@@ -559,11 +560,11 @@ class GPIOPWMActor(CBPiActor):
                 self.p.start(100 - self.power)
             self.state = True
         except Exception as e:
-            # Was `except: pass`. That swallowed CancelledError and every real
-            # driver fault without a word, so an element or pump that failed to
-            # start looked exactly like one that started. On a HERMS a pump that
-            # silently fails to run leaves the coil with no flow while the HLT
-            # keeps heating, and nobody is told.
+            # Not `except: pass`: that would swallow CancelledError and every
+            # real driver fault without a word, so an element or pump that
+            # failed to start would look exactly like one that started. On a
+            # HERMS a pump that silently fails to run leaves the coil with no
+            # flow while the HLT keeps heating, and nobody is told.
             #
             # Left off and reported. ActorController.on() turns the exception
             # into a logged failure and a False return, which is what the caller
@@ -628,14 +629,12 @@ class GPIOPWMActor(CBPiActor):
 
         # OFF could not be established. Do NOT report it as established.
         #
-        # An earlier version set state = False here, reasoning that a failure
-        # to drive the pin should not also leave the actor believing it was
-        # running. That is backwards for the interlock, which is the thing
-        # standing between two multi-kilowatt elements and a supply that can
-        # carry only one. A false OFF releases it: measured, the controller
-        # reported OFF, the channel retained 85% duty, and the other heater was
-        # then ALLOWED to start. The revision before that reported failure,
-        # kept the state ON, and refused it.
+        # Setting state = False here, so that a failure to drive the pin does
+        # not also leave the actor believing it is running, would be backwards
+        # for the interlock, which is the thing standing between two
+        # multi-kilowatt elements and a supply that can carry only one. A false
+        # OFF releases it: the controller would report OFF while the channel
+        # kept its duty, and the other heater would be ALLOWED to start.
         #
         # So an actor whose output cannot be verified off stays on as far as
         # everything else is concerned, and the failure reaches the caller.

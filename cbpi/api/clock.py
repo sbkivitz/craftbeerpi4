@@ -5,14 +5,14 @@ and only trustworthy if doing so gives the same answer as running it in real
 time. Those two requirements together mean *time itself* is what scales - not
 individual call sites.
 
-Scaling each sleep and duration where it appears was tried first and is a trap.
+Scaling each sleep and duration where it appears is a trap.
 Timing lives in a lot of places: the step Timer, every kettle logic's control
 loop, pump duty cycles, sensor loops, PID sample gates. Miss one and that part
 keeps running at real speed, which does not merely slow the run down - it changes
 the answer. A control loop sampling sixty times slower relative to its plant is a
 different closed-loop system, and it limit cycles where the real one holds steady.
-That was observed: a mash that holds 152 F in real time swung about 10 F when only
-the thermal model had been scaled.
+A mash that holds 152 F in real time swings about 10 F when only the thermal
+model is scaled.
 
 So everything that asks the time, or waits, comes through here:
 

@@ -31,9 +31,9 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
         self.last_update = None
         # The same moment on the monotonic clock, which is what a reading's age
         # is measured on. Wall-clock ages jump with the clock: NTP setting a Pi
-        # without a real-time clock forward after boot made every reading look
-        # hours old, and a step back made a dead probe's last value look fresh
-        # (DEFECTS F29).
+        # without a real-time clock forward after boot would make every reading
+        # look hours old, and a step back would make a dead probe's last value
+        # look fresh.
         self.last_update_monotonic = None
         self.last_update_paired = None
 

@@ -96,10 +96,9 @@ class CBPiActor(metaclass=ABCMeta):
 
         The base implementation records the value so anything reading back
         `instance.power` - a PWM loop, a simulated vessel, the UI - sees what was
-        actually asked for. It previously returned the *existing* power without
-        assigning anything, with unreachable code after the return, so an actor
-        that did not override this silently ignored every power command: a heater
-        told to run at 30% stayed at whatever it was, usually 100.
+        actually asked for. Without that, an actor that does not override this
+        would ignore every power command: a heater told to run at 30% would stay
+        at whatever it was, usually 100.
 
         Hardware actors still override this to drive the output. Clamped to the
         actor's own ceiling, because a caller asking for more than maxoutput is

@@ -19,9 +19,9 @@ class CBPiWebSocket:
         self.cbpi.bus.register_object(self)
         # An open websocket is a request in progress for as long as the page
         # is open, and aiohttp waits for requests in progress before running
-        # its cleanup - the minute it waited was longer than systemd allows a
-        # stop, so cleanup never ran (DEFECTS F22). Pages reconnect on their
-        # own when the server is back.
+        # its cleanup - for up to a minute, longer than systemd allows a stop,
+        # so cleanup would never run. Pages reconnect on their own when the
+        # server is back.
         self.cbpi.app.on_shutdown.append(self.close_all)
 
         # if self.cbpi.config.static.get("ws_push_all", False):
@@ -29,8 +29,8 @@ class CBPiWebSocket:
 
     # Seconds to say goodbye to every open page, all together. aiohttp waits up
     # to ten seconds per page for its reply, one page after another - two
-    # unresponsive browsers outlasted the whole stop systemd allows (DEFECTS
-    # F33). A page that has not answered by then is simply disconnected.
+    # unresponsive browsers would outlast the whole stop systemd allows. A page
+    # that has not answered by then is simply disconnected.
     CLOSE_BUDGET = 2
 
     async def close_all(self, app=None):
@@ -89,12 +89,12 @@ class CBPiWebSocket:
         """Everything a page shows, as the messages a change would broadcast.
 
         A page loads its state once, from GET /system/, and afterwards hears
-        only changes. Reconnecting after the server went away fetched nothing
-        but the actors (the interface asks /actor/ws_update), so a page kept
-        whatever it had loaded with: after a restart the dashboard showed a
-        kettle still on automatic while the restarted server had every logic
-        off. Seen 15 Oct on the 8000 sim - a boil kettle on "auto" sat unheated
-        for 37 minutes, its heater correctly shown off beside it.
+        only changes. Reconnecting after the server went away fetches nothing
+        but the actors (the interface asks /actor/ws_update), so a page would
+        keep whatever it had loaded with: after a restart the dashboard would
+        show a kettle still on automatic while the restarted server had every
+        logic off - a boil kettle on "auto", unheated, its heater correctly
+        shown off beside it.
 
         So a page is told the current state the moment it connects, in the
         topics and shapes of the broadcasts that follow, and needs nothing new
@@ -135,7 +135,7 @@ class CBPiWebSocket:
         # other it shows - left from before a restart, its buttons now doing
         # nothing. Then the ones kept for every page (notify(keep=True)), shown
         # as when they were sent: "Resume brew?" is asked while the server
-        # starts, before any page is open, and reached nobody (DEFECTS M47).
+        # starts, before any page is open, and would otherwise reach nobody.
         add("notification_waiting", lambda: self.cbpi.notification.waiting_prompts())
         # And the warnings and errors OK'd on another page or in BrewScribe:
         # a page asleep in a background tab missed notification_retired for

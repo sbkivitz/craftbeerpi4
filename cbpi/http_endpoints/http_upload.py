@@ -32,7 +32,7 @@ class UploadHttpEndpoints:
         data = await request.post()
         logging.info("Received file upload request with data: {}".format(data))
         # 400 when it was not kept, so the Upload page - which reloads on
-        # success - leaves the error on screen (DEFECTS M45).
+        # success - leaves the error on screen.
         ok = await self.controller.FileUpload(data)
         return web.Response(status=200 if ok else 400)
 
@@ -79,9 +79,8 @@ class UploadHttpEndpoints:
     def _import_result(ok, message):
         """200 and the recipe's name, or 400 and why nothing was imported.
 
-        These answered 200 whatever happened, so a recipe that could not be
-        read - which left the mash profile empty - was reported as created
-        (DEFECTS M39).
+        Answering 200 whatever happened would report a recipe that could not
+        be read as created.
         """
         if ok:
             return web.json_response({"name": message}, status=200)

@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_WATCHDOG_SEC = 120
 
 # Seconds start-up may take before systemd restarts the server. Without it, a
-# start-up that never finished - an initializer waiting forever - left a server
-# that never came up and a watchdog that was never armed (DEFECTS F26). A Pi
+# start-up that never finishes - an initializer waiting forever - would leave a
+# server that never comes up and a watchdog that is never armed. A Pi
 # starts this in well under a minute.
 STARTUP_BUDGET_SEC = 300
 
@@ -120,8 +120,8 @@ class Heartbeat:
     async def _arm_until_sent(self, message):
         # For as long as the start-up budget lasts. A send that fails arms
         # nothing, so retrying cannot stretch a deadline; the loop ends at the
-        # first one that goes. Ten tries and then giving up left a start-up
-        # that hung afterwards with no deadline at all (DEFECTS F48).
+        # first one that goes. Giving up after a fixed number of tries would
+        # leave a start-up that hangs afterwards with no deadline at all.
         for _ in range(max(1, int(self.startup_sec)) - 1):
             await asyncio.sleep(1)
             if self._send(message):
@@ -153,8 +153,8 @@ class Heartbeat:
 
     def _beat_message(self):
         # The watchdog's timeout rides along with every beat. Sent once, a
-        # lost datagram left the watchdog unarmed for good, beats and all
-        # (DEFECTS F26); restating it costs nothing.
+        # lost datagram would leave the watchdog unarmed for good, beats and
+        # all; restating it costs nothing.
         return "WATCHDOG=1\nWATCHDOG_USEC={}".format(int(self.period * 1e6))
 
     async def _beat(self, interval):

@@ -1,10 +1,10 @@
 """The brew-day screen's rest timer, kept here so every screen shows the same one.
 
 Brewing by hand, with no recipe running, the brew-day screen times a rest:
-START TIMER, PAUSE TIMER, and five minutes more or less. Scott, 9 Nov 2026,
-asked for one timer shared by the monitor and the phone ("Share one timer
-between screens"), so the time left and whether it is running live in the
-server, and the screens only send commands and show what they are told.
+START TIMER, PAUSE TIMER, and five minutes more or less. One timer is shared
+by every screen - the monitor and the phone - so the time left and whether it
+is running live in the server, and the screens only send commands and show
+what they are told.
 
 At zero it raises a CraftBeerPi notification with an OK button, which every
 screen shows and keeps until somebody answers it, as hop alerts do.
@@ -29,7 +29,7 @@ class RestTimerController:
     #: A fresh timer, as the screen first shows it: 60:00.
     START = 60 * 60
     #: Five minutes more or less never takes it below one minute or past five
-    #: hours (the approved mockup's limits).
+    #: hours, as in the brew-day design.
     MIN = 60
     MAX = 5 * 60 * 60
     TITLE = "Rest timer"

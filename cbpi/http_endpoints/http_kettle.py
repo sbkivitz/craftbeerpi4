@@ -263,9 +263,8 @@ class KettleHttpEndpoints:
         """
         actor_id = request.match_info["id"]
         data = await request.json()
-        # Every other endpoint sends "action"; this one read "name", so it
-        # passed None and no kettle action could ever be dispatched. Accept
-        # both rather than breaking whatever was sending the old key.
+        # Every other endpoint sends "action"; "name" is accepted too, for
+        # whatever sends that key.
         action = data.get("action", data.get("name"))
         ok = await self.controller.call_action(
             actor_id, action, data.get("parameter")
@@ -273,11 +272,11 @@ class KettleHttpEndpoints:
 
         # Report failure to the caller.
         #
-        # This answered 204 whatever happened, so an action sent to a stopped
-        # logic, or under a name that is not an action, was acknowledged as
-        # applied. The dashboard closed its dialog, the brewer believed the
-        # value was in force, and nothing had run. A notification is not a
-        # substitute for the result of the request that asked for it.
+        # Answering 204 whatever happened would acknowledge an action sent to
+        # a stopped logic, or under a name that is not an action, as applied:
+        # the dashboard would close its dialog, the brewer would believe the
+        # value was in force, and nothing would have run. A notification is
+        # not a substitute for the result of the request that asked for it.
         if ok is False:
             return web.json_response(
                 {

@@ -44,12 +44,11 @@ class StepMove(Enum):
 class _TargetArrival:
     """Arrival within instrument tolerance, for brewing AND fermentation steps.
 
-    These lived on CBPiStep alone. 9785ed0 changed three fermentation call
-    sites to use them, but CBPiFermentationStep does not derive from CBPiStep -
-    so every fermentation step that had to WARM the beer, and every ramp, died
-    on its first comparison with an AttributeError, leaving the step ACTIVE on
-    a dead task: no timer, no next step, one log line (DEFECTS F1). Shared
-    here so neither base can be left without them again.
+    CBPiFermentationStep does not derive from CBPiStep, and both call these:
+    a fermentation step that has to WARM the beer, or a ramp, would otherwise
+    die on its first comparison with an AttributeError, leaving the step
+    ACTIVE on a dead task: no timer, no next step, one log line. Shared here
+    so neither base is without them.
     """
 
     def target_reached(self, sensor_value, target):
@@ -83,8 +82,8 @@ class _TargetArrival:
         except (TypeError, ValueError):
             return False
         # Only a finite reading arrives. NaN never compares true, but -inf
-        # is below every target: a probe fault read as -inf completed a
-        # cooling step on the spot (DEFECTS F6).
+        # is below every target: a probe fault read as -inf would complete a
+        # cooling step on the spot.
         if not (math.isfinite(value) and math.isfinite(goal)):
             return False
         return value >= goal - self._target_tolerance()
@@ -92,12 +91,12 @@ class _TargetArrival:
     def cooled_to(self, sensor_value, target):
         """Has the vessel come DOWN to `target`, within instrument tolerance?
 
-        target_reached()'s mirror, for cooling. The fermentation steps' cooling
-        branches compared `sensor_value <= target` exactly, and a fermenter's
-        cooler is meant to switch off ABOVE its target - CoolerOffsetOff - so a
-        well-tuned fermenter hovers a few tenths over the setpoint and never
-        reads it. The step waited forever: a cold crash that never finished, a
-        cold hold that never began (DEFECTS F3).
+        target_reached()'s mirror, for cooling. An exact `sensor_value <=
+        target` is not enough: a fermenter's cooler is meant to switch off
+        ABOVE its target - CoolerOffsetOff - so a well-tuned fermenter hovers a
+        few tenths over the setpoint and never reads it, and the step would
+        wait forever: a cold crash that never finishes, a cold hold that never
+        begins.
         """
         try:
             value = float(sensor_value)
@@ -105,8 +104,8 @@ class _TargetArrival:
         except (TypeError, ValueError):
             return False
         # Only a finite reading arrives. NaN never compares true, but -inf
-        # is below every target: a probe fault read as -inf completed a
-        # cooling step on the spot (DEFECTS F6).
+        # is below every target: a probe fault read as -inf would complete a
+        # cooling step on the spot.
         if not (math.isfinite(value) and math.isfinite(goal)):
             return False
         return value <= goal + self._target_tolerance()
@@ -115,9 +114,9 @@ class _TargetArrival:
     def reading_usable(value):
         """A reading a step can start from: a finite number below the 900 sentinel.
 
-        The fermentation steps waited with `value > 900`, which raises on a
-        None - the reading before a probe's first sample - and killed the step
-        before it began (DEFECTS F6). NaN and infinities wait too.
+        Waiting with `value > 900` raises on a None - the reading before a
+        probe's first sample - and would kill the step before it began. NaN
+        and infinities wait too.
         """
         try:
             v = float(value)
@@ -340,7 +339,7 @@ class CBPiStep(_TargetArrival, CBPiBase):
 
         For what a step has already done - reached strike, given a hop
         reminder - so that Stop and Start, or a restart, carry on from it
-        rather than doing it again (DEFECTS M35, M36). Keys are underscored,
+        rather than doing it again. Keys are underscored,
         like ELAPSED_PROP: runtime bookkeeping the form does not show, cleared
         by a reset and never carried into a recipe. Never raises.
         """
@@ -439,16 +438,14 @@ class CBPiStep(_TargetArrival, CBPiBase):
         # the HLT, and at every step change the target jumps while the HLT is
         # still where the last rest left it. The mash then drifts DOWN for a
         # while, flattens, and only starts to climb once the HLT has rebuilt the
-        # gradient. That turning point is exactly where this watch used to fire -
-        # at the moment the system is working hardest and is about to succeed.
-        #
-        # Observed on a running rig: the alarm was raised 21.5 F short of a
-        # 168.8 F target, and the step reached target thirty-two brewing minutes
-        # later, having climbed all the way. Nothing was wrong with it.
+        # gradient. That turning point is exactly where a naive watch fires -
+        # at the moment the system is working hardest and is about to succeed:
+        # 21.5 F short of a 168.8 F target, say, with the step reaching target
+        # thirty-two brewing minutes later, having climbed all the way.
         #
         # Only the kettle logic knows whether it can deliver heat right now, so
-        # it is asked. A logic that does not answer is assumed able, which keeps
-        # every directly-heated vessel behaving exactly as before.
+        # it is asked. A logic that does not answer is assumed able, so a
+        # directly-heated vessel is always watched.
         #
         # A report already up stays up: the wort has not warmed, and the HLT
         # falling to the mash is what a dead HLT element looks like.
@@ -551,10 +548,9 @@ class CBPiStep(_TargetArrival, CBPiBase):
             # reporting it here as well would fight with it.
             return
         except Exception as e:
-            # Previously this only logged, so the controller was never told and the
-            # step stayed ACTIVE with a completed, failed task behind it - the same
-            # dead end an interrupted restart used to leave. Next then re-awaited
-            # the failed task and raised the same exception again.
+            # Only logging it would leave the controller untold and the step
+            # ACTIVE with a completed, failed task behind it - a dead end, where
+            # Next re-awaits the failed task and raises the same exception again.
             self.logger.error(
                 "Step %s failed: %s", self.name, e, exc_info=True
             )
@@ -578,9 +574,9 @@ class CBPiStep(_TargetArrival, CBPiBase):
         self.running = False
         self.cancel_reason = StepResult.NEXT
         # A step can be ACTIVE with no task behind it - that is what a profile
-        # restored from disk after a restart looks like. Cancelling None raised
-        # AttributeError, which surfaced as an HTTP 500 from the Next button and
-        # left the profile stuck with no way forward short of editing JSON.
+        # restored from disk after a restart looks like. Cancelling None would
+        # raise AttributeError - an HTTP 500 from the Next button - and leave
+        # the profile stuck with no way forward short of editing JSON.
         if self.task is None:
             self.logger.warning(
                 "Step %s was asked to advance but has no running task", self.name
@@ -599,11 +595,11 @@ class CBPiStep(_TargetArrival, CBPiBase):
         except Exception as e:
             logging.error(e)
         # The time run so far, exactly. note_progress writes it only every
-        # thirty brewing seconds, so a Stop between two writes left up to 29
-        # seconds out - run again once the step is rebuilt (its settings
+        # thirty brewing seconds, so a Stop between two writes would leave up
+        # to 29 seconds out - run again once the step is rebuilt (its settings
         # changed while stopped, or a restart), and a rest stopped in its first
-        # half minute ran in full (DEFECTS M37, Gemini's R5). Whoever stops a
-        # step saves the profile afterwards: Stop and shutdown both do.
+        # half minute would run in full. Whoever stops a step saves the profile
+        # afterwards: Stop and shutdown both do.
         try:
             elapsed = getattr(self, "_elapsed_now", None)
             if elapsed is not None:
@@ -689,8 +685,8 @@ class CBPiFermentationStep(_TargetArrival, CBPiBase):
         error = task.exception()
         if error is not None:
             # The profile is now stuck on this step: ACTIVE, with no task, no
-            # timer and no next step. That was one log line, so an unattended
-            # schedule simply stopped (DEFECTS F13). The fermenter's logic still
+            # timer and no next step. One log line is not enough: an unattended
+            # schedule would simply stop. The fermenter's logic still
             # holds the current target - the beer is safe - but somebody has to
             # know the schedule is not moving.
             self.logger.error("Fermentation step %s failed: %s", self.name, error,
@@ -723,16 +719,16 @@ class CBPiFermentationStep(_TargetArrival, CBPiBase):
         """The sensor's latest value if control may act on it, else None - never raises.
 
         get_sensor_value() returns None for a sensor that is missing, deleted or
-        failing, and every fermentation step read it as
-        get_sensor_value(id).get("value"): an AttributeError that ended the
-        step, leaving the profile ACTIVE on a dead step (DEFECTS F13). None is
-        what target_reached() and cooled_to() already treat as "not yet".
+        failing, so get_sensor_value(id).get("value") raises AttributeError,
+        which would end the step and leave the profile ACTIVE on a dead step.
+        None is what target_reached() and cooled_to() already treat as "not
+        yet".
 
         Judged exactly as the fermenter logic judges it (cbpi.api.readings):
         finite, proven fresh, and a temperature a fermenter can have. A ramp
-        that took a DS18B20's 85 C power-on value as its starting point went on
-        commanding targets from it after the probe recovered, and the logic
-        heated a beer that was being cold-crashed (F15).
+        that took a DS18B20's 85 C power-on value as its starting point would
+        go on commanding targets from it after the probe recovered, and the
+        logic would heat a beer that was being cold-crashed.
         """
         try:
             state = self.get_sensor_value(sensor_id)

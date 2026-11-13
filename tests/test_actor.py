@@ -89,10 +89,9 @@ class ActorTestCase(CraftBeerPiTestCase):
         assert [c.args[:2] for c in notify.call_args_list if c.args[:1] == ("HELLO",)] \
             == [("HELLO", "WOOHO")], "and it should actually have run"
 
-        # Upstream answered 200 to these too, having logged that nothing ran -
-        # so the dashboard showed a refused action as applied. This fork
-        # answers 400. The test asserted 200 for a missing actor and an
-        # undeclared action until 30 Oct: it was asserting the bug.
+        # Upstream answers 200 to these too, having logged that nothing ran -
+        # so the dashboard shows a refused action as applied. This fork
+        # answers 400.
         resp = await self.client.post(path="/actor/1/action",
                                       json=dict(name="myAction", parameter=dict(name="Manuel")))
         assert resp.status == 400, "an actor that does not exist cannot run an action"

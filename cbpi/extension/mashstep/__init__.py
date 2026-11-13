@@ -24,16 +24,15 @@ from voluptuous.schema_builder import message
 def _completion_time(timer):
     """Wall-clock HH:MM at which a timer that has just started reaches zero.
 
-    From what the timer will actually run. These notifications added the
-    step's configured length, so a rest resumed after a power cut with forty
-    minutes left announced an end twenty minutes late (DEFECTS M20). Divided
-    by the clock's scale so a simulated brew day names a time on the clock it
-    is watched by; on a rig the scale is 1.
+    From what the timer will actually run, not the step's configured length:
+    a rest resumed after a power cut with forty minutes left ends in forty
+    minutes. Divided by the clock's scale so a simulated brew day names a
+    time on the clock it is watched by; on a rig the scale is 1.
 
     Never raises. It runs inside the step's run() loop, just after the timer
-    starts, and an exception here ended the step: an end past what the
-    calendar holds raised OSError on Windows, and so did any timer without
-    seconds_left() (DEFECTS M23). A courtesy must not cost the rest.
+    starts, and an exception here would end the step: an end past what the
+    calendar holds raises OSError on Windows, and so does any timer without
+    seconds_left(). A courtesy must not cost the rest.
     """
     try:
         seconds = timer.seconds_left() / clock.scale()
@@ -52,7 +51,7 @@ def _completion_time(timer):
             label="AutoNext",
             options=["Yes", "No"],
             # Declared, so a step made in an editor saves what the step does
-            # when it is missing: it pauses (DEFECTS M41).
+            # when it is missing: it pauses.
             default_value="No",
             description="Automatically move to next step (Yes) or pause after Notification (No)",
         ),
@@ -126,7 +125,7 @@ class NotificationStep(CBPiStep):
             options=["Yes", "No"],
             # Declared, so a step made in an editor switches its kettle on.
             # Missing reads as No, and a Mash In left that way heats nothing:
-            # the brew stalls (DEFECTS M41, Gemini's R2 on 2 Nov).
+            # the brew stalls.
             default_value="Yes",
             description="Switch Kettlelogic automatically on and off -> Yes",
         ),
@@ -167,7 +166,7 @@ class MashInStep(CBPiStep):
 
     #: Kept with the step once the water reaches strike and it waits for the
     #: malt, like elapsed time, so Stop and Start - or a restart - come back to
-    #: that wait: pump held, no second heat to strike (DEFECTS M35).
+    #: that wait: pump held, no second heat to strike.
     WAITING_FOR_MALT_PROP = "_waiting_for_malt"
 
     async def NextStep(self, **kwargs):
@@ -205,7 +204,7 @@ class MashInStep(CBPiStep):
         #
         # This fires the moment the water reaches strike temperature, and then
         # the step waits - indefinitely, and correctly - for the brewer to dough
-        # in and press Next. Releasing the kettle here meant nothing held
+        # in and press Next. Releasing the kettle here would mean nothing held
         # temperature during exactly the minutes a sack of room-temperature grain
         # is going in, which is the largest heat sink of the brew day. The mash
         # then lands below target and, on a HERMS, the correction has to come
@@ -234,8 +233,7 @@ class MashInStep(CBPiStep):
         if self.props.get("Stop_Pump_At_Strike", "Yes") != "No":
             self._set_pump_hold(True)
         # Remembered, so a Stop and Start does not forget that the malt may be
-        # going in: it restarted the pump into the grain and heated to strike
-        # again (DEFECTS M35, found by both reviewers on 2 Nov).
+        # going in, restart the pump into the grain, and heat to strike again.
         self._waiting_for_malt = True
         await self.record(self.WAITING_FOR_MALT_PROP, True)
         self.summary = ""
@@ -285,12 +283,11 @@ class MashInStep(CBPiStep):
         if self.AutoMode == True:
             await self.setAutoMode(True)
             # Again, now that the logic is on. Switching it on builds a new
-            # instance (BasicController.start), so the flag set above landed
-            # on the old one, or on none - and the new one started believing
-            # the tun held grain. Found 27 Oct: MashIn_Pump_Within did nothing
-            # on the sim, and MashIn_DeltaTemp had never widened a mash-in band
-            # in a profile since it was added. The first call stays for a
-            # logic that was already running, which setAutoMode leaves alone.
+            # instance (BasicController.start), so the flag set above lands
+            # on the old one, or on none, and the new one would start believing
+            # the tun held grain - MashIn_Pump_Within and MashIn_DeltaTemp would
+            # do nothing. The first call stays for a logic that was already
+            # running, which setAutoMode leaves alone.
             self._set_grain_present(False)
         self.summary = "Waiting for Target Temp"
         if self.cbpi.kettle is not None and self.timer is None:
@@ -300,7 +297,7 @@ class MashInStep(CBPiStep):
         await self.push_update()
 
     async def _resume_waiting_for_malt(self):
-        """Back to the wait for the malt, as the step was when it stopped (M35).
+        """Back to the wait for the malt, as the step was when it stopped.
 
         The water had reached strike: the target is the rest temperature, the
         tun is taken to hold grain, and the pump is held if the step holds it at
@@ -449,7 +446,7 @@ class MashInStep(CBPiStep):
         while self.running == True:
             await asyncio.sleep(1)
             # Waiting for the malt: strike was reached, and nothing more
-            # happens here until the brewer presses Next (M35).
+            # happens here until the brewer presses Next.
             if getattr(self, "_waiting_for_malt", False):
                 continue
             sensor_value = self.get_sensor_value(self.props.get("Sensor", None)).get(
@@ -696,15 +693,11 @@ SPARGE_PUMPS_OFF = {
 class SpargeStep(CBPiStep):
     """Heat the sparge water, then leave the sparge to the brewer.
 
-    Scott, 10 Nov, walking a recipe on the simulator: "sparge step needs to let
-    the HLT get up to mash out temperature before pumping wort over to boil
-    kettle. I also may do a "batch sparge" - it should be flexible to let me do
-    either", then "I think the wort pump may need to be manual".
-
-    A Sparge step was a MashStep on the mash tun. Its HERMS ran on, so the wort
-    pump ran from the step's first second, and the rig page said to set that
-    pump's valves for the boil kettle as the step started: the wort went over
-    while the HLT was still on its way up from the mash.
+    The sparge water has to reach temperature before wort goes over to the
+    boil kettle, and the sparge may be a fly or a batch sparge, with the wort
+    pump run by hand. As a MashStep on the mash tun, its HERMS would run on,
+    the wort pump with it from the step's first second, and the wort would go
+    over while the HLT was still on its way up from the mash.
 
     So, as this step starts:
     - the mash tun's AUTO goes off. Its HERMS stops, and the wort pump with it:
@@ -713,18 +706,17 @@ class SpargeStep(CBPiStep):
     When the HLT is there, a prompt titled with the step's name says the sparge
     water is ready, and waits on every page for Sparge started. Pressing it
     switches the HLT's AUTO off, so its element can't run as the HLT empties
-    (Scott, 10 Nov, asked: the element off at Sparge started, rather than the
-    water held at temperature through the sparge), and starts the step's
-    timer; with no timer, the step runs until Next Step. From then on a Stop
+    rather than holding the water at temperature through the sparge, and
+    starts the step's timer; with no timer, the step runs until Next Step.
+    From then on a Stop
     and Start, or Resume after a restart, doesn't heat the HLT again. As the
     step ends - its timer, Next Step or Stop - the HLT's AUTO goes off, even if
     the brewer switched it on again; the pumps are as below. With no HLT, or
     its temperature blank, the step leaves the HLT's heat alone and asks at
     once.
 
-    The pumps are off whenever the brewer has hoses to move (Scott, 11 Nov:
-    "Any time I need to change hoses or "valves" that respective pump should
-    be off"; M71). As the step starts, the wort pump - the mash tun's - is
+    The pumps are off whenever the brewer has hoses or valves to change. As
+    the step starts, the wort pump - the mash tun's - is
     switched off too, should it run by hand rather than under the HERMS: its
     hoses go over from recirculating to the runoff. The HLT pump keeps the HLT
     stirred while it heats, and is switched off when the water is ready, or as
@@ -908,7 +900,7 @@ class SpargeStep(CBPiStep):
         self._started = True
         if not resumed:
             await self.record(self.STARTED_PROP, True)
-            # Scott, 10 Nov: the element off once the sparge starts, so it
+            # The element off once the sparge starts, so it
             # can't run as the HLT empties.
             await self._hlt_auto(False)
         if self.timer is not None:
@@ -996,8 +988,7 @@ class WaitStep(CBPiStep):
     async def on_timer_update(self, timer, seconds):
         self.summary = Timer.format_time(seconds)
         # Kept, like a mash rest's, so a restart carries on with what is left
-        # (DEFECTS M43, review item 14: a whirlpool stand ran its full 20
-        # minutes again after a restart).
+        # rather than running the whole stand again.
         await self.note_progress(seconds, self._int_prop("Timer", 0) * 60)
         await self.push_update()
 
@@ -1055,12 +1046,10 @@ def _fmt_temp(value):
 class WhirlpoolStep(WaitStep):
     """A whirlpool or hop stand: a timed wait in the boil kettle, kept warm on request.
 
-    Scott, 4 Nov, after a brew day on the simulator: "whirlpool step cooled too
-    far. I'd like a prompt to ask if I want to raise temp back to whirlpool
-    temp and hold". The stand was a WaitStep - a timer and nothing else - and
-    the wort lost about 18 F over its 20 minutes with nothing watching it.
+    A stand that is only a timer lets the wort lose about 18 F over 20
+    minutes with nothing watching it.
 
-    Now, if the wort falls more than 2 C / 3.6 F below Temp, the brewer is
+    So if the wort falls more than 2 C / 3.6 F below Temp, the brewer is
     asked, once a stand, in a prompt kept until it is answered: heat it back
     and hold it there until the stand ends? Heat and hold sets a hold on the
     kettle's logic - its Hold a temperature where the logic has one, else the
@@ -1275,9 +1264,9 @@ class WhirlpoolStep(WaitStep):
 
         Then say so, here, where it is known why. BoilPower is asked to clear
         the hold quietly: its own words, for a brewer clearing a hold from the
-        dashboard, were "Hold cleared: Boil Kettle boils when it is switched
-        on" - which at the end of a stand, as the chill starts, read as if the
-        kettle were about to boil (Scott, 4 Nov, brewing test recipe v4).
+        dashboard, are "Hold cleared: Boil Kettle boils when it is switched
+        on" - which at the end of a stand, as the chill starts, would read as
+        if the kettle were about to boil.
         """
         if not self._holding:
             return
@@ -1344,7 +1333,7 @@ class WhirlpoolStep(WaitStep):
 
 def _notify_kept(cbpi, title, message, type, action):
     """notify(..., keep=True) where CraftBeerPi can keep a prompt for every
-    page (DEFECTS M47); plain notify where it cannot. Returns the id, if any."""
+    page; plain notify where it cannot. Returns the id, if any."""
     try:
         keeps = "keep" in inspect.signature(cbpi.notify).parameters
     except (TypeError, ValueError):
@@ -1566,9 +1555,9 @@ class BoilStep(CBPiStep):
 
     #: The reminders already given, kept with the step like elapsed time, so
     #: Stop and Start - or a restart - do not give them again: a paused boil
-    #: said "Please add 6.00 oz Willamette" twice (DEFECTS M36, found by both
-    #: reviewers on 2 Nov). A hop that fell due while the server was down was
-    #: never given, so it still is, late.
+    #: would otherwise say "Please add 6.00 oz Willamette" twice. A hop that
+    #: fell due while the server was down was never given, so it still is,
+    #: late.
     FIRST_WORT_DONE_PROP = "_first_wort_done"
     LID_ALERT_DONE_PROP = "_lid_alert_done"
     HOPS_DONE_PROP = "_hops_done"
@@ -1595,10 +1584,7 @@ class BoilStep(CBPiStep):
 
         Asked for before the wort reaches the boil kettle: as a step named for
         the runoff starts (StepController._first_wort_at_runoff), else in the
-        hold before this step (wait_for_brewer), else as it starts (run). Until
-        4.7.7.post31 only as it started, which since the hold (post23) was
-        after the wort was in the kettle. Scott, 5 Nov: first-wort hops "should
-        be correctly supported".
+        hold before this step (wait_for_brewer), else as it starts (run).
         """
         if self.props.get("First_Wort", "No") != "Yes":
             return None
@@ -1702,16 +1688,15 @@ class BoilStep(CBPiStep):
         reads air temperature, which is a perfectly plausible number, so every
         sensor check passes.
 
-        Defaulting to Yes means an existing profile now stops and asks where it
-        used to run straight on. That is deliberate: the cost of the prompt is
-        one press, and the cost of getting it wrong is a fire. A rig that
-        genuinely runs unattended sets CONFIRM_BEFORE_BOIL to No, which is the
-        same decision made explicitly rather than by default.
+        Yes is the default deliberately: the cost of the prompt is one press,
+        and the cost of getting it wrong is a fire. A rig that genuinely runs
+        unattended sets CONFIRM_BEFORE_BOIL to No, which is the same decision
+        made explicitly rather than by default.
 
-        Since 4.7.7.post23 the profile itself stops before this step and waits
-        for the brewer to start it (wait_for_brewer), so the brewer starting it
-        is the confirmation. The question in on_start is now asked only when the
-        step starts some other way - carried on by itself after a restart.
+        The profile itself stops before this step and waits for the brewer to
+        start it (wait_for_brewer), so the brewer starting it is the
+        confirmation. The question in on_start is asked only when the step
+        starts some other way - carried on by itself after a restart.
         """
         return self.get_config_value("CONFIRM_BEFORE_BOIL", "Yes") != "No"
 
@@ -1729,8 +1714,8 @@ class BoilStep(CBPiStep):
         """The brewer has said the wort is in the boil kettle - Start the boil,
         Start, or Wort transferred - so the runoff is over: the wort pump and
         the HLT pump go off, whichever run, once a brew. Their hoses can then
-        be moved for the chill during the boil (Scott, 11 Nov: "Any time I need
-        to change hoses or "valves" that respective pump should be off"; M71).
+        be moved for the chill during the boil: a pump is off whenever its
+        hoses or valves are to be changed.
         Never raises: the boil starts whatever this does."""
         if self.props.get(self.RUNOFF_OFF_PROP, False):
             return
@@ -1754,8 +1739,7 @@ class BoilStep(CBPiStep):
 
         Read by StepController before it moves on by itself: the boil then waits,
         with nothing active and the dashboard free for the pumps, until the
-        brewer presses the button, Start or Next. Scott, 1 Nov: "I think it
-        should require a manual advance to boil step instead of auto-advance".
+        brewer presses the button, Start or Next.
         """
         if not self._needs_transfer_confirmation():
             return None
@@ -1784,7 +1768,7 @@ class BoilStep(CBPiStep):
         self.lid_flag = lid_on and not self.props.get(self.LID_ALERT_DONE_PROP, False)
         self.lid_actor = self.get_config_value("steps_boil_actor", None)
         # What the lid alert says. A rig with a steam condenser keeps the lid on
-        # for the whole boil - Scott's has a Steam Slayer, 1 Nov - and needs
+        # for the whole boil - a Steam Slayer, say - and needs
         # reminding to turn the condenser on instead.
         self.lid_alert_text = (
             str(self.get_config_value("steps_boil_lid_alert", "") or "").strip()
@@ -1898,7 +1882,7 @@ class BoilStep(CBPiStep):
                 # missed hop cannot be added late.
                 #
                 # Kept for a page opened later, and through a pause: the boil
-                # does not give it again (M36). Gone once answered, or the boil
+                # does not give it again. Gone once answered, or the boil
                 # is over or reset.
                 if text is not None and text != "":
                     _kept_for(self, self.cbpi.notify(

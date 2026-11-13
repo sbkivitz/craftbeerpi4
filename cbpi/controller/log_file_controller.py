@@ -71,15 +71,10 @@ class LogController:
         log_data() resolves the id to a registered sensor to get a display
         name, and silently returns when it cannot. That is correct for sensors
         and fatal for anything else: a kettle logic writing "<kettle>.duty" is
-        not a sensor, so every write was dropped without a word.
-
-        Found by running it: PID_LOGGING on, the cascade running, and not one
-        series file on disk. The unit test had passed throughout because it
-        stubbed cbpi.log.log_data and so never met the real controller - a fake
-        more permissive than the thing it stood in for.
+        not a sensor, so every write would be dropped without a word.
 
         This takes the name instead of looking it up. Everything downstream is
-        unchanged: the same listeners, the same millisecond timestamps, the
+        the same: the same listeners, the same millisecond timestamps, the
         same batching, rotation and retention, and the same chart endpoint.
         """
         if not self.sensor_data_listeners:
@@ -132,9 +127,9 @@ class LogController:
 
         The stamp is SIMULATED time: cbpi.api.clock, which on real hardware is
         time.time() itself, so nothing changes there. Stamped with real time,
-        an accelerated run squeezed its x-axis by the time scale - a simulated
-        hour of mash charted across one real minute. `timestamp`, in the same
-        clock, is when the reading was taken, if that was not now.
+        an accelerated run would squeeze its x-axis by the time scale - a
+        simulated hour of mash charted across one real minute. `timestamp`,
+        in the same clock, is when the reading was taken, if that was not now.
 
         Readers accept both formats, so existing logs still load.
         """
@@ -189,19 +184,16 @@ class LogController:
     def _sample_rate_for(self, index):
         """Choose a bucket size from how much time the data actually covers.
 
-        This was hardcoded at 60s, which quietly decides that one minute of
-        wall-clock is the finest thing worth seeing. That is reasonable for a
-        six hour brew day and wrong for everything shorter.
+        A fixed 60s would quietly decide that one minute of wall-clock is the
+        finest thing worth seeing. That is reasonable for a six hour brew day
+        and wrong for everything shorter.
 
-        It was badly wrong for an accelerated simulation while log rows were
-        stamped with real time: at SIM_TIME_SCALE=60 an hour-long mash
-        happened in one real minute and landed in a single 60s bucket - the
-        whole step became one point. Rows now carry simulated time (_emit), so
-        that hour spans an hour; the span still decides the bucket, because
-        the bucket is reduced with .max(), and a bucket too coarse for its
-        span makes the dip when grain goes in not merely coarse but invisible.
-        A chart that cannot show a dough-in dip or a stalled ramp is not worth
-        reading, and those are the two things it is read for.
+        Rows carry simulated time (_emit), so a simulated hour spans an hour;
+        the span decides the bucket, because the bucket is reduced with
+        .max(), and a bucket too coarse for its span makes the dip when grain
+        goes in not merely coarse but invisible. A chart that cannot show a
+        dough-in dip or a stalled ramp is not worth reading, and those are the
+        two things it is read for.
 
         Deriving the rate from the span needs no plugin, no configuration and
         no knowledge of the time scale here.
@@ -217,7 +209,7 @@ class LogController:
         # One bucket per target point. Timestamps carry milliseconds, so this
         # is allowed below a second: an accelerated simulation writes dozens of
         # distinct readings per real second, and flooring at 1s would throw
-        # them away again - which is the whole defect this is here to avoid.
+        # them away.
         # Floored at 100ms, which is finer than anything worth charting.
         seconds = span / self.TARGET_POINTS
         if seconds >= 1:
@@ -229,8 +221,8 @@ class LogController:
     CLOCK_BACK_TOLERANCE_S = 2.0
 
     # How long a clock that went back may run before it is put right, measured
-    # on that clock. NTP set the rig's clock 2 min 9 s after it booted from the
-    # 25 Oct power cut (DEFECTS C17).
+    # on that clock. After a power cut, NTP sets the rig's clock about two
+    # minutes after it boots.
     CLOCK_FIX_WITHIN_S = 900.0
 
     def _log_files_oldest_first(self, name):
@@ -258,10 +250,10 @@ class LogController:
     def _read_log_file(path, column):
         """One log file's rows, in the order written: DateTime and the value.
 
-        Survives what a power cut leaves in a file (DEFECTS C17). NUL bytes
-        where the file had grown but the data never reached the card - 372 of
-        them on 25 Oct, in front of the first row written after the restart -
-        are removed, so that row reads again; before, its time was unreadable.
+        Survives what a power cut leaves in a file. NUL bytes where the file
+        had grown but the data never reached the card - often hundreds, in
+        front of the first row written after the restart - are removed, so
+        that row's time can be read.
         A line that is not two fields is skipped rather than failing the whole
         chart. A row whose time or value cannot be read is kept as NaT / NaN for
         the caller to drop: its time still says something about the clock.
@@ -287,10 +279,10 @@ class LogController:
 
         A Raspberry Pi has no clock that runs without power. After a power cut
         it boots with the time it last saved, the server starts and logs, and a
-        minute or two later NTP sets the real time. On 25 Oct the rig's HLT log
-        ran 10:02:34, then 10:01:01 ... 10:03:09 for 129 rows, then 11:42:14:
-        readings taken at about 11:40-11:42 were stamped 10:01-10:03, and the
-        chart drew the HLT at 114 F at 10:02:56, where it had been about 120.
+        minute or two later NTP sets the real time. The log then runs, say,
+        10:02:34, then 10:01:01 ... 10:03:09 for 129 rows, then 11:42:14:
+        readings taken at about 11:40-11:42 are stamped 10:01-10:03, and a
+        chart would draw them two hours early, among the older readings.
 
         So a step back of more than CLOCK_BACK_TOLERANCE_S, followed within
         CLOCK_FIX_WITHIN_S on the slow clock by a step forward that makes up at

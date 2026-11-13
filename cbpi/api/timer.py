@@ -11,10 +11,10 @@ class Timer(object):
 
     #: How often to report the countdown, in simulated seconds. This is a
     #: display cadence and nothing more - it must never decide when the timer
-    #: finishes, which is what `end_time` is for. Fusing the two is what made a
-    #: twelve second timer measure fifteen: the loop slept a fixed step and
-    #: checked afterwards, so it always ran on past its deadline by whatever the
-    #: last step overshot by, multiplied by the time scale.
+    #: finishes, which is what `end_time` is for. Fused, a twelve second timer
+    #: would measure fifteen: a loop that sleeps a fixed step and checks
+    #: afterwards always runs on past its deadline by whatever the last step
+    #: overshot by, multiplied by the time scale.
     UPDATE_INTERVAL = 1.0
 
     #: Told as any timer starts counting down, has its end moved, stops before
@@ -80,9 +80,9 @@ class Timer(object):
         # Simulated time throughout. A mash rest is a duration in brewing time, not
         # in wall clock: on a real rig the two are the same thing, and on a
         # simulated one a sixty minute rest should take sixty simulated minutes
-        # however fast the model is being run. Measuring this in wall clock is what
-        # made a condensed brew day impossible - the physics compressed, the rests
-        # did not, and a "fast" run still took its full number of hours.
+        # however fast the model is being run. Measured in wall clock, a condensed
+        # brew day would be impossible - the physics compressed, the rests not, and
+        # a "fast" run still taking its full number of hours.
         #
         # The rest is expressed as a deadline rather than as a series of one
         # second sleeps. Those are not equivalent: sleeping a fixed step and
@@ -114,10 +114,10 @@ class Timer(object):
                         raise
                     except Exception as e:  # noqa: BLE001
                         # A display callback must never end a rest. Raising
-                        # here ended _job(), and done() fires the completion
+                        # here would end _job(), and done() fires the completion
                         # callback for any end that is not a cancellation -
-                        # so one failed push_update finished a fourteen-day
-                        # fermentation rest on the spot (DEFECTS F13).
+                        # so one failed push_update would finish a fourteen-day
+                        # fermentation rest on the spot.
                         if getattr(self, "_update_error", None) != repr(e):
                             self._update_error = repr(e)
                             logging.warning("Timer display update failed: %s", e)
@@ -253,13 +253,7 @@ class Timer(object):
         and those checks sit inside run() loops that keep iterating after the
         countdown has finished. Reporting False once the task completes means
         the next iteration starts the rest again - a sixty minute mash that
-        quietly runs twice. That was measured: an end-to-end brew day went from
-        410 to 952 seconds before this distinction was drawn.
-
-        It was previously a plain method that every step overwrote with a
-        boolean, which worked by accident - a bound method is not the singleton
-        True - and left reset() and set_time() permanently disabled, because
-        nothing ever set the boolean back to False.
+        quietly runs twice.
         """
         return self._started
 

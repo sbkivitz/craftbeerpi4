@@ -5,22 +5,21 @@ zero bytes. The w1_therm driver computes the CRC over those bytes, gets 0x00,
 compares it against the stored CRC byte which is also 0x00, and prints YES.
 `t=0` then parses to a confident 0.000 C.
 
-Observed on the rig on 11 Oct, not theorised. A failing probe branch did this
-to two physically healthy probes: both read 0 C, both passed CRC, and both
-published with a FRESH AGE, because the read "succeeded" and refreshed
-last_success. Every staleness protection downstream keys off last_success, so
-none of them fired. On a Fahrenheit rig that is 32 F on every probe at once,
-and a kettle logic sees a vessel 120 F below target and calls for full power.
+A failing probe branch can do this to physically healthy probes: each reads
+0 C, passes CRC, and publishes with a FRESH AGE, because the read "succeeded"
+and refreshed last_success. Every staleness protection downstream keys off
+last_success, so none of them fires. On a Fahrenheit rig that is 32 F on every
+probe at once, and a kettle logic sees a vessel 120 F below target and calls
+for full power.
 
-The scratchpads below are real, captured from the rig by the rig agent while
-the bus was healthy, which is why the fixtures are trustworthy rather than
-invented.
+The scratchpads below are real, captured from the rig while the bus was
+healthy, so the fixtures are trustworthy rather than invented.
 """
 
 from cbpi.extension.onewire import _scratchpad_is_empty
 
 
-# Captured from the physical rig, 11 Oct 2026, both probes reading correctly.
+# Captured from the physical rig, both probes reading correctly.
 BK_HEALTHY = "17 02 4b 46 7f ff 0c 10 36 : crc=36 YES"
 MASH_HEALTHY = "0c 01 4b 46 7f ff 0c 10 ca : crc=ca YES"
 

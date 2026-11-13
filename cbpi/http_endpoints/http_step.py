@@ -131,9 +131,9 @@ class StepHttpEndpoints:
         )
         saved = await self.controller.update(step)
         if saved is None:
-            # Refused: the step is running (DEFECTS M33). The form stays open
-            # with their changes and shows why: these words. The other pages
-            # are told in a warning, which the old pages show for 5 s.
+            # Refused: the step is running. The form stays open with their
+            # changes and shows why: these words. The other pages are told in
+            # a warning, which older pages show for 5 s.
             existing = self.controller.find_by_id(id)
             return web.json_response(
                 status=409,

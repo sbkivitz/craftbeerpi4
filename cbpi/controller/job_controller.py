@@ -31,9 +31,9 @@ class JobController(object):
             # A background task that hangs, or raises, must not take its own
             # schedule down with it.
             #
-            # This was `await method()` bare. An exception propagated out of
-            # job_loop and ended the task permanently - silently, since the
-            # scheduler simply has one fewer job - and a hang blocked every
+            # With a bare `await method()`, an exception would propagate out
+            # of job_loop and end the task permanently - silently, since the
+            # scheduler simply has one fewer job - and a hang would block every
             # later execution forever. Either way the job stops running and
             # nothing says so, which for anything doing safety-relevant
             # bookkeeping is the worst way to fail.

@@ -32,7 +32,7 @@ class SensorController(BasicController):
         """Seconds since this sensor's last reading, or None if it has none.
 
         On the monotonic clock when the reading was stamped by push_update, so
-        a clock change cannot age or rejuvenate a reading (DEFECTS F29). On the
+        a clock change cannot age or rejuvenate a reading. On the
         wall clock otherwise - including when last_update has been set by
         anything else since, which then knows better than the stamp.
         """
@@ -66,16 +66,16 @@ class SensorController(BasicController):
 
     # A sensor that publishes once a minute is not stale at 31 seconds.
     #
-    # Thirty seconds was chosen on the assumption that drivers publish about
-    # once a second. The bundled OneWire driver defaults to `Interval = 60`, so
-    # on a healthy probe the reported age sawtooths 0 -> 60 and spends roughly
-    # half of every minute above 30. A consumer that cuts heat on that cycles
-    # the element and raises a fault pair every minute of a brew day, with
-    # nothing actually wrong. MQTT is worse: Tasmota's default telemetry period
-    # is 300s, so such a sensor would never look fresh at all.
+    # A fixed thirty seconds assumes drivers publish about once a second. The
+    # bundled OneWire driver defaults to `Interval = 60`, so on a healthy probe
+    # the reported age sawtooths 0 -> 60 and spends roughly half of every
+    # minute above 30. A consumer that cuts heat on that would cycle the
+    # element and raise a fault pair every minute of a brew day, with nothing
+    # actually wrong. MQTT is worse: Tasmota's default telemetry period is
+    # 300s, so such a sensor would never look fresh at all.
     #
-    # OneWire's own internal check already had the right idea - it allows
-    # `interval * 3` - so this follows that convention rather than inventing a
+    # OneWire's own internal check allows `interval * 3`, so this follows
+    # that convention rather than inventing a
     # second one. Three missed publications is a real fault at any cadence,
     # where a fixed wall-clock number is only right for one.
     DEFAULT_MAX_AGE = 30

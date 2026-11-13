@@ -126,11 +126,11 @@ class SensorLogTargetCSV(CBPiExtension):
         if id not in self.cbpi.log.datalogger:
             # Sized to hold a brew day, not an hour.
             #
-            # The defaults were 100 KB x 3, which is 400 KB per sensor. A real
-            # sensor logs about once a second at roughly 32 bytes a row, so
-            # that is about three and a half hours - the chart silently loses
-            # the start of a mash before the boil is over, and the one time
-            # anyone reads back a whole session is after something went wrong.
+            # 100 KB x 3, 400 KB per sensor, would hold about three and a half
+            # hours: a real sensor logs about once a second at roughly 32 bytes
+            # a row, so the chart would silently lose the start of a mash before
+            # the boil is over, and the one time anyone reads back a whole
+            # session is after something went wrong.
             #
             # 500 KB x 5 is 3 MB per sensor, about 26 hours at one row a
             # second. Three sensors is 9 MB, which is nothing on the smallest
@@ -177,13 +177,12 @@ class SensorLogTargetCSV(CBPiExtension):
             #
             # logging.getLogger() returns a process-global singleton, and this
             # block is re-entered whenever the datalogger dict has lost the id -
-            # after clear_log, or a sensor edit. Each pass used to attach ANOTHER
-            # RotatingFileHandler to the same file, so the file ended up with
+            # after clear_log, or a sensor edit. Attaching ANOTHER
+            # RotatingFileHandler on each pass would leave the file with
             # several open handles. On Windows the rollover then fails outright
             # (os.rename cannot move a file another handle holds) and sensor
             # logging stops; on Linux it survives but writes every reading two
-            # or three times. Either way the chart is wrong, which is how this
-            # was noticed.
+            # or three times. Either way the chart is wrong.
             for existing in list(data_logger.handlers):
                 try:
                     data_logger.removeHandler(existing)

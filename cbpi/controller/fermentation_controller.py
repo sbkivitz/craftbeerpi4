@@ -38,18 +38,17 @@ class FermentationController:
         # fermenter id -> the step that was RUNNING when the server last
         # stopped. load() turns an active step into STOP so nothing runs before
         # it is asked to - but a step the brewer paused is STOP too, and
-        # AutoStart must resume the first and never the second (DEFECTS F2,
-        # F4). The step, not just the fermenter: with a paused step ahead of
-        # the interrupted one, resuming "the first STOP step" picked the paused
-        # one (F7).
+        # AutoStart must resume the first and never the second. The step, not
+        # just the fermenter: with a paused step ahead of the interrupted one,
+        # resuming "the first STOP step" would pick the paused one.
         self.interrupted = {}
         # Fermenters whose recipe is being replaced right now (see toggle).
         self._replacing = set()
         # on_shutdown, not on_cleanup. aiohttp runs on_shutdown, then waits up
         # to its shutdown timeout for open requests - the interface's
         # websocket is one, for as long as a browser is open - and only then
-        # runs on_cleanup. systemd's SIGKILL arrives first, so fermenter
-        # actors were never switched off on a stop (DEFECTS F22).
+        # runs on_cleanup. systemd's SIGKILL arrives first, so on_cleanup would
+        # never switch fermenter actors off on a stop.
         self.cbpi.app.on_shutdown.append(self.shutdown)
 
     async def init(self):
@@ -62,9 +61,9 @@ class FermentationController:
         if os.path.exists(self.path) is False:
             if os.path.exists(self.path + self.BACKUP_SUFFIX):
                 # The backup is the last saved copy of every fermenter. An empty
-                # file written here was read by load() as valid and copied over
-                # that backup, so a missing fermenter_data.json cost both, at
-                # startup, without a word (DEFECTS F50). load() restores it.
+                # file written here would be read by load() as valid and copied
+                # over that backup, so a missing fermenter_data.json would cost
+                # both, at startup, without a word. load() restores it.
                 logging.warning("Missing fermenter_data.json file. Restoring its backup")
             else:
                 logging.warning("Missing fermenter_data.json file. INIT empty file")
@@ -79,17 +78,15 @@ class FermentationController:
     async def _deenergize(self, fermenter):
         """Switch a fermenter's heater, cooler and valve off.
 
-        shutdown() stopped the step tasks and stopped there, so a fermenter
-        that was heating or cooling when it was shut down stayed that way.
-        Cancelling the task that was commanding an actor does not command the
-        actor off - nothing else was going to.
+        Stopping the step tasks alone would leave a fermenter that was heating
+        or cooling when it was shut down that way: cancelling the task that
+        was commanding an actor does not command the actor off.
 
-        This is the same defect that ActorController.shutdown fixes for
-        kettles, in a different controller, and it matters most on the
-        single-fermenter path: ActorController.shutdown sweeps every actor, but
-        it only runs when the whole application exits. Shutting down one
-        fermenter runs none of it, so its element stayed live with no step
-        behind it.
+        ActorController.shutdown does the same for kettles, and this matters
+        most on the single-fermenter path: ActorController.shutdown sweeps
+        every actor, but it only runs when the whole application exits.
+        Shutting down one fermenter runs none of it, so its element would stay
+        live with no step behind it.
 
         Each actor is switched off independently. One failing must not stop the
         others, because the remaining ones are exactly the elements still
@@ -138,10 +135,10 @@ class FermentationController:
         replaced, and with AutoMode No on every step nothing else would ever
         switch control back on. A step on AutoMode Yes switches the logic off
         as it stops, so that is refused while the recipe is replaced, and the
-        logic restarted if it stopped anyway (DEFECTS F44). Its actors are
-        switched off only if no logic is driving them - otherwise the logic
-        owns them, and switching them off just had it switch them back on a
-        second later (DEFECTS F25).
+        logic restarted if it stopped anyway. Its actors are switched off only
+        if no logic is driving them - otherwise the logic owns them, and
+        switching them off would just have it switch them back on a second
+        later.
         """
         try:
             self.save()
@@ -152,9 +149,9 @@ class FermentationController:
         if fermenterid == None:
             for fermenter in self.data:
                 self.logger.info("Shutdown {}".format(fermenter.name))
-                # The logic first. A logic still ticking re-commanded the
+                # The logic first. A logic still ticking would re-command the
                 # cooler a second after _deenergize switched it off, and the
-                # process then exited with it on (DEFECTS F10).
+                # process would then exit with it on.
                 await self._stop_logic(fermenter)
                 await self._stop_steps(fermenter)
                 # After the steps, so a step cannot re-command an actor this
@@ -168,7 +165,7 @@ class FermentationController:
             if was_alive and not self._logic_alive_for(fermenter):
                 # Stopped by a step's own cleanup, some way toggle() did not
                 # see. It was holding the beer, and nothing else would switch
-                # it on again (DEFECTS F44).
+                # it on again.
                 self.logger.warning("%s: temperature control stopped while its recipe was "
                                     "replaced - switching it on again", fermenter.name)
                 await self.start_logic(fermenterid)
@@ -183,9 +180,9 @@ class FermentationController:
         data, problem = self._read(self.path)
         if problem is not None:
             # Kept, not deleted: it is the only copy of every fermenter and
-            # profile, and it was deleted and replaced with an empty one -
-            # silently - so an unattended tank came back from a power cut with
-            # no fermenter and nothing controlling it (DEFECTS F38).
+            # profile. Deleted and replaced with an empty one, an unattended
+            # tank would come back from a power cut with no fermenter and
+            # nothing controlling it.
             kept = quarantine(self.path)
             data, backup_problem = self._read(self.path + self.BACKUP_SUFFIX)
             # A missing file is not an unreadable one: there is nothing to keep.
@@ -466,9 +463,9 @@ class FermentationController:
         item = self._find_by_id(id)
         if item is not None:
             # Stop everything driving its actors before forgetting it. Deleting
-            # a running fermenter used to leave its logic going - with nothing
-            # in the interface to switch it off - commanding the heater and
-            # cooler of a fermenter that no longer existed (DEFECTS F10).
+            # a running fermenter would otherwise leave its logic going - with
+            # nothing in the interface to switch it off - commanding the heater
+            # and cooler of a fermenter that no longer exists.
             await self._stop_logic(item)
             await self._stop_steps(item)
             await self._deenergize(item)
@@ -675,7 +672,7 @@ class FermentationController:
             logging.info("{} Start Id {} ".format(item.name, id))
             # The task, not the `running` flag. A logic waiting out its restart
             # delay has `running` False and a live task, and a second instance
-            # started beside it would drive the same actors (DEFECTS F8).
+            # started beside it would drive the same actors.
             if item.instance is not None and self._logic_alive(item.instance):
                 logging.warning("{} already running {}".format(item.name, id))
                 return
@@ -706,8 +703,8 @@ class FermentationController:
             elif id in getattr(self, "_replacing", ()):
                 # A step stopping because its recipe is being replaced. With
                 # AutoMode Yes its on_stop switches control off - and with the
-                # new recipe's steps on AutoMode No, nothing ever switched it
-                # on again: no control, and nobody told (DEFECTS F44).
+                # new recipe's steps on AutoMode No, nothing would ever switch
+                # it on again: no control, and nobody told.
                 logging.info("%s: recipe being replaced - temperature control stays on",
                              item.name)
             else:

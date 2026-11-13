@@ -33,15 +33,11 @@ class Props:
         return key in self.__data__
 
     def __delitem__(self, key):
-        # Props supported reading and writing by key but not deleting, so
-        # `del props[key]` raised TypeError. The step controller uses exactly
-        # that to clear recorded progress on reset, inside a try/except that
-        # turned the failure into a warning - so the deletion never happened
-        # and nothing looked broken.
-        #
-        # The consequence is the bug that code exists to prevent: a sixty
-        # minute rest interrupted at minute forty-five, then reset, comes back
-        # as a fifteen minute rest, silently.
+        # The step controller uses `del props[key]` to clear recorded progress
+        # on reset, inside a try/except that turns a failure into a warning.
+        # Without deletion that clearing would fail silently, and a sixty
+        # minute rest interrupted at minute forty-five, then reset, would come
+        # back as a fifteen minute rest.
         del self.__data__[key]
 
     def get(self, key, d=None):

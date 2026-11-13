@@ -22,12 +22,12 @@ class ActorController(BasicController):
         # The moment shutdown begins, not at cleanup. aiohttp runs on_cleanup
         # only after waiting for open requests to finish, and systemd's
         # SIGKILL could arrive before it - leaving every element and pump as
-        # it was (DEFECTS F22).
+        # it was.
         self._shutting_down = False
         # FIRST of the on_shutdown hooks, whatever was constructed before it.
-        # Closing the interface's websockets ran ahead of this and could wait
-        # ten seconds per unresponsive browser - long enough for systemd's
-        # SIGKILL to arrive with everything still on (DEFECTS F33).
+        # Closing the interface's websockets can wait ten seconds per
+        # unresponsive browser - long enough, if it ran first, for systemd's
+        # SIGKILL to arrive with everything still on.
         self.cbpi.app.on_shutdown.insert(0, self.shutdown_begins)
 
     # Seconds the switch-off sweep at shutdown may take, all actors together.
@@ -38,8 +38,8 @@ class ActorController(BasicController):
 
         All at once, each in a task of its own, within one budget: a driver
         that hangs cannot hold up the rest, and one whose await raises
-        CancelledError cannot abort the sweep - or every shutdown hook after
-        this one, which is what an uncaught one did (DEFECTS F34).
+        CancelledError cannot abort the sweep - or, uncaught, every shutdown
+        hook after this one.
         """
         self._shutting_down = True
         drivers = [(item.id, item.instance) for item in self.data if item.instance is not None]
@@ -92,8 +92,8 @@ class ActorController(BasicController):
 
         stop() ends the driver's task, and only a driver whose on_stop drives
         its output low - the GPIO actor - is then off. An MQTT or HTTP relay
-        that was on stayed on, its replacement reported off, and nothing ever
-        switched the relay off again (DEFECTS F43).
+        that was on would stay on, its replacement would report off, and
+        nothing would ever switch the relay off again.
         """
         item = self.find_by_id(id)
         driver = getattr(item, "instance", None)
@@ -189,9 +189,9 @@ class ActorController(BasicController):
         return accepts
     def create(self, data):
         # The base implementation only restores id/name/type/props, so everything
-        # actor.json persists beyond that was silently reset to the dataclass
-        # defaults on every start - a heater configured to run at 70% came back at
-        # 100%. to_dict() writes these fields, so read them back.
+        # actor.json persists beyond that would silently reset to the dataclass
+        # defaults on every start - a heater configured to run at 70% would come
+        # back at 100%. to_dict() writes these fields, so read them back.
         #
         # 'state' is deliberately NOT restored. It is written so the UI can show
         # what an actor was doing, but restoring it would switch a heater or pump
@@ -384,17 +384,15 @@ class ActorController(BasicController):
                 # `is not None`, not truthiness.
                 #
                 # Zero is a legitimate commanded level, not "unset". Treating it
-                # as unset made a deliberate 0 fall through to 100, so an actor
-                # that had been ramped down to zero came back at FULL power the
+                # as unset would make a deliberate 0 fall through to 100, so an
+                # actor ramped down to zero would come back at FULL power the
                 # next time anything called on() without an explicit level.
                 # The dataclass already defaults power to 100, so a fresh actor
                 # still starts fully on - nothing needs truthiness to get that.
                 #
                 # The brewer's level, not `power`: a kettle logic sets `power`
-                # every cycle, so the element came back on at whatever duty the
-                # logic last asked for. Scott, 10 Nov, heating strike water by
-                # hand after the HLT's AUTO had run: "I see the power is capped
-                # at 25%" (cbpi/api/automation.py).
+                # every cycle, so the element would come back on at whatever duty
+                # the logic last asked for (cbpi/api/automation.py).
                 level = item.manual_power if item.manual_power is not None else item.power
                 power = level if level is not None else 100
 
@@ -442,15 +440,15 @@ class ActorController(BasicController):
                             # request cancelled while the relay had switched
                             # and the driver waited for its acknowledgement.
                             # The output may be on, and nothing after this
-                            # would ever switch it off (DEFECTS F41).
+                            # would ever switch it off.
                             if getattr(self, "_shutting_down", False):
                                 self._undo_on_later(id, driver)
                             raise
                         if getattr(self, "_shutting_down", False):
                             # Shutdown began while this was switching on, and
                             # its sweep may already have passed this actor: a
-                            # switch-on still in flight landed after it
-                            # (DEFECTS F35). Undo it.
+                            # switch-on still in flight lands after it. Undo
+                            # it.
                             logging.info("Actor %s: shutdown began during its switch-on - "
                                          "switching it off again", id)
                             await driver.off()
@@ -480,11 +478,11 @@ class ActorController(BasicController):
                 # Record what was actually commanded.
                 #
                 # to_dict() reports state from the live instance but power from
-                # this dataclass, and nothing here ever wrote to it - so the
-                # power shown in the interface, and read back by any logic that
-                # inspects the actor, was whatever the actor happened to be
-                # created with. A boil kettle driven at 100% then 85% reported
-                # 70% throughout, and `on(id, power=None)` resumed at that stale
+                # this dataclass, so unless it is written here the power shown
+                # in the interface, and read back by any logic that inspects the
+                # actor, would be whatever the actor happened to be created with:
+                # a boil kettle driven at 100% then 85% would report 70%
+                # throughout, and `on(id, power=None)` would resume at that stale
                 # figure rather than the last one asked for.
                 item.power = self._clamp_power(power)
                 item.output = output
@@ -508,13 +506,10 @@ class ActorController(BasicController):
                 # Already running, so this is a change of level rather than a
                 # start. Exactly one of the two drives; the other is derived.
                 #
-                # It used to call both. `output` was defaulted from the actor
-                # before `set_power` ran, so `set_output` then recomputed the
-                # power from that stale figure and undid the change - asking a
-                # running heater for 60% left it at 100%. It was invisible only
-                # because item.power was never written at all, which made the
-                # guard inside set_output compare two stale values and do
-                # nothing.
+                # Calling both would undo the change: `output` is defaulted from
+                # the actor before `set_power` runs, so `set_output` would then
+                # recompute the power from that stale figure - asking a running
+                # heater for 60% would leave it at 100%.
                 if output_given and not power_given:
                     await self.set_output(id, output)
                 elif power_given:
@@ -536,8 +531,8 @@ class ActorController(BasicController):
 
             # Unconditional, and idempotent.
             #
-            # This used to call the hardware only when the software believed the
-            # actor was already on. That makes OFF a no-op exactly when it is
+            # Calling the hardware only when the software believes the actor
+            # is on would make OFF a no-op exactly when it is
             # most needed: after a desync, a restart, a relay that latched, or a
             # failed ON that left the instance's state flag behind. An emergency
             # stop would then return success having sent nothing at all.
@@ -569,22 +564,18 @@ class ActorController(BasicController):
             # A caller that gets True from an emergency stop is entitled to
             # believe the element is de-energized.
             #
-            # `power` is deliberately NOT cleared here, and this reverses an
-            # earlier change that did clear it.
-            #
-            # The problem that change addressed is real: a de-energized element
-            # reported "power=100, state=False", and every consumer showing
-            # power without also checking state displayed a number that was not
-            # true. But `power` is not a report of what is flowing - it is the
+            # `power` is deliberately NOT cleared here. A de-energized element
+            # reports "power=100, state=False", and a consumer showing power
+            # without also checking state displays a number that is not true.
+            # But `power` is not a report of what is flowing - it is the
             # configured duty to use when the actor is next switched on.
             # on(id) with no power argument reads it back.
             #
-            # Zeroing it therefore destroyed the setting: a heater configured at
-            # 70%, switched off and switched on again, came back at 0% and
-            # silently delivered nothing. Verified on the rig - set 70, off,
-            # on, and the element sat at 0% while the interface claimed it was
-            # running. It persisted to actor.json too, so the configured duty
-            # was lost for good.
+            # Zeroing it would destroy the setting: a heater configured at 70%,
+            # switched off and switched on again, would come back at 0% and
+            # silently deliver nothing while the interface claimed it was
+            # running. It persists to actor.json too, so the configured duty
+            # would be lost for good.
             #
             # A stale readout is a cosmetic fault. An element that does nothing
             # when asked is the brewer standing over a kettle that will not
@@ -630,10 +621,10 @@ class ActorController(BasicController):
         confused, and driving an element from a confused number is worse than
         driving it from a sane one.
 
-        An unreadable value fails to 0, not 100. This used to return 100, so
-        `set_power(id, None)` or a malformed value from a plugin or an HTTP
-        request went to FULL power on a multi-kilowatt element. When the number
-        is meaningless the only defensible output is no heat.
+        An unreadable value fails to 0, not 100: otherwise `set_power(id,
+        None)` or a malformed value from a plugin or an HTTP request would go
+        to FULL power on a multi-kilowatt element. When the number is
+        meaningless the only defensible output is no heat.
         """
         try:
             return max(0, min(100, int(round(float(power)))))
@@ -648,11 +639,10 @@ class ActorController(BasicController):
             item = self.find_by_id(id)
             # Clamp before the driver sees it, not after.
             #
-            # The raw value went to the hardware and only the reported field
-            # was clamped, so a driver could be left holding a NaN while the
-            # dashboard showed a sane number. In GPIOActor that stopped the
-            # pulse loop awaiting anything at all, which starved the event loop
-            # and made the element unswitchable.
+            # Clamping only the reported field would leave a driver holding a
+            # NaN while the dashboard showed a sane number. In GPIOActor that
+            # stops the pulse loop awaiting anything at all, which starves the
+            # event loop and makes the element unswitchable.
             #
             # The driver validates its own input too. This is the boundary
             # every logic, step and plugin goes through, so it is the cheapest
@@ -690,11 +680,10 @@ class ActorController(BasicController):
             # between working and not. Every PID calls set_power once per
             # control cycle, overwhelmingly with the value it already holds,
             # and each broadcast serialises every actor and sends it to every
-            # websocket client. Pushing unconditionally starved the event loop
-            # badly enough to break a brew day: mash progress stopped being
-            # written to disk, a rest that should have run for an hour ended
-            # in forty-five seconds, and resuming timed out. 38/44 with the
-            # unconditional push, 46/47 with this guard.
+            # websocket client. Pushing unconditionally starves the event loop
+            # badly enough to break a brew day: mash progress stops being
+            # written to disk, a rest that should run for an hour ends in
+            # forty-five seconds, and resuming times out.
             if item.power != previous_power or item.output != previous_output:
                 self._publish_actor_state(id, item)
 
@@ -729,17 +718,16 @@ class ActorController(BasicController):
     def _publish_actor_state(self, id, item):
         """Broadcast the actor list. One owner, so the guard is not bypassable.
 
-        Both the controller's own commands and the drivers' callbacks publish,
-        and the driver path had no change guard at all: GPIOActor.set_power
-        calls actor_update() on every pulse-loop decision, so guarding only
-        set_power left the per-cycle broadcast load exactly where it was - on
-        the hardware path, which is the one that matters.
+        Both the controller's own commands and the drivers' callbacks publish:
+        GPIOActor.set_power calls actor_update() on every pulse-loop decision,
+        so guarding only set_power would leave the per-cycle broadcast load
+        exactly where it is - on the hardware path, which is the one that
+        matters.
 
         Each broadcast serialises every actor and sends it to every websocket
-        client. Doing that once per control cycle starved the event loop badly
-        enough to break a brew day: mash progress stopped being written to
-        disk, an hour-long rest ended in forty-five seconds, and resuming timed
-        out.
+        client. Doing that once per control cycle starves the event loop badly
+        enough to break a brew day: mash progress stops being written to disk,
+        an hour-long rest ends in forty-five seconds, and resuming times out.
         """
         self.cbpi.ws.send(
             dict(

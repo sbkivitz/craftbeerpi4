@@ -105,8 +105,8 @@ class PluginController:
 
         # Compared as pip compares names: a distribution and the package it
         # installs need not be spelled alike. cbpi4-BrewScribe installs
-        # cbpi4_BrewScribe, and was reported "not discovered" on every start
-        # while it loaded perfectly well (4 Nov).
+        # cbpi4_BrewScribe, and compared as written it would be reported "not
+        # discovered" on every start while it loaded perfectly well.
         def normalise(name):
             return re.sub(r"[-_.]+", "-", name).lower()
 

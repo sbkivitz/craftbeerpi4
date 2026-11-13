@@ -1,11 +1,8 @@
 """The brew-day screen's timers: up to four, kept here so every screen shows the same ones.
 
-Scott, 10 Nov 2026, after using the rest timer: "why is it named that? lots of
-things use a timer during a brew day. I want an optionally audible alarm and
-more attention grabbing but still elegant visual alerting when timer expires.
-Also want to have multiple timers in parallel if I click a + or something like
-that. Nice to have= ability to name timers". On 11 Nov he approved the
-dashboard agent's design: "add the timers that design agent discussed".
+Lots of things in a brew day want timing, not only a rest: several timers run
+side by side, each can be named, and one that runs out sounds an alarm and
+shows a visual alert.
 
 A timer has a name ("Timer 1" until it is given one), its own time, and a
 state: stopped (ready, at its own time), running, paused, or done (it ran out,
@@ -15,16 +12,15 @@ any one of them. OK puts the timer back to its own time, stopped, ready to start
 again, as a kitchen timer's recall does; +5 MIN runs it for five minutes more.
 
 The screen offers names for a timer from the BREWDAY_TIMER_NAMES setting, a list
-separated by commas (Scott: "an easy config setting to choose the default timer
-names from the setup").
+separated by commas.
 
 They run on the brewing clock (cbpi.api.clock), as the rest timer does: on a
 simulator at SIM_TIME_SCALE 30 a timer runs 30 times faster. The screens count
 down between messages with `scale`, and correct themselves on each message.
 
 Kept in memory only, as the rest timer is: after a restart there are none. The
-rest timer (RestTimerController, /resttimer) stays for the brew-day screen as
-first released.
+rest timer (RestTimerController, /resttimer) stays alongside, for brew-day
+screens that use it.
 """
 
 import asyncio
@@ -74,7 +70,7 @@ class Timer:
 class TimersController:
     #: The websocket topic every screen hears: data is get_state().
     TOPIC = "timers"
-    #: Four at most (the approved design: four in view at once, as a four-channel kitchen timer).
+    #: Four at most: four in view at once, as on a four-channel kitchen timer.
     MAX = 4
     #: A timer's own time: 1 to 300 minutes, the editor's limits.
     MIN_SET = 60
@@ -107,8 +103,8 @@ class TimersController:
 
         A list separated by commas; blank gives none. Each is trimmed and kept to
         a name's length; repeats are dropped. Read as the setting is kept, not with
-        config.get(), which takes a blank setting for a missing one: Scott's blank
-        list would offer the usual names again."""
+        config.get(), which takes a blank setting for a missing one: a blank list
+        would offer the usual names again."""
         try:
             entry = self.cbpi.config.cache.get(self.NAMES_SETTING)
         except Exception:  # noqa: BLE001 - settings that can't be read offer the usual names

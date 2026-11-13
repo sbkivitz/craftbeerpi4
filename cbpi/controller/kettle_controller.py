@@ -87,7 +87,7 @@ class KettleController(BasicController):
     def _stored_settings(value):
         """{logic name: settings} as read from kettle.json, or {} if unusable.
 
-        A file written before this existed has no such key, and a hand-edited
+        An older kettle.json has no such key, and a hand-edited
         one may hold anything. Neither may stop the kettle loading.
         """
         if not isinstance(value, dict):
@@ -102,18 +102,18 @@ class KettleController(BasicController):
         """Save an edited kettle, keeping each logic's settings to itself.
 
         A kettle's props are its logic's configuration, and two logics can
-        declare settings of the same name that mean different things. On 25 Oct
-        2026 the HLT was switched from PID_HERMS to PIDBoil and kept every
-        PID_HERMS setting: PIDBoil then read PID_HERMS's P 2 / I 0.005 - the
-        mash loop's gains, in degrees of HLT offset - as gains for the element.
-        Its integral wound up during the heat-up, it was still asking for 90%
-        at the 152 F target, and the brewer stopped it at 156 F.
+        declare settings of the same name that mean different things: an HLT
+        switched from PID_HERMS to PIDBoil that kept every PID_HERMS setting
+        would have PIDBoil read PID_HERMS's P 2 / I 0.005 - the mash loop's
+        gains, in degrees of HLT offset - as gains for the element, wind its
+        integral up during the heat-up, and still be asking for 90% at a 152 F
+        target.
 
         So when the logic changes, the old logic's settings are put aside in
         props_by_type, where switching back finds them, and a brewer whose new
         logic arrives still holding the old logic's values is told which ones.
         The new settings themselves are saved as sent: whether a value was kept
-        on purpose is the brewer's call, and the interface now starts a logic
+        on purpose is the brewer's call, and the interface starts a logic
         from its own settings rather than another's.
         """
         old = self.find_by_id(item.id)
@@ -141,7 +141,7 @@ class KettleController(BasicController):
         The signature is settings only the OLD logic declares still being in
         the new save - HLT_P arriving with PIDBoil - which happens only when
         the old set was carried over wholesale: an interface from before
-        props_by_type, or an API client. The fixed interface starts a logic
+        props_by_type, or an API client. The interface starts a logic
         from its own settings, so re-entering a value that happens to equal
         the old one (D 0, Max_Output 100) does not trip this. A warning that
         fires on correct input is one the brewer learns to ignore.
@@ -211,12 +211,12 @@ class KettleController(BasicController):
             logging.debug("shared-heater check skipped: %s", e)
         await super().start(id, preset=preset)
         self._log_auto(id)
-        # Tell every page, as stop() does. Only toggle() did: started through
-        # here - POST /kettle/{id}/on, which the brew-day screen's AUTO sends,
-        # or a step starting its kettle - every open page went on showing the
-        # kettle in MANUAL while its logic ran. Scott, 9 Nov, on the HLT: a tap
-        # on its element switched it off, and the logic the screen did not show
-        # switched it straight back on at 29 %. The logic is running by now, so
+        # Tell every page, as stop() and toggle() do. Started through here -
+        # POST /kettle/{id}/on, which the brew-day screen's AUTO sends, or a
+        # step starting its kettle - every open page would otherwise go on
+        # showing the kettle in MANUAL while its logic ran: a tap on its element
+        # would switch it off, and the logic the screen did not show would
+        # switch it straight back on. The logic is running by now, so
         # a failure to tell the pages is logged, never the reason a start
         # fails: the screen would say DID NOT START for a kettle that did.
         try:

@@ -8,9 +8,9 @@ async def bounded(awaitable, seconds):
 
     asyncio.timeout where there is one (3.11+): it runs the awaitable in the
     current task. 3.11's wait_for runs it in a new task instead, so code
-    inside it - an actor driver - no longer looked like it was running in the
+    inside it - an actor driver - would not look like it was running in the
     logic's own task, which is what stop() checks to tell a logic stopping
-    itself from one being stopped (DEFECTS F23).
+    itself from one being stopped.
     """
     timeout = getattr(asyncio, "timeout", None)
     if timeout is None:
@@ -42,8 +42,8 @@ async def wait_within(task, seconds):
     bounded() cancels at its deadline and then waits for the awaitable to
     finish: for ever, if the awaitable catches the cancellation and carries
     on. A driver with a bare `except:` around a retry loop does exactly that,
-    and the fermenter loop that called it stopped there - no control, no
-    alert (DEFECTS F46). This stops waiting at the deadline: the task is
+    and the fermenter loop that called it would stop there - no control, no
+    alert. This stops waiting at the deadline: the task is
     cancelled and left to end on its own.
 
     If the caller is cancelled first, so is the task, and it gets what is
@@ -71,9 +71,9 @@ def cancellation_is_real():
 
     An awaited operation can raise CancelledError without anyone having
     cancelled the task awaiting it - a driver awaiting something that was
-    cancelled. Taking that for a cancellation ended fermenter control for good
-    (DEFECTS F20), and, inside a stop's own cleanup, abandoned the switch-off
-    of every actor after it (F28). Python 3.11+ counts the cancel requests
+    cancelled. Taking that for a cancellation would end fermenter control for
+    good, and, inside a stop's own cleanup, abandon the switch-off of every
+    actor after it. Python 3.11+ counts the cancel requests
     made of a task; before that there is no way to tell, and a cancellation
     is honoured.
     """

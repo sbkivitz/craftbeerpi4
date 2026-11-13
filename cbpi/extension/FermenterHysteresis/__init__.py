@@ -13,26 +13,24 @@ class FermenterAutostart(CBPiExtension):
     """Bring every AutoStart fermenter back under temperature control on boot.
 
     AutoStart is a property of the fermenter LOGIC ("Autostart Fermenter on
-    cbpi start"), but this started only the step profile: controller.start()
-    resumes or begins a step and never starts the logic, which came on only if
-    that step happened to say AutoMode Yes. So a fermenter with no steps - a
-    glycol reservoir, a plain hold - had no temperature control after a reboot,
-    and neither did one whose steps said AutoMode No, the setting that avoids
-    AutoMode's end-of-step shutoff. And a profile nobody had started was
-    started. Found by the fermenter twin: after a restart both logics were
-    off and a freshly built profile was running (DEFECTS F2).
+    cbpi start"). Starting only the step profile would not bring it back:
+    controller.start() resumes or begins a step and never starts the logic,
+    which then comes on only if that step happens to say AutoMode Yes. A
+    fermenter with no steps - a glycol reservoir, a plain hold - would have no
+    temperature control after a reboot, nor would one whose steps say
+    AutoMode No, the setting that avoids AutoMode's end-of-step shutoff; and
+    a profile nobody had started would be started.
 
-    Now, for each fermenter whose logic says AutoStart Yes:
+    So, for each fermenter whose logic says AutoStart Yes:
       - the logic is started if it is not running;
       - a profile that was RUNNING when the server stopped is resumed. Not one
         the brewer paused: both are persisted as STOP, so the controller
-        records which steps load() found ACTIVE (DEFECTS F4 - the first cut
-        of this fix resumed paused profiles too). A profile nobody started is
+        records which steps load() found ACTIVE. A profile nobody started is
         left alone.
 
     It runs as an on_startup initializer, after every controller has loaded.
     The constructor runs while plugins load, before sensors and actors exist,
-    and the task it used to launch raced their initialisation.
+    so a task launched from it would race their initialisation.
     """
 
     def __init__(self, cbpi):
@@ -54,7 +52,7 @@ class FermenterAutostart(CBPiExtension):
                 if running is not None:
                     # start() resumes the FIRST stopped step. Only let it if
                     # that is the one that was running - a paused step ahead of
-                    # it would otherwise be resumed instead (DEFECTS F7).
+                    # it would otherwise be resumed instead.
                     first = self.controller._find_by_status(item.steps, StepState.STOP)
                     if first is not None and first.id == running:
                         await self.controller.start(item.id)
@@ -75,20 +73,20 @@ _finite = finite
 class _GuardedHysteresis:
     """Hysteresis temperature control that survives what an unattended fermenter meets.
 
-    Both bundled logics read the sensor with float(get_sensor_value(id)["value"])
-    and the target with float() every second, and resolved the fermenter, its
-    actors and its offsets once, at start. So:
+    Reading the sensor with float(get_sensor_value(id)["value"]) and the
+    target with float() every second, and resolving the fermenter, its actors
+    and its offsets once, at start, would mean:
 
       - a missing sensor, a probe that stopped updating, a "nan", a target of
-        None: each raised, the task ended, and temperature control with it,
-        while the switch went on showing it on (DEFECTS F8, F9);
-      - a DS18B20 that browns out reads 85.0 C until it is next read, and this
-        cooled against "85 C" flat out (F9);
-      - an edited offset did nothing until a restart, and a cooler moved to
-        another actor left the old one running (F10);
-      - nothing stopped the heater and cooler running at once (F11).
+        None: each raises, the task ends, and temperature control with it,
+        while the switch goes on showing it on;
+      - a DS18B20 that browns out reads 85.0 C until it is next read, and
+        control would cool against "85 C" flat out;
+      - an edited offset does nothing until a restart, and a cooler moved to
+        another actor leaves the old one running;
+      - nothing stops the heater and cooler running at once.
 
-    Now every tick re-reads the fermenter - sensor, actors, target, offsets -
+    So every tick re-reads the fermenter - sensor, actors, target, offsets -
     and acts only on a reading cbpi.api.readings trusts: finite, proven fresh
     by the sensor's own cadence, and a temperature a fermenter can have.
     Anything else switches heating and cooling off and keeps watching. The
@@ -98,9 +96,9 @@ class _GuardedHysteresis:
 
     Every command is checked against what the actor then reports. An actor
     that will not switch off is retried every tick and reported, and the
-    other one is not started while one runs that could be switched off
-    (F17) - but one stuck on does not hold the other side off: cooling
-    against a heater that cannot be stopped is the protection (F37).
+    other one is not started while one runs that could be switched off -
+    but one stuck on does not hold the other side off: cooling against a
+    heater that cannot be stopped is the protection.
     """
 
     # Consecutive bad ticks before anyone is told. At one tick a second this
@@ -140,10 +138,10 @@ class _GuardedHysteresis:
         self._venting = False
         # actor id -> the role it last held here. Kept beyond this run, like
         # owned_actors: a heater reassigned away is still a heater until it
-        # has been seen off (DEFECTS F32).
+        # has been seen off.
         self.__dict__.setdefault("_roles", {})
         # Actors whose last switch-off left them on. Kept beyond this run too:
-        # a restart does not unstick a relay (DEFECTS F37).
+        # a restart does not unstick a relay.
         self.__dict__.setdefault("_stuck", set())
         self._missing_ticks = 0
         self.heater = self.cooler = None
@@ -154,7 +152,7 @@ class _GuardedHysteresis:
     def _live_props(self, fermenter):
         # The fermenter's, not self.props: FermentationController.update()
         # replaces fermenter.props, and self.props is the object this logic
-        # was started with (DEFECTS F10).
+        # was started with.
         props = getattr(fermenter, "props", None)
         return props if props is not None else (self.props or {})
 
@@ -282,13 +280,12 @@ class _GuardedHysteresis:
     async def _switch(self, actor_id, on, power=None):
         """Command an actor; True once it reports the state asked for.
 
-        Checked, not assumed. A switch-off that failed used to count as done,
-        so the cooler was started beside a heater that was still running
-        (DEFECTS F17).
+        Checked, not assumed: a failed switch-off counted as done would let
+        the cooler start beside a heater that is still running.
         """
         if not on:
             # The base class's switch-off: bounded, and judged by the actor's
-            # driver - a missing actor is not an off one (DEFECTS F31).
+            # driver - a missing actor is not an off one.
             done = await self._off_bounded(actor_id)
             if done:
                 self._stuck.discard(actor_id)
@@ -302,7 +299,7 @@ class _GuardedHysteresis:
                                   "side off for it")
             return done
         # Owned before it is energized, so no failure from here on can leave
-        # it running with nobody responsible for it (F19).
+        # it running with nobody responsible for it.
         self.owned_actors.add(actor_id)
         self._driver(actor_id)
         try:
@@ -340,11 +337,11 @@ class _GuardedHysteresis:
     def _any_on(self, role):
         """Is an actor of `role` running that control could switch off?
 
-        One that will not switch off does not count (DEFECTS F37). Keeping
+        One that will not switch off does not count. Keeping
         the other side off exists so heating and cooling never run against
         each other by mistake; against a heater stuck on, the cooler running
-        is the protection, not the mistake. Counting it held the glycol off
-        while one welded relay - or one lost MQTT message - cooked the beer.
+        is the protection, not the mistake. Counting it would hold the glycol
+        off while one welded relay - or one lost MQTT message - cooked the beer.
         """
         return any(self._actor_on(a) is True and a not in self._stuck
                    for a in self._role_actors(role))
@@ -359,8 +356,8 @@ class _GuardedHysteresis:
     async def _retire(self, current):
         """Switch off every actor this logic owned that is no longer assigned to it.
 
-        Kept until seen off: an actor whose switch-off failed was forgotten,
-        and no later fault or stop ever tried it again (DEFECTS F19).
+        Kept until seen off: an actor whose switch-off failed is not
+        forgotten, so a later tick or stop tries it again.
         """
         for actor_id in list(self.owned_actors - current):
             if await self._switch(actor_id, False):
@@ -496,21 +493,19 @@ class _GuardedHysteresis:
             # earlier configuration, or a former heater or cooler that has not
             # switched off. Never leave them fighting: all of them off, and
             # the rule decides afresh next tick. Not when one of them is stuck
-            # on: then the other is counteracting it, and that is the point
-            # (DEFECTS F37).
+            # on: then the other is counteracting it, and that is the point.
             logging.info("Fermenter %s: heating and cooling were both on - switching all off",
                          self._fermenter_name())
             for actor_id in self._role_actors("heater") | self._role_actors("cooler"):
                 await self._switch(actor_id, False)
             return
 
-        # The rule itself is unchanged - the same comparisons, in the same
-        # order, against the state read at the top of the tick. What is new is
-        # that neither side is started while an actor of the other is running
-        # that can be switched off - the assigned one or a former one still
-        # owned - judged from what the actors report NOW, after any switch-off
-        # above (DEFECTS F11, F17, F32). One that cannot does not hold the
-        # other side off (F37).
+        # The bundled logic's hysteresis rule - its comparisons, in its order,
+        # against the state read at the top of the tick - with one addition:
+        # neither side is started while an actor of the other is running that
+        # can be switched off - the assigned one or a former one still owned -
+        # judged from what the actors report NOW, after any switch-off above.
+        # One that cannot does not hold the other side off.
         if heater_actor is not None:
             if reading + h_on <= target and not heater_on:
                 if self._any_on("cooler"):
@@ -656,15 +651,15 @@ class FermenterHysteresis(_GuardedHysteresis, CBPiFermenterLogic):
 class FermenterSpundingHysteresis(_GuardedHysteresis, CBPiFermenterLogic):
     """Temperature as FermenterHysteresis, plus a spunding valve held at target pressure.
 
-    run() awaited the pressure loop first and the temperature loop second, so
-    a temperature loop that died went unnoticed for as long as the pressure
-    loop lived - the heater and cooler frozen in whatever state they were in
-    (DEFECTS F12). Both loops are now watched together: either ending while
-    the logic should be running fails the run, which the base class restarts.
+    Both loops are watched together: either ending while the logic should be
+    running fails the run, which the base class restarts. Awaiting one loop
+    and then the other would let a temperature loop that died go unnoticed
+    for as long as the pressure loop lived - the heater and cooler frozen in
+    whatever state they were in.
 
-    Venting is one valve pulse per look at the pressure. It used to be a loop
-    of its own that held on to the sensor and valve it started with, so a
-    sensor unassigned mid-vent went on being vented against (DEFECTS F24).
+    Venting is one valve pulse per look at the pressure, reading the sensor
+    and valve afresh each time: a loop of its own that held on to the ones it
+    started with would go on venting against a sensor unassigned mid-vent.
     """
 
     ROLES = ("heater", "cooler", "valve")
