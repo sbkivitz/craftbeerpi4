@@ -32,6 +32,16 @@ class NotificationController:
     # them, or no longer applying (retire). With the prompt's id.
     RETIRED_TOPIC = "notification_retired"
 
+    # A plain warning or error - one with no buttons - is remembered, so an OK
+    # on one page can take it down on the others (seen). Scott, 13 Nov: "the
+    # alerts that I've already acknowledged in BrewDay are there waiting for
+    # me in BrewScribe.. that's annoying". Bounded as the callbacks are.
+    MAX_PLAIN = 100
+    # The ids seen, newest last, sent to each page as it connects: a page
+    # asleep in a background tab misses the broadcast (Porter, 13 Nov).
+    MAX_SEEN = 100
+    SEEN_TOPIC = "notification_seen"
+
     def __init__(self, cbpi):
         """
         :param cbpi: craftbeerpi object
@@ -189,6 +199,11 @@ class NotificationController:
         )
         if keep and action:
             self._open()[notifcation_id] = dict(shown)
+        if not action and type in (NotificationType.WARNING, NotificationType.ERROR):
+            plain = self._plain()
+            plain[notifcation_id] = (type.value, title, message)
+            while len(plain) > self.MAX_PLAIN:
+                plain.popitem(last=False)
         self.cbpi.ws.send(shown)
         data = dict(
             type=type.value,
@@ -243,6 +258,44 @@ class NotificationController:
     def kept_prompts(self):
         """The prompts kept for every page, as the messages that showed them."""
         return [dict(shown) for shown in self._open().values()]
+
+    def _plain(self):
+        """The plain warnings and errors not yet seen: id -> (type, title,
+        message), oldest first. Made on first use, as open_prompts is."""
+        return self.__dict__.setdefault("_plain_shown", OrderedDict())
+
+    def _seen(self):
+        return self.__dict__.setdefault("_seen_ids", OrderedDict())
+
+    def seen(self, notification_id):
+        """A plain warning or error OK'd on one page: take it down from every
+        page, with each remembered copy in the same words - the screens show a
+        repeat once, so one OK answers them all. Each goes to the pages as
+        notification_retired, reason "seen".
+
+        -> the ids taken down, or None if it isn't one remembered: a question
+        (its buttons answer it), one already seen, one more than MAX_PLAIN
+        ago, or one sent before a restart.
+        """
+        plain = self._plain()
+        shown = plain.pop(notification_id, None)
+        if shown is None:
+            return None
+        ids = [notification_id] + [other for other, words in plain.items() if words == shown]
+        seen = self._seen()
+        for gone in ids:
+            plain.pop(gone, None)
+            seen[gone] = True
+            seen.move_to_end(gone)
+            self.cbpi.ws.send(dict(topic=self.RETIRED_TOPIC, id=gone, reason="seen"))
+        while len(seen) > self.MAX_SEEN:
+            seen.popitem(last=False)
+        return ids
+
+    def seen_ids(self):
+        """The warnings and errors seen since the server started, the last
+        MAX_SEEN, oldest first: for a page that connects."""
+        return list(self._seen())
 
     def waiting_prompts(self):
         """The ids of the prompts whose buttons still do something."""
