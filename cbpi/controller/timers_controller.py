@@ -84,6 +84,10 @@ class TimersController:
     CEILING = 24 * 60 * 60
     #: +5 MIN, the alarm's lesser answer.
     MORE = 5 * 60
+    #: The alarm's two buttons, as its prompt labels them and as an answer from a timer's row is sent with
+    #: the prompt taken down, so a screen that didn't press it can say which.
+    MORE_LABEL = "+5 MIN"
+    OK_LABEL = "OK"
     #: A new timer's time when the command gives none: the editor's starting 10 minutes.
     DEFAULT_SET = 10 * 60
     NAME_LEN = 24
@@ -197,11 +201,12 @@ class TimersController:
         self._cancel(t)
         t.task = asyncio.get_running_loop().create_task(self._run(t))
 
-    def _answer(self, t: Timer, reason: str):
-        """Take its alarm's prompt down on every screen."""
+    def _answer(self, t: Timer, reason: str, answer=None):
+        """Take its alarm's prompt down on every screen. answer: the button it was answered with, when it was."""
         if t.prompt is not None:
             try:
-                self.cbpi.notification.retire(t.prompt, reason=reason)
+                given = {} if answer is None else {"answer": answer}
+                self.cbpi.notification.retire(t.prompt, reason=reason, **given)
             except Exception as e:  # noqa: BLE001
                 self.logger.debug("timers: could not take %s's prompt down: %s", t.name, e)
             t.prompt = None
@@ -247,7 +252,7 @@ class TimersController:
             t.name,
             f"The {fmt(t.set)} timer has run out.",
             NotificationType.WARNING,
-            action=[NotificationAction("+5 MIN", more), NotificationAction("OK", ok)],
+            action=[NotificationAction(self.MORE_LABEL, more), NotificationAction(self.OK_LABEL, ok)],
             keep=True,
         )
         self._push()
@@ -341,7 +346,7 @@ class TimersController:
         t = self._find(ident)
         if t.state != "done":
             return self.get_state()
-        self._answer(t, "answered")
+        self._answer(t, "answered", self.OK_LABEL)
         t.state = "stopped"
         t.remaining = t.run = t.set
         self._push()
@@ -352,7 +357,7 @@ class TimersController:
         t = self._find(ident)
         if t.state != "done":
             return self.get_state()
-        self._answer(t, "answered")
+        self._answer(t, "answered", self.MORE_LABEL)
         t.remaining = t.run = float(self.MORE)
         self._start(t)
         self._push()

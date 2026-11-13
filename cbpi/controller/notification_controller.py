@@ -211,7 +211,7 @@ class NotificationController:
         task.add_done_callback(background_tasks.discard)
         return notifcation_id
 
-    def retire(self, notification_id, reason="withdrawn") -> bool:
+    def retire(self, notification_id, reason="withdrawn", answer=None) -> bool:
         """Take a prompt down: it has been answered, or no longer applies.
 
         From every page showing it, and from those shown to pages that open
@@ -224,12 +224,20 @@ class NotificationController:
         answer it can then say which: the brew-day screen's event line said
         only "no longer waiting".
 
+        `answer`, when a button was pressed: its label, sent with the reason,
+        so a page that did not press it can say which was - the brew-day
+        screen's line for an answer from another screen, "Resume brew?
+        answered: Skip this step", as an answer given there reads.
+
         True if it was still waiting for an answer.
         """
         waiting = self.callback_cache.pop(notification_id, None) is not None
         kept = self._open().pop(notification_id, None) is not None
         if waiting or kept:
-            self.cbpi.ws.send(dict(topic=self.RETIRED_TOPIC, id=notification_id, reason=reason))
+            gone = dict(topic=self.RETIRED_TOPIC, id=notification_id, reason=reason)
+            if answer is not None:
+                gone["answer"] = str(answer)
+            self.cbpi.ws.send(gone)
         return waiting or kept
 
     def kept_prompts(self):
@@ -272,8 +280,10 @@ class NotificationController:
                 task.add_done_callback(background_tasks.discard)
             # Answered: gone from every page, not just the one it was
             # answered on, where a phone kept showing it with a button that
-            # no longer did anything.
-            self.retire(notification_id, reason="answered")
+            # no longer did anything. With the button's label, for the pages
+            # that did not press it.
+            self.retire(notification_id, reason="answered",
+                        answer=getattr(action, "label", None))
             return True
         except Exception as e:
             self.logger.error("Failed to call notification callback")
