@@ -65,8 +65,8 @@ class SensorLogTargetInfluxDB(CBPiExtension):
     async def _get_session(self):
         """One session for the life of the process.
 
-        A PoolManager was built per reading, so every write paid a fresh TCP
-        and TLS handshake - the dominant cost of writing one short line.
+        Every write reuses its connection, so no write pays a fresh TCP and TLS
+        handshake, the main cost of writing one short line.
         """
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
@@ -77,10 +77,10 @@ class SensorLogTargetInfluxDB(CBPiExtension):
     def _line(self, measurement, itemname, id, value, timestamp):
         """InfluxDB line protocol, with an explicit millisecond timestamp.
 
-        No timestamp was sent at all, so InfluxDB applied its own receive time.
-        That is wrong by however long the write spent queued or retrying, and
-        it silently reorders readings when writes are retried out of order. The
-        reading already knows when it was taken; send that.
+        Without one InfluxDB applies its own receive time, which is wrong by
+        however long the write spent queued or retrying, and reorders readings
+        whose writes are retried out of order. The reading already knows when
+        it was taken, so that time is sent.
         """
         line = "{},source={},itemID={} value={}".format(
             measurement, itemname, id, value
