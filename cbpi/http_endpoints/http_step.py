@@ -254,9 +254,13 @@ class StepHttpEndpoints:
         responses:
             "200":
                 description: successful operation
+            "409":
+                description: a step is running; stop it first
         """
 
-        await self.controller.reset_all()
+        if await self.controller.reset_all() is False:
+            # Refused, and nothing changed: a page that asked can say so rather than wait for a reset that never comes.
+            return web.json_response(status=409, data=dict(error=self.controller.RESET_WHILE_RUNNING))
         return web.Response(status=200)
 
     @request_mapping(path="/action/{id}", method="POST", auth_required=False)

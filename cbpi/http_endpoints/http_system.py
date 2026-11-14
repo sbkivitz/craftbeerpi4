@@ -58,6 +58,9 @@ class SystemHttpEndpoints:
                 timers=self.cbpi.timers.get_state(),
                 bf_recipes=await self.cbpi.upload.get_brewfather_recipes(0),
                 version=__version__,
+                # the commit of the checkout the core runs from, beside version, which update checks compare as it is:
+                # None when installed by pip
+                commit=self.controller.commit,
                 spindledata=spindledata,
                 guiversion=version,
                 codename=__codename__,

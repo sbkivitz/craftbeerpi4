@@ -1136,10 +1136,14 @@ class StepController:
             except Exception as e:
                 logging.error("Failed to stop step - Id: %s" % step.id)
 
+    # Told to whoever asks for a reset while a step runs (http_reset's 409).
+    RESET_WHILE_RUNNING = "A step is running. Stop it before resetting the recipe."
+
     async def reset_all(self):
+        """Every step back to not started. Returns False, changing nothing, while a step runs."""
         if self.find_by_status(StepState.ACTIVE) is not None:
             logging.error("Please stop before reset")
-            return
+            return False
 
         self._cancel_mash_ph_reminder(clear=True)
         for item in self.profile:
@@ -1209,6 +1213,7 @@ class StepController:
         self._tell("reset")
         await self.save()
         self.push_udpate()
+        return True
 
     def get_types(self):
         result = {}

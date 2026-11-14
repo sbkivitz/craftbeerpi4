@@ -32,16 +32,78 @@ except Exception:
 
 class SystemController:
 
+    # The checkout the core runs from, when it runs from one: the folder above the cbpi package.
+    SOURCE_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.service = cbpi.actor
         self.logger = logging.getLogger(__name__)
         self.logsFolderPath = self.cbpi.config_folder.logsFolderPath
+        # The short commit of that checkout, for GET /system/: None when installed by pip, or until start-up has read it.
+        self.commit = None
 
         self.cbpi.app.on_startup.append(self.check_for_update)
+        self.cbpi.app.on_startup.append(self.find_commit)
 
     async def check_for_update(self, app):
         pass
+
+    async def find_commit(self, app):
+        """Read the checkout's commit once, as the server starts, off the event loop: it reads files."""
+        self.commit = await asyncio.get_running_loop().run_in_executor(None, self._source_commit, self.SOURCE_ROOT)
+
+    @staticmethod
+    def _source_commit(root):
+        """The first 7 hex digits of the commit checked out in root, or None.
+
+        Read from root's .git as git keeps it, without running git, which a Pi may lack or refuse to run in a checkout
+        another user owns. .git is a folder, or in a worktree a file naming the folder ("gitdir: ..."), whose commondir
+        file names the folder the branches are kept in. HEAD names a branch ("ref: refs/heads/..."), kept as a file of
+        its own or as a line of packed-refs, or holds a commit itself. A core installed by pip has no .git beside its
+        package: None.
+        """
+        def read(path):
+            with open(path, encoding="utf-8") as f:
+                return f.read().strip()
+
+        try:
+            dot_git = os.path.join(root, ".git")
+            if os.path.isdir(dot_git):
+                git_dir = dot_git
+            elif os.path.isfile(dot_git):
+                line = read(dot_git)
+                if not line.startswith("gitdir:"):
+                    return None
+                git_dir = os.path.join(root, line[len("gitdir:"):].strip())
+            else:
+                return None
+            common = git_dir
+            if os.path.isfile(os.path.join(git_dir, "commondir")):
+                common = os.path.normpath(os.path.join(git_dir, read(os.path.join(git_dir, "commondir"))))
+            head = read(os.path.join(git_dir, "HEAD"))
+            sha = head
+            if head.startswith("ref:"):
+                ref, sha = head[len("ref:"):].strip(), None
+                for folder in (git_dir, common):
+                    path = os.path.join(folder, *ref.split("/"))
+                    if os.path.isfile(path):
+                        sha = read(path)
+                        break
+                packed = os.path.join(common, "packed-refs")
+                if sha is None and os.path.isfile(packed):
+                    with open(packed, encoding="utf-8") as f:
+                        for line in f:
+                            parts = line.split()
+                            if len(parts) == 2 and parts[1] == ref:
+                                sha = parts[0]
+                                break
+            sha = (sha or "").lower()
+            if len(sha) in (40, 64) and all(c in "0123456789abcdef" for c in sha):
+                return sha[:7]
+        except (OSError, ValueError):
+            pass
+        return None
 
     async def restart(self):
         logging.info("RESTART")
