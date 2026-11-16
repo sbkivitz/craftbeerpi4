@@ -1356,8 +1356,11 @@ class StepController:
         `event` is one of LISTENER_EVENTS, and `snapshot` is snapshot(event),
         a copy of its own. A plain function is called on the event loop right
         after the change, so it must return quickly; an `async def` is run as a
-        task of its own, just after. Read-only by contract: a listener must not
-        start, stop, move on or reset the brew steps, nor switch anything.
+        task of its own, just after. A listener must not start, stop, move on
+        or reset the brew steps. A plugin that only follows the brew, as
+        BrewScribe does, switches nothing either; the core's hltpump extension,
+        which keeps the HLT pump's rules, switches that pump off from a task of
+        its own as the runoff or the recipe ends.
         Whatever it raises is logged, and the brew carries on, as do the other
         listeners. Adding the same one twice keeps one. Not saved: a plugin
         adds its listener again on every start.

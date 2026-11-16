@@ -44,6 +44,15 @@ as it is, to finish draining the mash tun; starting the boil switches it off
 runoff step followed by another - Sparge, then Lautering - is one runoff. A
 Stop is a pause, and leaves both pumps as they are.
 
+And when the recipe ends - its last step done, its time up or NEXT - with the
+HLT pump still running, whatever the setting, it is switched off and a
+notification says so. The pump has no more work then, and left running it
+could empty the HLT or still be running when its hoses are moved. That covers
+the recipes the rules above never reach: one with no runoff step and no boil,
+as the night-before test is; or CONFIRM_BEFORE_BOIL at No and no runoff step,
+where nobody starts the boil to switch the pumps off. A recipe ending on its
+runoff step is switched off and told about once, as the recipe ending.
+
 The steps switch pumps off for the brewer's hoses through pump_off and
 runoff_pumps_off below.
 
@@ -84,6 +93,9 @@ RUNOFF_WORT_TEXT = "The wort pump is still running, to finish draining the mash 
 RUNOFF_FAILED_TITLE = "HLT pump still running"
 RUNOFF_FAILED_TEXT = ("{} has ended, but the HLT pump could not be switched off. If it is still sending "
                       "sparge water to the mash tun, the mash tun will fill up: stop it by hand.")
+RECIPE_OFF_TEXT = RUNOFF_OFF_TEXT.format("The recipe")
+RECIPE_FAILED_TEXT = ("The recipe has ended, but the HLT pump could not be switched off. Stop it by hand "
+                      "before it empties the HLT, or before its hoses are moved.")
 
 
 def _setting(cbpi, key, default=None):
@@ -181,6 +193,12 @@ def reached_sparge(cbpi):
     return False
 
 
+def recipe_over(cbpi):
+    """Has the recipe ended: a profile with steps, every one of them done?"""
+    profile = list(getattr(getattr(cbpi, "step", None), "profile", None) or [])
+    return bool(profile) and all(getattr(s, "status", None) == StepState.DONE for s in profile)
+
+
 def hlt_pump(cbpi):
     """The HLT and its pump's id, if this extension may run that pump; else (hlt or None, None)."""
     hlt = find_hlt(cbpi)
@@ -224,8 +242,9 @@ class HLTPumpWithHeat(CBPiExtension):
     def __init__(self, cbpi, watch=True):
         self.cbpi = cbpi
         self._source = None
-        # The switch-off as the runoff ends, while it runs: for a test to wait on.
+        # The switch-offs as the runoff and as the recipe end, while they run: for a test to wait on.
         self._runoff_task = None
+        self._recipe_task = None
         add = getattr(getattr(cbpi, "step", None), "add_listener", None)
         if callable(add):
             add(self.step_event)
@@ -276,9 +295,15 @@ class HLTPumpWithHeat(CBPiExtension):
         every page until answered, or until that step is stopped or over.
 
         When a step named for the runoff ends, and the next step is not one,
-        switch the HLT pump off (see the module's notes)."""
+        switch the HLT pump off; and switch it off when the last step ends,
+        and with it the recipe (see the module's notes). Whether the recipe
+        has ended is read in the profile, where the step that has just ended
+        is already done."""
         if event == "step_done":
-            self._runoff_ended(snapshot or {})
+            if recipe_over(self.cbpi):
+                self._recipe_task = asyncio.ensure_future(self._end_recipe())
+            else:
+                self._runoff_ended(snapshot or {})
             return
         if event != "step_started" or not self.enabled():
             return
@@ -338,6 +363,21 @@ class HLTPumpWithHeat(CBPiExtension):
             self.cbpi.notify(RUNOFF_TITLE, text, NotificationType.INFO)
         except Exception as e:  # noqa: BLE001 - the brew goes on whatever this does
             logger.warning("HLT pump: could not switch it off as the runoff ended: %s", e)
+
+    async def _end_recipe(self):
+        try:
+            _, pump_id = hlt_pump(self.cbpi)
+            pump = self.cbpi.actor.find_by_id(pump_id) if pump_id else None
+            if pump is None or not _on(pump):
+                return
+            logger.info("HLT pump off: the recipe has ended")
+            if not await pump_off(self.cbpi, pump_id):
+                self.cbpi.notify(RUNOFF_FAILED_TITLE, RECIPE_FAILED_TEXT, NotificationType.WARNING,
+                                 action=[NotificationAction("OK")], keep=True)
+                return
+            self.cbpi.notify(RUNOFF_TITLE, RECIPE_OFF_TEXT, NotificationType.INFO)
+        except Exception as e:  # noqa: BLE001 - the recipe has ended whatever this does
+            logger.warning("HLT pump: could not switch it off as the recipe ended: %s", e)
 
 
 def setup(cbpi):
