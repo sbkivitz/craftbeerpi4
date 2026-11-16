@@ -4,6 +4,7 @@ import math
 
 from cbpi.api import clock
 from cbpi.api.dataclasses import Kettle, Props
+from cbpi.controller import kettle_file
 from cbpi.controller.basic_controller2 import BasicController
 from tabulate import tabulate
 
@@ -301,3 +302,111 @@ class KettleController(BasicController):
             await self.push_udpate()
         except Exception as e:
             logging.error("Failed to switch off KettleLogic {} {}".format(id, e))
+
+    # A kettle's settings as a file of its own (kettle_file): the Hardware
+    # page's "Save to file..." and "Load from file...".
+
+    def _things(self):
+        """What a kettle's links can name: {kind: [(id, name), ...]}."""
+        def pairs(controller):
+            return [
+                (item.id, str(getattr(item, "name", "") or ""))
+                for item in (getattr(controller, "data", None) or [])
+                if getattr(item, "id", None)
+            ]
+
+        return {
+            "sensor": pairs(getattr(self.cbpi, "sensor", None)),
+            "actor": pairs(getattr(self.cbpi, "actor", None)),
+            "kettle": pairs(self),
+            "fermenter": pairs(getattr(self.cbpi, "fermenter", None)),
+        }
+
+    def settings_file(self, id):
+        """(file name, contents) of kettle `id`'s settings file. NoSuchKettle if there is none."""
+        item = self.find_by_id(id)
+        if item is None:
+            raise kettle_file.NoSuchKettle(id)
+        version = getattr(self.cbpi, "version", None)
+        if not version:
+            from cbpi import __version__ as version
+        data = kettle_file.export(item, self.types, self._things(), version)
+        return kettle_file.file_name(item.name), data
+
+    @staticmethod
+    def auto_on(item):
+        """Whether the kettle's AUTO is on: its logic started, or its loop still running."""
+        instance = getattr(item, "instance", None)
+        if instance is None:
+            return False
+        task = getattr(instance, "task", None)
+        return bool(getattr(instance, "state", False)) or (task is not None and not task.done())
+
+    @staticmethod
+    def _auto_refusal(item):
+        return (
+            "{}'s AUTO is running. Loading settings into a running controller isn't safe, so switch "
+            "AUTO off first.".format(getattr(item, "name", None) or "This kettle")
+        )
+
+    def preview_file(self, id, text):
+        """What loading the file `text` into kettle `id` would change - into a new
+        kettle when `id` is None - as kettle_file.plan() works it out, plus whether
+        the kettle's AUTO is on and so stops it being loaded now. Changes nothing.
+
+        NoSuchKettle for an unknown id; KettleFileError, saying why, for a file
+        that can't be loaded.
+        """
+        item = None
+        if id is not None:
+            item = self.find_by_id(id)
+            if item is None:
+                raise kettle_file.NoSuchKettle(id)
+        result = kettle_file.plan(item, kettle_file.parse(text), self.types, self._things())
+        result["auto"] = item is not None and self.auto_on(item)
+        result["blocked"] = self._auto_refusal(item) if result["auto"] else None
+        return result
+
+    async def load_file(self, id, text, token):
+        """Load the file `text` into kettle `id`, doing what preview_file(id, text)
+        showed. `token` is that preview's: the kettle must be as the preview found
+        it. -> (the kettle, the plan).
+
+        Refused (KettleFileRefused, saying why) while the kettle's AUTO is on -
+        the logic would go on running on settings that were changing under it -
+        or if the kettle has changed since the preview. A plan that changes
+        nothing changes nothing.
+        """
+        item = self.find_by_id(id)
+        if item is None:
+            raise kettle_file.NoSuchKettle(id)
+        result = kettle_file.plan(item, kettle_file.parse(text), self.types, self._things())
+        # Checked here, with nothing awaited between the check and update(),
+        # so AUTO can't be switched on in between.
+        if self.auto_on(item):
+            raise kettle_file.KettleFileRefused(self._auto_refusal(item), "auto")
+        if token != result["token"]:
+            raise kettle_file.KettleFileRefused(
+                "{} has changed since this file's changes were worked out - on another screen, perhaps. "
+                "Look at the changes again before loading.".format(item.name or "This kettle"),
+                "changed",
+            )
+        if not result["changes"]:
+            return item, result
+        after = result["after"]
+        logging.info(
+            "Kettle %s: loading %d changes from a settings file saved from %s",
+            item.name, result["changes"], result["file"]["kettle"],
+        )
+        loaded = await self.update(Kettle(
+            id=item.id,
+            name=item.name,
+            type=after["type"],
+            props=Props(after["props"]),
+            sensor=after["sensor"],
+            heater=after["heater"],
+            agitator=after["agitator"],
+            target_temp=item.target_temp,
+            props_by_type=dict(getattr(item, "props_by_type", None) or {}),
+        ))
+        return loaded, result
