@@ -82,6 +82,10 @@ class UploadController:
         self._staging = False
         self._staged = None
         self._import_error = None
+        self._import_warnings = []
+
+    #: How many addition reminders the boil step holds: Hop_1 to Hop_6.
+    BOIL_REMINDERS = 6
 
     #: The importers, by the kind the upload endpoints name, and the word the
     #: brewer is told.
@@ -122,6 +126,7 @@ class UploadController:
             if problem is not None:
                 return self._not_imported(problem)
             self._staging, self._staged, self._import_error = True, None, None
+            self._import_warnings = []
             try:
                 await getattr(self, method_name)(recipe_id)
             except Exception as e:  # noqa: BLE001 - most importers catch their own
@@ -131,6 +136,7 @@ class UploadController:
             finally:
                 self._staging = False
             staged, self._staged = self._staged, None
+            held, self._import_warnings = self._import_warnings, []
             error = self._import_error
             if error is None and (staged is None or not staged["steps"]):
                 error = "it gave no steps"
@@ -152,6 +158,8 @@ class UploadController:
             self.cbpi.notify("{} recipe imported".format(label),
                              "{}. {}".format(staged["name"], kept) if kept else staged["name"],
                              NotificationType.INFO)
+            for title, text in held:
+                self._warn_brewer(title, text)
             return True, staged["name"]
 
     async def _keep_in_book(self, label, name):
@@ -226,6 +234,48 @@ class UploadController:
         the mash profile has been replaced, not before."""
         if not self._staging:
             self.cbpi.notify(title, name, NotificationType.INFO)
+
+    def _import_warning(self, title, text):
+        """Warn about the recipe being read. Inside import_recipe the warning
+        waits until the import has succeeded, so it follows "recipe imported"
+        and is never given for a recipe that was not imported."""
+        if self._staging:
+            self._import_warnings.append((title, text))
+        else:
+            self._warn_brewer(title, text)
+
+    def _warn_brewer(self, title, text):
+        """A warning that stays on every screen until OK is pressed."""
+        self.cbpi.notify(title, text, NotificationType.WARNING,
+                         action=[NotificationAction("OK")], keep=True)
+
+    @staticmethod
+    def _reminder_minutes(minutes):
+        """An addition's minutes before the end of the boil, or None when the
+        boil step cannot remind of it: not a number, or below -1."""
+        try:
+            minutes = float(minutes)
+        except (TypeError, ValueError):
+            return None
+        return minutes if minutes > -1 else None
+
+    @staticmethod
+    def _before_end(minutes):
+        if minutes <= 0:
+            return "at the end of the boil"
+        return "{:g} minute{} before the end".format(minutes, "" if minutes == 1 else "s")
+
+    def _unreminded_text(self, alerts):
+        """The warning for more boil additions than the boil step has reminders.
+        alerts is longest first, as getBoilAlerts fills the reminders, so the
+        additions left out are the last ones."""
+        missed = alerts[self.BOIL_REMINDERS:]
+        named = "; ".join("{}, {}".format(label or "an addition", self._before_end(minutes))
+                          for minutes, label in missed)
+        return ("This recipe has {} boil additions, but the boil step can remind you "
+                "of only six. No reminder for: {}. Watch the clock for {}, or set a "
+                "timer on the brew-day screen.".format(
+                    len(alerts), named, "it" if len(missed) == 1 else "them"))
 
     async def get_kbh_recipes(self):
         try:
@@ -1726,23 +1776,17 @@ class UploadController:
                     alerts.append([float(misc[0]), misc[1]])
                 elif recipe_type == "json":
                     alerts.append([float(misc["time"]), misc["name"]])
-        ## Dedupe and order the additions by their time
-        ## CBP should have these additions in reverse
+        # The additions the boil step can remind of, longest first. It holds
+        # BOIL_REMINDERS of them; any more are named in a warning instead.
+        alerts = [[m, label] for m, label in
+                  ((self._reminder_minutes(a[0]), a[1]) for a in alerts) if m is not None]
         alerts = sorted(alerts, key=lambda x: x[0], reverse=True)
-        hop_alerts = [
-            [None, None],
-            [None, None],
-            [None, None],
-            [None, None],
-            [None, None],
-            [None, None],
-        ]
-        for i in range(0, 6):
-            try:
-                if float(alerts[i][0]) > -1:
-                    hop_alerts[i] = alerts[i]
-            except:
-                pass
+        hop_alerts = [[None, None] for _ in range(self.BOIL_REMINDERS)]
+        for i, alert in enumerate(alerts[:self.BOIL_REMINDERS]):
+            hop_alerts[i] = alert
+        if len(alerts) > self.BOIL_REMINDERS:
+            self._import_warning("Boil additions without a reminder",
+                                 self._unreminded_text(alerts))
         whirlpool_temps = sorted(whirlpool, key=lambda x: x[0], reverse=True)
         logging.info("Whirlpool Hops: {}".format(whirlpool_temps))
         try:
