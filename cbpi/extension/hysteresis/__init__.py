@@ -32,6 +32,15 @@ class Hysteresis(CBPiKettleLogic):
     # not driven against a stale number for any meaningful part of a rest.
     MAX_SENSOR_AGE = 30
 
+    # What an offset left empty, or set to something that isn't a usable
+    # number, is taken as. run() and blank_defaults() both read it.
+    BLANK = {"OffsetOn": 0, "OffsetOff": 0}
+
+    @classmethod
+    def blank_defaults(cls, unit):
+        """An empty offset is 0, in either unit."""
+        return dict(cls.BLANK)
+
     @staticmethod
     def _finite(value):
         """The number in `value`, or None if it is not a usable temperature.
@@ -115,11 +124,11 @@ class Hysteresis(CBPiKettleLogic):
             # a harmless configuration error: target_temp - nan is nan, so both
             # comparisons below go False and the controller stops commanding
             # the element entirely, exactly as a NaN reading would.
-            self.offset_on = self._finite(self.props.get("OffsetOn", 0))
-            self.offset_off = self._finite(self.props.get("OffsetOff", 0))
+            self.offset_on = self._finite(self.props.get("OffsetOn", self.BLANK["OffsetOn"]))
+            self.offset_off = self._finite(self.props.get("OffsetOff", self.BLANK["OffsetOff"]))
             if self.offset_on is None or self.offset_off is None:
-                self.offset_on = 0 if self.offset_on is None else self.offset_on
-                self.offset_off = 0 if self.offset_off is None else self.offset_off
+                self.offset_on = self.BLANK["OffsetOn"] if self.offset_on is None else self.offset_on
+                self.offset_off = self.BLANK["OffsetOff"] if self.offset_off is None else self.offset_off
                 self.cbpi.notify(
                     "{} config".format(getattr(self.kettle, "name", "Kettle")),
                     "Hysteresis offset was not a usable number - using 0",

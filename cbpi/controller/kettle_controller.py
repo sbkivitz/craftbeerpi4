@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+from collections.abc import Mapping
 
 from cbpi.api import clock
 from cbpi.api.dataclasses import Kettle, Props
@@ -187,6 +188,64 @@ class KettleController(BasicController):
                 labels.append(label)
         return labels
 
+    def get_types(self):
+        """The kettle logics as BasicController gives them, each with its
+        blank_defaults: what it uses for each setting left empty, in the
+        configured temperature unit (CBPiKettleLogic.blank_defaults)."""
+        result = super().get_types()
+        unit = self.temp_unit()
+        for name, entry in result.items():
+            entry["blank_defaults"] = self.blank_defaults(name, unit)
+        return result
+
+    def temp_unit(self):
+        """The configured temperature unit: "F", or "C" for anything else."""
+        try:
+            unit = self.cbpi.config.get("TEMP_UNIT", "C")
+        except Exception:  # noqa: BLE001 - a unit is always given
+            unit = "C"
+        return "F" if str(unit or "").strip().upper() == "F" else "C"
+
+    def blank_defaults(self, logic, unit=None):
+        """{setting label: value}: what the registered logic `logic` uses for
+        each setting left empty, in `unit`, the configured one if not given.
+
+        {} for a logic that says nothing, and for one whose blank_defaults()
+        raises or gives something other than settings and values: one plugin's
+        mistake mustn't cost the other logics their types. An entry that can't
+        be used is left out (kettle_file.usable_blank_defaults): a setting the
+        logic doesn't declare, a link, a value that isn't a finite number, text
+        or true/false, or one its own setting rules out. Each such mistake is
+        logged once.
+        """
+        registered = (self.types or {}).get(logic) if logic else None
+        hook = getattr((registered or {}).get("class"), "blank_defaults", None)
+        if not callable(hook):
+            return {}
+        try:
+            given = hook(self.temp_unit() if unit is None else unit)
+        except Exception as e:  # noqa: BLE001 - one plugin's mistake stays its own
+            self._blank_defaults_mistake(logic, "raised {}: {}, so it counts as none".format(type(e).__name__, e))
+            return {}
+        if not isinstance(given, Mapping):
+            self._blank_defaults_mistake(
+                logic, "gave {}, not settings and values, so it counts as none".format(type(given).__name__))
+            return {}
+        usable, unusable = kettle_file.usable_blank_defaults(given, kettle_file.declared(self.types, logic))
+        for label, value, why in unusable:
+            self._blank_defaults_mistake(logic, "gave {!r} for {!r}, which {}, so it is left out".format(
+                value, label, why))
+        return usable
+
+    def _blank_defaults_mistake(self, logic, what):
+        """Log a plugin's blank_defaults() mistake once, not at every page load."""
+        logged = self.__dict__.setdefault("_blank_defaults_logged", set())
+        # Bounded, so a mistake worded differently each time can't grow it without end.
+        if (logic, what) in logged or len(logged) >= 1000:
+            return
+        logged.add((logic, what))
+        logging.warning("Kettle logic %s: blank_defaults() %s.", logic, what)
+
     async def start(self, id, preset=None):
         # Two kettle logics driving one heater fight each other.
         #
@@ -349,10 +408,18 @@ class KettleController(BasicController):
             "AUTO off first.".format(getattr(item, "name", None) or "This kettle")
         )
 
-    def preview_file(self, id, text):
+    def _plan(self, item, text, fill):
+        data = kettle_file.parse(text)
+        defaults = self.blank_defaults(data["logic"])
+        return data, defaults, kettle_file.plan(item, data, self.types, self._things(), defaults, fill)
+
+    def preview_file(self, id, text, fill=False):
         """What loading the file `text` into kettle `id` would change - into a new
         kettle when `id` is None - as kettle_file.plan() works it out, plus whether
         the kettle's AUTO is on and so stops it being loaded now. Changes nothing.
+
+        `fill`: fill in each setting loading would leave empty with what the
+        logic uses for it (blank_defaults()), rather than leave it empty.
 
         NoSuchKettle for an unknown id; KettleFileError, saying why, for a file
         that can't be loaded.
@@ -362,30 +429,37 @@ class KettleController(BasicController):
             item = self.find_by_id(id)
             if item is None:
                 raise kettle_file.NoSuchKettle(id)
-        result = kettle_file.plan(item, kettle_file.parse(text), self.types, self._things())
+        _data, _defaults, result = self._plan(item, text, fill)
         result["auto"] = item is not None and self.auto_on(item)
         result["blocked"] = self._auto_refusal(item) if result["auto"] else None
         return result
 
-    async def load_file(self, id, text, token):
-        """Load the file `text` into kettle `id`, doing what preview_file(id, text)
-        showed. `token` is that preview's: the kettle must be as the preview found
-        it. -> (the kettle, the plan).
+    async def load_file(self, id, text, token, fill=False):
+        """Load the file `text` into kettle `id`, doing what preview_file(id, text,
+        fill) showed. `token` is that preview's: the kettle must be as the preview
+        found it. -> (the kettle, the plan).
 
         Refused (KettleFileRefused, saying why) while the kettle's AUTO is on -
         the logic would go on running on settings that were changing under it -
-        or if the kettle has changed since the preview. A plan that changes
-        nothing changes nothing.
+        or if the kettle has changed since the preview. A KettleFileError for a
+        token from a preview made the other way about filling in. A plan that
+        changes nothing changes nothing.
         """
         item = self.find_by_id(id)
         if item is None:
             raise kettle_file.NoSuchKettle(id)
-        result = kettle_file.plan(item, kettle_file.parse(text), self.types, self._things())
+        data, defaults, result = self._plan(item, text, fill)
         # Checked here, with nothing awaited between the check and update(),
         # so AUTO can't be switched on in between.
         if self.auto_on(item):
             raise kettle_file.KettleFileRefused(self._auto_refusal(item), "auto")
         if token != result["token"]:
+            other = kettle_file.plan(item, data, self.types, self._things(), defaults, not fill)
+            if token == other["token"]:
+                raise kettle_file.KettleFileError(
+                    "These changes were worked out {} the logic's own values filled in. Load the file the same "
+                    "way, {}.".format("with" if not fill else "without", "with fill=1" if not fill else "without fill")
+                )
             raise kettle_file.KettleFileRefused(
                 "{} has changed since this file's changes were worked out - on another screen, perhaps. "
                 "Look at the changes again before loading.".format(item.name or "This kettle"),

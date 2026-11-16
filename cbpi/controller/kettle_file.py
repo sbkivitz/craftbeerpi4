@@ -16,6 +16,12 @@ A file is checked against the logic as this CraftBeerPi declares it. A setting
 the logic doesn't declare, or a value its declaration rules out, is left out
 and named, and the kettle keeps what it had. So is a link that can't be found
 by id or by name.
+
+A setting loading would leave empty - one the file leaves out that is empty
+now, one the file has empty, or any the file leaves out of a new kettle - is
+listed in the plan's "blank", with the value the logic uses for it when it is
+empty (CBPiKettleLogic.blank_defaults). Planned with fill, those values are
+filled in instead: they show as changes, and loading saves them.
 """
 
 import hashlib
@@ -251,7 +257,8 @@ def _show(value):
 def check(value, prop):
     """(True, value to keep) or (False, why not): a setting's value from a file,
     against its declaration. A blank is always allowed: each logic takes a blank
-    setting as its own default."""
+    setting as a value of its own (CBPiKettleLogic.blank_defaults says which,
+    for a logic that tells)."""
     if _blank(value):
         return True, ""
     kind = prop.get("type")
@@ -291,6 +298,50 @@ def same(a, b, kind=None):
         if x is not None and y is not None:
             return x == y
     return str(a) == str(b)
+
+
+def _plain(value):
+    """Whether JSON holds the value as it is: a finite number, text, or true/false."""
+    if isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, (int, float)):
+        try:
+            return math.isfinite(value)
+        except OverflowError:
+            return False
+    return False
+
+
+def usable_blank_defaults(given, own):
+    """What a logic's blank_defaults() said, sorted into what can be used and
+    what can't: ({label: value}, [(label, value, why not), ...]).
+
+    `own`: the logic's settings, as declared() gives them. An entry can be used
+    when it names one of them that isn't a link, and its value is a finite
+    number, text or true/false that isn't blank and that the setting's
+    declaration allows (check()): a choice's value one of its options, a
+    number inside its range.
+    """
+    props = {p["label"]: p for p in own}
+    usable, unusable = {}, []
+    for label, value in given.items():
+        p = props.get(label) if isinstance(label, str) else None
+        if p is None:
+            why = "isn't one of its settings"
+        elif p.get("type") in LINK_TYPES:
+            why = "is a link to a {}, which has no value of its own".format(p["type"])
+        elif not _plain(value):
+            why = "isn't a finite number, text or true/false"
+        elif _blank(value):
+            why = "is blank"
+        else:
+            ok, kept = check(value, p)
+            why = None if ok else kept
+        if why:
+            unusable.append((label, value, why))
+        else:
+            usable[label] = value
+    return usable, unusable
 
 
 def _norm(name):
@@ -334,6 +385,30 @@ def _say_link(item_id, items):
         return "none"
     name = _name_of(item_id, items)
     return "'{}'".format(name) if name is not None else "an unknown one ({})".format(item_id)
+
+
+def _say_own(value):
+    """A logic's own value for a setting, as a sentence shows it: a number to
+    seven figures at most, since one worked out for Fahrenheit has fifteen."""
+    if isinstance(value, float) and math.isfinite(value):
+        return "{:.7g}".format(value)
+    return _say(value)
+
+
+def _empty(label, word, logic, defaults):
+    """A setting's line in the plan's "blank": loading would leave it empty."""
+    if label in defaults:
+        return {"label": label, "name": word, "value": defaults[label],
+                "text": "{} will be empty, so {} uses its own value, {}.".format(word, logic, _say_own(defaults[label]))}
+    return {"label": label, "name": word, "value": None,
+            "text": "{} will be empty, and {} gives no value to fill it in with.".format(word, logic)}
+
+
+def _filled(row, now, value, logic):
+    """A setting's row in the plan, filled in with the logic's own value."""
+    row.update({"now": "" if _blank(now) else now, "after": value, "changes": True, "filled": True,
+                "note": "filled in with {}'s own value".format(logic)})
+    return row
 
 
 def _not_found(what, kind, wanted, how, now, items):
@@ -389,13 +464,21 @@ def token(before, after):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
 
 
-def plan(current, data, types, things):
+def plan(current, data, types, things, defaults=None, fill=False):
     """What loading `data` (from parse()) into the kettle `current` would do, or
     into a new kettle when `current` is None. Changes nothing.
 
     The plan's "after" is the kettle as loading would leave it, and its token
     is what applying it must be given back: a kettle changed in between - on
     another screen, say - has another token.
+
+    `defaults`: what the file's logic uses for each setting left empty
+    ({label: value}, KettleController.blank_defaults()). Each declared setting
+    that isn't a link and that loading would leave empty is in the plan's
+    "blank", with that value, or None where the logic gives none. With `fill`,
+    each one the logic gives a value for is filled in with it instead: it shows
+    as a change, "after" and the token include it, and applying the plan saves
+    it. A setting the logic gives no value for stays empty either way.
     """
     logic = data["logic"]
     if logic and logic not in (types or {}):
@@ -403,6 +486,7 @@ def plan(current, data, types, things):
             "This file is for the logic {}, which this CraftBeerPi doesn't have. Install its plugin, then "
             "load the file again.".format(logic)
         )
+    defaults = dict(defaults or {})
     own = declared(types, logic)
     now_type = (getattr(current, "type", None) or None) if current is not None else None
     if current is None or not logic:
@@ -414,7 +498,7 @@ def plan(current, data, types, things):
         # in the kettle form; the old logic's are put aside for switching back.
         base = dict(((getattr(current, "props_by_type", None) or {}).get(logic)) or {})
 
-    problems, left, rows = [], [], []
+    problems, left, rows, blank = [], [], [], []
     after_props = dict(base)
     settings = data["settings"]
     for p in own:
@@ -422,13 +506,21 @@ def plan(current, data, types, things):
         word = p.get("display_label") or label
         kind = p.get("type")
         now = base.get(label)
+        row = {"label": label, "name": word, "type": kind, "unit": p.get("unit") or None, "note": None,
+               "filled": False}
+        # Filled in, when asked, rather than left empty.
+        filling = fill and kind not in LINK_TYPES and label in defaults
         if label not in settings:
             if not _blank(now):
                 left.append({"label": label, "name": word, "value": now,
                              "text": "{} stays {}: the file doesn't have it.".format(word, _say(now))})
+            elif filling:
+                rows.append(_filled(row, now, defaults[label], logic))
+                after_props[label] = defaults[label]
+            elif kind not in LINK_TYPES:
+                blank.append(_empty(label, word, logic, defaults))
             continue
         value = settings[label]
-        row = {"label": label, "name": word, "type": kind, "unit": p.get("unit") or None, "note": None}
         if kind in LINK_TYPES:
             items = things.get(kind)
             if not _blank(value) and not isinstance(value, str):
@@ -449,14 +541,29 @@ def plan(current, data, types, things):
             continue
         ok, kept = check(value, p)
         if not ok:
+            if filling and _blank(now):
+                problems.append({"label": label, "text": "{}: {} {}, so it's filled in with {}'s own value, {}.".format(
+                    word, _say(value), kept, logic, _say_own(defaults[label]))})
+                rows.append(_filled(row, now, defaults[label], logic))
+                after_props[label] = defaults[label]
+                continue
             problems.append({"label": label, "text": "{}: {} {}, so it stays {}.".format(word, _say(value), kept, _say(now))})
+            if _blank(now):
+                blank.append(_empty(label, word, logic, defaults))
             continue
+        filled = filling and _blank(kept)
+        if filled:
+            kept = defaults[label]
         changes = not same(now, kept, kind)
         if changes:
             after_props[label] = kept
         row.update({"now": "" if _blank(now) else now, "after": kept if changes else ("" if _blank(now) else now),
                     "changes": changes})
+        if filled and changes:
+            _filled(row, now, kept, logic)
         rows.append(row)
+        if _blank(after_props.get(label)):
+            blank.append(_empty(label, word, logic, defaults))
 
     known = {p["label"] for p in own}
     skipped = [label for label in settings if label not in known]
@@ -514,6 +621,8 @@ def plan(current, data, types, things):
         "settings": rows,
         "problems": problems,
         "left_as_is": left,
+        "blank": blank,
+        "fill": bool(fill),
         "changes": changes,
         "unchanged": sum(1 for r in rows if not r["changes"]),
         "after": after,

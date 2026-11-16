@@ -18,6 +18,43 @@ class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
     def init(self):
         pass
 
+    @classmethod
+    def blank_defaults(cls, unit):
+        """What this logic uses for each of its settings left empty, in `unit`:
+        {setting label: value}.
+
+        A setting can be left empty, and the logic then uses a value of its
+        own. A setting's declared default_value is only what a new kettle form
+        starts with: it can be missing, or wrong, and it can't follow the
+        temperature unit. This says what an empty setting really becomes, so
+        the kettle form and a settings file can show it, and fill it in, before
+        the kettle is saved.
+
+        - `unit` is the configured temperature unit, "C" or "F". A value that
+          depends on it is given in it.
+        - One entry for each declared setting whose empty value the logic
+          replaces with a value of its own: that value, exactly as the logic
+          uses it - a number, or one of a choice's options. Read it from the
+          same table or function the logic itself reads when it runs, so the
+          two can't drift apart.
+        - Left out: a setting whose empty value means something other than a
+          value - "use another setting", "find it another way", "leave
+          something as it is" - because filling it in would change what the
+          logic does; a setting whose value depends on another setting, not
+          only on the unit; and links to a sensor, actor, kettle or fermenter.
+        - Values are finite numbers, text or true/false, so they can be sent
+          as JSON.
+        - It is asked on the class, with no kettle and no running logic, so
+          it must not touch CraftBeerPi. It shouldn't raise.
+
+        KettleController.get_types() sends it with each logic, in the
+        configured unit. An entry it can't use is left out, and a hook that
+        raises counts as {}.
+
+        This one knows nothing about the settings: {}.
+        """
+        return {}
+
     async def on_start(self):
         pass
 

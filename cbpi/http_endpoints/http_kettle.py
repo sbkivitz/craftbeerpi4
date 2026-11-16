@@ -26,6 +26,28 @@ def _cannot_load(e):
     return web.json_response({"error": "cannot load this file", "detail": str(e)}, status=400)
 
 
+def _fill(request):
+    """The fill query parameter: True for fill=1, False for fill=0 or none, None for anything else.
+    true/false, yes/no and on/off do too."""
+    raw = request.query.get("fill")
+    if raw is None:
+        return False
+    text = raw.strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def _bad_fill(request):
+    return web.json_response(
+        {"error": "bad fill", "detail": "fill={} isn't 1, to fill in the logic's own values, or 0, to leave those "
+                                        "settings empty.".format(request.query.get("fill"))},
+        status=400,
+    )
+
+
 class KettleHttpEndpoints:
 
     def __init__(self, cbpi):
@@ -38,12 +60,12 @@ class KettleHttpEndpoints:
         """
 
         ---
-        description: Switch actor on
+        description: Every kettle, and the kettle logics - each one's settings, its actions, and its blank_defaults, what it uses for each setting left empty, in the configured temperature unit
         tags:
         - Kettle
         responses:
-            "204":
-                description: successful operation
+            "200":
+                description: "{data: the kettles, types: {logic: {name, properties, actions, blank_defaults: {setting: value}}}}"
         """
         return web.json_response(data=self.controller.get_state())
 
@@ -380,7 +402,7 @@ class KettleHttpEndpoints:
         """
 
         ---
-        description: What loading a kettle settings file into this kettle would change - its logic, each setting and each link, old and new, and what would be left out and why. Changes nothing. Its token is what loading it takes.
+        description: What loading a kettle settings file into this kettle would change - its logic, each setting and each link, old and new, and what would be left out and why. Its blank lists each setting loading would leave empty, with the value the logic uses for it then (null where it gives none). Changes nothing. Its token is what loading it takes.
         tags:
         - Kettle
         parameters:
@@ -388,6 +410,11 @@ class KettleHttpEndpoints:
           in: "path"
           description: "Kettle ID"
           required: true
+          type: "string"
+        - name: "fill"
+          in: "query"
+          description: "1: fill each setting loading would leave empty with the value the logic uses for it, so it shows as a change and loading saves it. 0, or none: leave them empty. A setting the logic gives no value for stays empty."
+          required: false
           type: "string"
         - in: body
           name: body
@@ -399,21 +426,26 @@ class KettleHttpEndpoints:
             "200":
                 description: what loading the file would change
             "400":
-                description: a file that can't be loaded, and why
+                description: a file that can't be loaded, and why, or a fill that isn't 1 or 0
             "404":
                 description: no such kettle
         """
-        return self._preview(request.match_info["id"], await request.text())
+        return await self._preview(request, request.match_info["id"])
 
     @request_mapping(path="/file/preview", method="POST", auth_required=False)
     async def http_preview_new(self, request) -> web.Response:
         """
 
         ---
-        description: What a kettle settings file would make a new kettle - for the kettle form to fill itself in from. Changes nothing.
+        description: What a kettle settings file would make a new kettle - for the kettle form to fill itself in from. Its blank lists each setting the new kettle would have empty, with the value the logic uses for it then (null where it gives none). Changes nothing.
         tags:
         - Kettle
         parameters:
+        - name: "fill"
+          in: "query"
+          description: "1: fill each setting the new kettle would have empty with the value the logic uses for it. 0, or none: leave them empty. A setting the logic gives no value for stays empty."
+          required: false
+          type: "string"
         - in: body
           name: body
           description: the file, as it was saved
@@ -424,13 +456,16 @@ class KettleHttpEndpoints:
             "200":
                 description: the new kettle as the file would make it
             "400":
-                description: a file that can't be loaded, and why
+                description: a file that can't be loaded, and why, or a fill that isn't 1 or 0
         """
-        return self._preview(None, await request.text())
+        return await self._preview(request, None)
 
-    def _preview(self, id, text):
+    async def _preview(self, request, id):
+        fill = _fill(request)
+        if fill is None:
+            return _bad_fill(request)
         try:
-            return web.json_response(self.controller.preview_file(id, text))
+            return web.json_response(self.controller.preview_file(id, await request.text(), fill))
         except kettle_file.NoSuchKettle:
             return _no_kettle(id)
         except kettle_file.KettleFileError as e:
@@ -455,6 +490,11 @@ class KettleHttpEndpoints:
           description: "the token of the preview being confirmed"
           required: true
           type: "string"
+        - name: "fill"
+          in: "query"
+          description: "as for the preview being confirmed: 1 if it filled in the logic's own values, else 0 or none"
+          required: false
+          type: "string"
         - in: body
           name: body
           description: the file, as it was saved - the one the preview was of
@@ -465,7 +505,7 @@ class KettleHttpEndpoints:
             "200":
                 description: loaded - the kettle as it is now, and what changed
             "400":
-                description: a file that can't be loaded, and why, or no token
+                description: a file that can't be loaded, and why, no token, or a fill that isn't the preview's
             "404":
                 description: no such kettle
             "409":
@@ -473,6 +513,9 @@ class KettleHttpEndpoints:
         """
         id = request.match_info["id"]
         token = request.query.get("token", "")
+        fill = _fill(request)
+        if fill is None:
+            return _bad_fill(request)
         text = await request.text()
         if not token:
             return web.json_response(
@@ -484,7 +527,7 @@ class KettleHttpEndpoints:
                 status=400,
             )
         try:
-            kettle, result = await self.controller.load_file(id, text, token)
+            kettle, result = await self.controller.load_file(id, text, token, fill)
         except kettle_file.NoSuchKettle:
             return _no_kettle(id)
         except kettle_file.KettleFileError as e:
