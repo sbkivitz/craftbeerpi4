@@ -7,12 +7,11 @@ import math
 import os
 import os.path
 import re
-import subprocess
-import sys
 import time
 from datetime import datetime
 
 from cbpi.api.persist import atomic_write_json, quarantine
+from cbpi.api.system_clock import ask_timedatectl
 from os import listdir
 from os.path import isfile, join
 
@@ -30,30 +29,21 @@ from ..api.timer import Timer
 
 
 def system_clock_synchronized():
-    """Whether the system clock has been set from a time server since boot.
+    """Whether the system clock has been set from a time server since boot,
+    by the rule the brew-day timers use too (cbpi.api.system_clock).
 
-    True or False where the system can say - systemd's timedatectl, as on a
-    Raspberry Pi; None where it cannot (Windows, no timedatectl), and there a
-    PC's battery-backed clock keeps time through a power cut anyway.
+    True when timedatectl says so. False where timedatectl exists and doesn't:
+    it says no, fails, doesn't answer in time or answers something else - a
+    step that may heat must not decide by a clock nobody could confirm. None
+    where there is no timedatectl at all (Windows), and there a PC's
+    battery-backed clock keeps time through a power cut anyway.
 
     A Raspberry Pi has no battery-backed clock. After a power cut it boots
     with the time it last saved (fake-hwclock), which can be hours behind,
     and the right time comes from the network a minute or so later. Anything
     that decides by the time of day right after a boot must wait for it.
     """
-    if not sys.platform.startswith("linux"):
-        return None
-    try:
-        out = subprocess.run(
-            ["timedatectl", "show", "--property=NTPSynchronized", "--value"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    value = (out.stdout or "").strip().lower()
-    if out.returncode != 0 or value not in ("yes", "no"):
-        return None
-    return value == "yes"
+    return ask_timedatectl()[0]
 
 
 class StepController:
@@ -629,8 +619,10 @@ class StepController:
             logging.warning("Could not report carrying on: %s", e)
 
     async def _wait_for_trusted_clock(self, timeout):
-        """True once the system clock is confirmed, None where it cannot be told,
-        False if it is not confirmed within `timeout` real seconds."""
+        """True once timedatectl says the system clock is synchronized, None
+        where there is no timedatectl at all, False if it hasn't said so within
+        `timeout` real seconds: it said no, failed, didn't answer in time or
+        answered something else (system_clock_synchronized)."""
         loop = asyncio.get_running_loop()
         deadline = time.monotonic() + timeout
         while True:

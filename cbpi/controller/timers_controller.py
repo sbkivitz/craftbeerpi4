@@ -38,13 +38,14 @@ can be long before CraftBeerPi stopped. Otherwise `off` is null: not known.
 How long ago a timer brought back run out ran out is known when the clock was
 synchronized at the last save and is now; otherwise its `at` is null.
 
-Whether the clock is synchronized comes from timedatectl (system_clock_trusted),
-and wherever it exists - Linux, and so a Raspberry Pi - only its plain "yes"
-counts. "no", a failure, a timeout or an answer it doesn't give all count as not
-synchronized, and the log says what went wrong, so a user not allowed to run it
-leaves every length not known rather than worked out from a wrong clock. Only a
-system with no timedatectl at all - Windows, as on the simulators - counts as
-synchronized: its battery-backed clock keeps time through a power cut.
+Whether the clock is synchronized comes from timedatectl, by the rule a step
+carrying on after a restart uses too (cbpi.api.system_clock): wherever it
+exists - Linux, and so a Raspberry Pi - only its plain "yes" counts. "no", a
+failure, a timeout or an answer it doesn't give all count as not synchronized,
+and the log says what went wrong, so a user not allowed to run it leaves every
+length not known rather than worked out from a wrong clock. Only a system with
+no timedatectl at all - Windows, as on the simulators - counts as synchronized:
+its battery-backed clock keeps time through a power cut.
 
 A missing or damaged file, or one of another version, brings back no timers,
 and the log says why. One that can't be used is kept beside it, and an empty
@@ -59,52 +60,14 @@ import json
 import logging
 import math
 import os
-import shutil
-import subprocess
 
 from cbpi.api import clock
 from cbpi.api.dataclasses import NotificationAction, NotificationType
 from cbpi.api.persist import atomic_write_json, quarantine
+from cbpi.api.system_clock import system_clock_trusted
 
 # Real time, apart from the brewing clock: when the file was saved, and so how long CraftBeerPi was off.
 _REAL = clock.RealTimeSource()
-
-#: Where systemd puts timedatectl: looked for there too, so a service started with a short PATH still finds it.
-TIMEDATECTL_PLACES = ("/usr/bin/timedatectl", "/bin/timedatectl")
-#: Real seconds timedatectl has to answer. One that doesn't counts as not synchronized.
-TIMEDATECTL_TIMEOUT = 5
-
-
-def find_timedatectl():
-    """timedatectl's path, or None on a system without it, such as Windows."""
-    return shutil.which("timedatectl") or next((p for p in TIMEDATECTL_PLACES if os.path.exists(p)), None)
-
-
-def system_clock_trusted():
-    """Whether the system clock can be trusted to say how long CraftBeerPi was off: (True, None), or (False, why),
-    why being what went wrong, or None when timedatectl simply says the clock isn't synchronized yet.
-
-    Wherever timedatectl exists, only its plain "yes" to NTPSynchronized - the clock has been set from a time
-    server since boot. With no timedatectl at all, True: Windows, whose battery-backed clock keeps time."""
-    program = find_timedatectl()
-    if program is None:
-        return True, None
-    try:
-        out = subprocess.run([program, "show", "--property=NTPSynchronized", "--value"], capture_output=True,
-                             text=True, errors="replace", timeout=TIMEDATECTL_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return False, f"timedatectl didn't answer within {TIMEDATECTL_TIMEOUT} s"
-    except (OSError, subprocess.SubprocessError) as e:
-        return False, f"timedatectl couldn't be run ({e})"
-    answer = (out.stdout or "").strip()
-    if out.returncode != 0:
-        said = " ".join(((out.stderr or "").strip() or answer).split())[:120]
-        return False, f"timedatectl failed (exit {out.returncode}{': ' + said if said else ''})"
-    if answer.lower() == "yes":
-        return True, None
-    if answer.lower() == "no":
-        return False, None
-    return False, f"timedatectl answered {answer[:40]!r}, not yes or no"
 
 
 class TimerRefused(Exception):
@@ -189,7 +152,7 @@ class TimersController:
     #: Real seconds between asking whether the system clock is synchronized, while a timer counts down or
     #: a restart's numbers wait for the answer.
     CLOCK_POLL = 10
-    #: Whether the system clock can be trusted to say how long CraftBeerPi was off: system_clock_trusted's
+    #: Whether the system clock can be trusted to say how long CraftBeerPi was off (cbpi.api.system_clock):
     #: (trusted, what went wrong). Run in a thread: it may start a program.
     clock_trusted = staticmethod(system_clock_trusted)
 
