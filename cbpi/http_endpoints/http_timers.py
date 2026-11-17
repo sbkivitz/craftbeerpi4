@@ -51,7 +51,7 @@ class TimersHttpEndpoints:
     async def http_get(self, request):
         """
         ---
-        description: The timers - each one's id, name, own time (set), this countdown's length (run), time left, state (stopped, running, paused or done), when it ran out (at) and its prompt's id - with the most there can be, the names to offer (the BREWDAY_TIMER_NAMES setting), the brewing clock's time and its scale
+        description: The timers - each one's id, name, own time (set), this countdown's length (run), time left, state (stopped, running, paused or done), when it ran out (at, null when that isn't known), its prompt's id, whether it was counting down or had run out when CraftBeerPi last stopped and hasn't been started or answered since (interrupted), and how long CraftBeerPi was off then, in real seconds (off, null when that isn't known) - with the most there can be, the names to offer (the BREWDAY_TIMER_NAMES setting), the brewing clock's time and its scale
         tags:
         - Timers
         responses:

@@ -414,6 +414,8 @@ class CraftBeerPi:
         
         await self.actor.init()
         await self.kettle.init()
+        # The brew-day timers saved before the last stop: back, but none counting down (TimersController).
+        await self.timers.init()
         await self.call_initializer(self.app)
         await self.dashboard.init()
 

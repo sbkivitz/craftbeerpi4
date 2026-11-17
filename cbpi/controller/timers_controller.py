@@ -18,17 +18,49 @@ They run on the brewing clock (cbpi.api.clock), as the rest timer does: on a
 simulator at SIM_TIME_SCALE 30 a timer runs 30 times faster. The screens count
 down between messages with `scale`, and correct themselves on each message.
 
-Kept in memory only, as the rest timer is: after a restart there are none. The
-rest timer (RestTimerController, /resttimer) stays alongside, for brew-day
-screens that use it.
+They are kept on disk too, in timers.json in the config folder, so a restart -
+a power cut, say - doesn't lose them. The file is replaced whole (written
+beside it, then renamed over it) on every change, and every SAVE_EVERY brewing
+seconds while a timer counts down. When CraftBeerPi starts again (init):
+- a timer that was counting down comes back paused, with the time it had left
+  at the last save, and waits for somebody to start it: nothing tells
+  CraftBeerPi whether the brew went on while it was off;
+- one that had run out comes back run out, its prompt raised again for every
+  screen, until it is answered;
+- a paused or stopped one comes back as it was.
+Each timer that was counting down or had run out says how long CraftBeerPi was
+off (`off`, in real seconds), until it is started or answered. That length is
+measured on the real clock, which on a Raspberry Pi without a clock board
+starts wrong after a power cut, until the network sets it. So it is given only
+when the system says its clock is synchronized now and said so at the last
+save, and only when a timer was counting down then - otherwise the last save
+can be long before CraftBeerPi stopped. Otherwise `off` is null: not known.
+How long ago a timer brought back run out ran out is known when the clock was
+synchronized at the last save and is now; otherwise its `at` is null. A
+system that can't say - Windows, or no timedatectl - counts as synchronized,
+as for a step carrying on after a restart (system_clock_synchronized).
+
+A missing or damaged file, or one of another version, brings back no timers,
+and the log says why. One that can't be used is kept beside it, and an empty
+one written in its place.
+
+The rest timer (RestTimerController, /resttimer) stays alongside, in memory
+only, for brew-day screens that use it.
 """
 
 import asyncio
+import json
 import logging
 import math
+import os
 
 from cbpi.api import clock
 from cbpi.api.dataclasses import NotificationAction, NotificationType
+from cbpi.api.persist import atomic_write_json, quarantine
+from cbpi.controller.step_controller import system_clock_synchronized
+
+# Real time, apart from the brewing clock: when the file was saved, and so how long CraftBeerPi was off.
+_REAL = clock.RealTimeSource()
 
 
 class TimerRefused(Exception):
@@ -53,18 +85,30 @@ class Timer:
         self.remaining = float(seconds)  # the time left while it isn't running
         self.state = "stopped"
         self.deadline = None  # clock.monotonic() at zero, while it runs
-        self.at = None  # clock.now() when it ran out
+        self.at = None  # clock.now() when it ran out, while that is known
+        self.rang = None  # clock.monotonic() when it ran out, while that is known
         self.prompt = None  # its kept prompt's id, while the alarm waits
         self.task = None
+        # Counting down or run out when CraftBeerPi stopped, until it is started or answered; and how long
+        # CraftBeerPi was off then, in real seconds, when that is known.
+        self.interrupted = False
+        self.off = None
 
     def left(self) -> float:
         if self.state == "running" and self.deadline is not None:
             return max(0.0, self.deadline - clock.monotonic())
         return max(0.0, self.remaining)
 
+    def up(self):
+        """Brewing seconds since it ran out, or None: it hasn't, or how long ago isn't known."""
+        if self.state != "done" or self.rang is None:
+            return None
+        return max(0.0, clock.monotonic() - self.rang)
+
     def to_dict(self):
         return dict(id=self.id, name=self.name, set=self.set, run=round(self.run, 3), left=round(self.left(), 3),
-                    state=self.state, at=None if self.at is None else round(self.at, 3), prompt=self.prompt)
+                    state=self.state, at=None if self.at is None else round(self.at, 3), prompt=self.prompt,
+                    interrupted=self.interrupted, off=None if self.off is None else round(self.off, 1))
 
 
 class TimersController:
@@ -89,12 +133,37 @@ class TimersController:
     NAME_LEN = 24
     NAMES_SETTING = "BREWDAY_TIMER_NAMES"
     NAMES_DEFAULT = "Hop stand, Yeast, Vorlauf"
+    #: The file in the config folder the timers are kept in, and the version of its form this reads.
+    FILE = "timers.json"
+    FILE_VERSION = 1
+    #: While a timer counts down, the file is saved this often as well, in brewing seconds: a power cut
+    #: costs a timer at most this much of its countdown - it comes back with up to this much too long -
+    #: and makes the time CraftBeerPi was off at most this much too long. At real speed, six small writes
+    #: a minute on the Pi's SD card, and none while nothing counts down. Brewing seconds, so a simulation
+    #: loses the same at any speed.
+    SAVE_EVERY = 10
+    #: Real seconds between asking whether the system clock is synchronized, while a timer counts down or
+    #: a restart's numbers wait for the answer.
+    CLOCK_POLL = 10
+    #: Whether the system clock has been set from a time server: True, False, or None where the system
+    #: can't say (see step_controller.system_clock_synchronized). Run in a thread: it may start a program.
+    clock_synchronized = staticmethod(system_clock_synchronized)
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.logger = logging.getLogger(__name__)
         self.timers = []  # in the order they were added
         self._next_id = 1
+        folder = getattr(cbpi, "config_folder", None)
+        self.path = folder.get_file_path(self.FILE) if folder is not None else None
+        self._keeper = None  # _keep, while a timer counts down or has run out
+        self._watch = None  # asking whether the system clock is synchronized
+        # True once the system clock is synchronized (or the system can't say), False while it says not,
+        # None before it has been asked.
+        self._trusted = None
+        # What a restart left to work out once the clock can be trusted (_restore, _settle), or None.
+        self._restart = None
+        self._save_failed = False
 
     # -- what every screen is told --------------------------------------------------------
 
@@ -126,6 +195,274 @@ class TimersController:
             self.cbpi.ws.send(dict(topic=self.TOPIC, data=self.get_state()))
         except Exception as e:  # noqa: BLE001 - a screen that misses this hears the next one
             self.logger.debug("timers: could not tell the screens: %s", e)
+
+    def _changed(self):
+        """A timer changed: saved, then every screen told."""
+        self._save()
+        self._push()
+
+    # -- kept on disk ---------------------------------------------------------------------------
+
+    STATES = ("stopped", "running", "paused", "done")
+
+    def _running(self) -> bool:
+        return any(t.state == "running" for t in self.timers)
+
+    def _ringing(self) -> bool:
+        return any(t.state == "done" for t in self.timers)
+
+    def _file_state(self):
+        """What timers.json holds: each timer as it stands, and when that was on the real clock."""
+        timers = []
+        for t in self.timers:
+            up = t.up()
+            timers.append(dict(id=t.id, name=t.name, set=t.set, run=round(t.run, 3), left=round(t.left(), 3),
+                               state=t.state, up=None if up is None else round(up, 3), interrupted=t.interrupted,
+                               off=None if t.off is None else round(t.off, 3)))
+        return dict(version=self.FILE_VERSION, saved_at=_REAL.now(), clock_confirmed=self._trusted is True,
+                    scale=clock.scale(), next_id=self._next_id, timers=timers)
+
+    def _save(self):
+        """Replace timers.json with the timers as they are now. Never raises: a disk that fails costs a restart
+        its timers, not the brew its alarms."""
+        if self.path is None:
+            return
+        try:
+            atomic_write_json(self.path, self._file_state(), sort_keys=True)
+        except Exception as e:  # noqa: BLE001
+            if not self._save_failed:
+                self.logger.warning("Timers: could not save %s, so a restart now would lose them: %s", self.path, e)
+            self._save_failed = True
+            return
+        if self._save_failed:
+            self.logger.info("Timers: %s saved again", self.path)
+        self._save_failed = False
+
+    def _start_keeper(self):
+        if self._keeper is None or self._keeper.done():
+            self._keeper = asyncio.get_running_loop().create_task(self._keep())
+
+    async def _keep(self):
+        """While a timer counts down, save every SAVE_EVERY brewing seconds as well: the time it has left, and
+        that CraftBeerPi was still running then. While one counts down or has run out, tell the screens when the
+        clock's speed changes: they count between messages at the speed they were last told, and a simulator
+        sets its speed a moment after start-up, when a timer brought back may already count up."""
+        try:
+            scale = clock.scale()
+            due = clock.monotonic() + self.SAVE_EVERY
+            while self._running() or self._ringing():
+                # In slices of about a real second, as the timers wait, so a new speed is followed at once.
+                await clock.sleep_until(min(due, clock.monotonic() + max(1.0, clock.scale())))
+                if clock.scale() != scale:
+                    scale = clock.scale()
+                    self._push()
+                if clock.monotonic() >= due:
+                    if self._running():
+                        self._save()
+                    due = clock.monotonic() + self.SAVE_EVERY
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.logger.error("Timers: saving them while they count down stopped: %s", e)
+
+    def _watch_clock(self):
+        if self._trusted is not True and (self._watch is None or self._watch.done()):
+            self._watch = asyncio.get_running_loop().create_task(self._until_trusted())
+
+    async def _until_trusted(self):
+        """Ask whether the system clock is synchronized, and again every CLOCK_POLL real seconds while a timer
+        counts down or a restart's numbers wait for it. Once it is, work those numbers out."""
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                synced = await loop.run_in_executor(None, self.clock_synchronized)
+                if synced is not False:
+                    self._trusted = True
+                    if self._restart_waits():
+                        self._settle()
+                        self._changed()
+                    return
+                self._trusted = False
+                if not self._restart_waits() and not self._running():
+                    return
+                await _REAL.sleep(self.CLOCK_POLL)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - unanswered, the numbers stay unknown, which is what they are
+            self.logger.warning("Timers: could not ask whether the clock is synchronized: %s", e)
+
+    def _restart_waits(self) -> bool:
+        """Whether a timer brought back still waits for the clock, to say how long CraftBeerPi was off."""
+        r = self._restart
+        if r is not None and not any(t in self.timers and t.interrupted for t, _, _ in r["timers"]):
+            self._restart = None
+        return self._restart is not None
+
+    async def init(self):
+        """At start-up: bring back the timers saved before CraftBeerPi stopped (see the module's docstring),
+        and start asking whether the system clock can be trusted."""
+        app = getattr(self.cbpi, "app", None)
+        if app is not None:
+            app.on_cleanup.append(self.shutdown)
+        if self._restore():
+            self._changed()
+            self._start_keeper()
+        elif self.path is not None and not os.path.exists(self.path):
+            # None to read, or one that couldn't be used and was moved aside: an empty file, so the next start
+            # has one and says nothing.
+            self._save()
+        self._watch_clock()
+
+    async def shutdown(self, app=None):
+        """On a stop: a timer counting down is saved with the time it has left now."""
+        for task in (self._keeper, self._watch):
+            if task is not None and not task.done():
+                task.cancel()
+        if self._running():
+            self._save()
+
+    def _restore(self) -> bool:
+        """Bring back the timers in timers.json. True if there were any."""
+        saved = self._read()
+        if not saved:
+            return False
+        self._next_id = saved["next_id"]
+        if not saved["timers"]:
+            return False
+        live = any(d["state"] == "running" for d in saved["timers"])
+        # Each timer whose numbers wait for the clock: whether this restart's length is its own to show, and the
+        # brewing seconds it had been run out at the save.
+        waiting = []
+        said = []
+        for d in saved["timers"]:
+            t = Timer(d["id"], d["name"], d["set"])
+            t.run, t.remaining, t.state = d["run"], d["left"], d["state"]
+            t.interrupted, t.off = d["interrupted"], d["off"]
+            if t.state == "running":
+                t.state, t.interrupted, t.off = "paused", True, None
+                waiting.append((t, True, None))
+                said.append(f"{t.name} paused at {fmt(t.remaining)} (it was counting down)")
+            elif t.state == "done":
+                t.remaining = 0.0
+                own = not t.interrupted
+                if own:
+                    t.interrupted, t.off = True, None
+                waiting.append((t, own, d["up"]))
+                said.append(f"{t.name} run out, its alarm raised again")
+            else:
+                said.append(f"{t.name} {t.state} at {fmt(t.remaining)}")
+            self.timers.append(t)
+        for t in self.timers:
+            if t.state == "done":
+                self._ring(t)
+        if waiting and saved["clock_confirmed"]:
+            self._restart = dict(saved_at=saved["saved_at"], scale=saved["scale"], live=live, timers=waiting,
+                                 real=_REAL.monotonic(), brewing=clock.monotonic())
+        self.logger.info("Timers: brought back %d from %s: %s.%s", len(self.timers), os.path.basename(self.path),
+                         "; ".join(said), "" if not waiting or saved["clock_confirmed"] else
+                         " The system clock wasn't synchronized when they were saved, so how long CraftBeerPi was"
+                         " off isn't known.")
+        return True
+
+    def _settle(self):
+        """A restart's numbers, once the clock can be trusted: how long CraftBeerPi was off, and how long ago each
+        timer brought back run out ran out."""
+        r, self._restart = self._restart, None
+        if r is None:
+            return
+        # When the timers were brought back, by the real clock as it is now, set right.
+        back = _REAL.now() - (_REAL.monotonic() - r["real"])
+        since = back - r["saved_at"]  # real seconds from the last save until then
+        if since < 0:
+            self.logger.warning("Timers: by the clock they were saved after they were brought back, so how long "
+                                "CraftBeerPi was off isn't known.")
+            return
+        for t, own, up in r["timers"]:
+            if t not in self.timers or not t.interrupted:
+                continue  # removed, started or answered meanwhile
+            if own and r["live"]:
+                t.off = since
+            if t.state == "done" and up is not None:
+                # The time off passes at the speed the clock had, as a simulated brewery cools at it.
+                t.rang = r["brewing"] - (up + since * r["scale"])
+                t.at = clock.now() - (clock.monotonic() - t.rang)
+        if r["live"]:
+            self.logger.info("Timers: CraftBeerPi was off for %.0f s before they were brought back.", since)
+
+    def _read(self):
+        """timers.json, checked (_check), or None, with a line in the log saying why."""
+        if self.path is None:
+            return None
+        name = os.path.basename(self.path)
+        try:
+            with open(self.path, encoding="utf-8") as handle:
+                text = handle.read()
+        except FileNotFoundError:
+            self.logger.warning("Timers: none brought back: there was no %s. An empty one is written now.", name)
+            return None
+        except (OSError, ValueError) as e:
+            why = e
+        else:
+            try:
+                return self._check(json.loads(text))
+            except (ValueError, TypeError) as e:
+                why = e
+        kept = quarantine(self.path)
+        self.logger.warning("Timers: none brought back: %s can't be used (%s). It was kept as %s.", name, why,
+                            os.path.basename(kept) if kept else "nothing: it couldn't be moved")
+        return None
+
+    def _check(self, data):
+        """The file's contents, if they are what _file_state writes; else ValueError, saying what isn't."""
+        if not isinstance(data, dict):
+            raise ValueError("it isn't a JSON object")
+        if data.get("version") != self.FILE_VERSION:
+            raise ValueError(f"it is version {data.get('version')!r}; this CraftBeerPi reads {self.FILE_VERSION}")
+
+        def number(d, key, low, high, empty=False):
+            value = d.get(key)
+            if value is None and empty:
+                return None
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+                    or not low <= value <= high:
+                raise ValueError(f"{key} is {value!r}")
+            return float(value)
+
+        def flag(d, key):
+            if not isinstance(d.get(key), bool):
+                raise ValueError(f"{key} is {d.get(key)!r}")
+            return d[key]
+
+        next_id = data.get("next_id")
+        if isinstance(next_id, bool) or not isinstance(next_id, int) or next_id < 1:
+            raise ValueError(f"next_id is {next_id!r}")
+        saved = dict(saved_at=number(data, "saved_at", 0, math.inf), clock_confirmed=flag(data, "clock_confirmed"),
+                     scale=number(data, "scale", 0, math.inf), next_id=next_id, timers=[])
+        if saved["scale"] <= 0:
+            raise ValueError("scale is 0")
+        timers = data.get("timers")
+        if not isinstance(timers, list) or len(timers) > self.MAX:
+            raise ValueError(f"it holds {timers!r:.40} for its timers")
+        names = set()
+        for d in timers:
+            if not isinstance(d, dict):
+                raise ValueError(f"a timer is {d!r:.40}")
+            ident, name = d.get("id"), d.get("name")
+            if isinstance(ident, bool) or not isinstance(ident, int) or not 1 <= ident < next_id \
+                    or ident in (x["id"] for x in saved["timers"]):
+                raise ValueError(f"a timer's id is {ident!r}")
+            if not isinstance(name, str) or not name or name != " ".join(name.split()) \
+                    or len(name) > self.NAME_LEN or name.casefold() in names:
+                raise ValueError(f"a timer's name is {name!r}")
+            names.add(name.casefold())
+            if d.get("state") not in self.STATES:
+                raise ValueError(f"{name}'s state is {d.get('state')!r}")
+            saved["timers"].append(dict(
+                id=ident, name=name, state=d["state"],
+                set=number(d, "set", self.MIN_SET, self.MAX_SET), run=number(d, "run", 0, self.CEILING),
+                left=number(d, "left", 0, self.CEILING), up=number(d, "up", 0, math.inf, empty=True),
+                interrupted=flag(d, "interrupted"), off=number(d, "off", 0, math.inf, empty=True)))
+        return saved
 
     # -- checking what a command asks for ---------------------------------------------------
 
@@ -194,8 +531,11 @@ class TimersController:
     def _start(self, t: Timer):
         t.deadline = clock.monotonic() + t.remaining
         t.state = "running"
+        t.interrupted, t.off = False, None
         self._cancel(t)
         t.task = asyncio.get_running_loop().create_task(self._run(t))
+        self._start_keeper()
+        self._watch_clock()
 
     def _answer(self, t: Timer, reason: str, answer=None):
         """Take its alarm's prompt down on every screen. answer: the button it was answered with, when it was."""
@@ -206,7 +546,8 @@ class TimersController:
             except Exception as e:  # noqa: BLE001
                 self.logger.debug("timers: could not take %s's prompt down: %s", t.name, e)
             t.prompt = None
-        t.at = None
+        t.at = t.rang = None
+        t.interrupted, t.off = False, None
 
     async def _run(self, t: Timer):
         try:
@@ -228,14 +569,19 @@ class TimersController:
             t.remaining = t.left()
             t.state = "paused"
             t.deadline = None
-            self._push()
+            self._changed()
 
     def _finish(self, t: Timer):
         t.state = "done"
         t.remaining = 0.0
         t.deadline = None
         t.task = None
-        t.at = clock.now()
+        t.at, t.rang = clock.now(), clock.monotonic()
+        self._ring(t)
+        self._changed()
+
+    def _ring(self, t: Timer):
+        """Its alarm: a prompt titled with its name, with +5 MIN and OK, kept for every screen until answered."""
         ident = t.id
 
         async def more():
@@ -251,7 +597,6 @@ class TimersController:
             action=[NotificationAction(self.MORE_LABEL, more), NotificationAction(self.OK_LABEL, ok)],
             keep=True,
         )
-        self._push()
 
     # -- the commands -------------------------------------------------------------------------
 
@@ -265,7 +610,7 @@ class TimersController:
         self.timers.append(t)
         if start:
             self._start(t)
-        self._push()
+        self._changed()
         return self.get_state()
 
     async def change(self, ident, name=None, seconds=None):
@@ -282,7 +627,7 @@ class TimersController:
             t.set = t.run = t.remaining = seconds
             t.state = "stopped"
         t.name = new_name
-        self._push()
+        self._changed()
         return self.get_state()
 
     async def start(self, ident):
@@ -295,7 +640,7 @@ class TimersController:
         if t.state == "stopped":
             t.run = t.remaining
         self._start(t)
-        self._push()
+        self._changed()
         return self.get_state()
 
     async def pause(self, ident):
@@ -306,7 +651,7 @@ class TimersController:
         t.state = "paused"
         t.deadline = None
         self._cancel(t)
-        self._push()
+        self._changed()
         return self.get_state()
 
     async def add_time(self, ident, seconds):
@@ -325,7 +670,7 @@ class TimersController:
             self._start(t)
         else:
             t.remaining = left
-        self._push()
+        self._changed()
         return self.get_state()
 
     async def remove(self, ident):
@@ -334,7 +679,7 @@ class TimersController:
         self._answer(t, "withdrawn")
         t.state = "removed"
         self.timers.remove(t)
-        self._push()
+        self._changed()
         return self.get_state()
 
     async def ok(self, ident):
@@ -345,7 +690,7 @@ class TimersController:
         self._answer(t, "answered", self.OK_LABEL)
         t.state = "stopped"
         t.remaining = t.run = t.set
-        self._push()
+        self._changed()
         return self.get_state()
 
     async def plus5(self, ident):
@@ -356,5 +701,5 @@ class TimersController:
         self._answer(t, "answered", self.MORE_LABEL)
         t.remaining = t.run = float(self.MORE)
         self._start(t)
-        self._push()
+        self._changed()
         return self.get_state()
