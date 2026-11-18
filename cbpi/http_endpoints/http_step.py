@@ -1,9 +1,10 @@
+import json
 import logging
 
 from aiohttp import web
 from cbpi.api import *
 from cbpi.api.dataclasses import Props, Step
-from cbpi.controller.step_controller import StepController
+from cbpi.controller.step_controller import StartRefused, StepController
 
 
 class StepHttpEndpoints:
@@ -284,17 +285,69 @@ class StepHttpEndpoints:
     @request_mapping(path="/start", method="POST", auth_required=False)
     async def http_start(self, request):
         """
-
         ---
-        description: Start the brewing process / step
+        description: |
+          Start the brewing process - the next step, resuming a stopped one first.
+
+          START on the brew-day screen says which recipe it was pressed on: the ids of every step of that recipe, in
+          order, as {"steps": ["<id>", ...]}. So it never starts another recipe, one that another screen loaded a
+          moment before. Given steps, nothing starts, and the answer is 409, when
+          - they aren't exactly the loaded profile's ids, in order (error recipe_changed), or
+          - they are, but a step of that recipe runs already: another screen started it a moment before (error
+            already_running).
+          The ids are checked first. The 409's body says what is loaded:
+          {"error": "recipe_changed" or "already_running", "name": the loaded recipe's name, or null when nothing
+          is loaded or it has no name, "steps": the loaded profile's ids, in order}.
+
+          With no body, an empty one, or a JSON object without steps - as older screens and the other pages send -
+          whatever is loaded starts, as it always has, and the answer is 200 even when a step runs already.
+
+          A body that is neither empty nor a JSON object starts nothing, and the answer is 400 with error bad_body.
+          The page meant something by it, and CraftBeerPi can't tell whether that was the recipe loaded now.
+          Steps given as anything but that recipe's ids - null, say - are recipe_changed.
         tags:
         - Step
+        parameters:
+        - in: body
+          name: body
+          description: the ids of every step of the recipe START was pressed on, in order
+          required: false
+          schema:
+            type: object
+            properties:
+              steps:
+                type: array
+                items:
+                  type: string
+            example:
+                steps: ["RAuQR8UgWLueQtfXrWxShb", "PkVY88NrEX4VYg4H2tY4Ae", "2Sn46Fc6jRGvES9MuQXHdG"]
         responses:
             "200":
-                description: successful operation
+                description: started, or nothing to start
+            "400":
+                description: a body neither empty nor a JSON object - error bad_body - and nothing started
+            "409":
+                description: steps given, and nothing started - error recipe_changed, or already_running
         """
-
-        await self.controller.start()
+        raw = await request.read()
+        given = {}
+        if raw.strip():
+            try:
+                body = json.loads(raw)
+            except ValueError:  # not JSON, or not UTF-8
+                body = None
+            if not isinstance(body, dict):
+                logging.warning("Nothing started: START sent a body that isn't a JSON object")
+                return web.json_response(status=400, data=dict(
+                    error="bad_body",
+                    detail="Send no body, or a JSON object such as {\"steps\": [...]}. Nothing was started."))
+            if "steps" in body:
+                given = dict(steps=body["steps"])
+        try:
+            await self.controller.start(**given)
+        except StartRefused as refused:
+            return web.json_response(status=409, data=dict(error=refused.reason, name=refused.name,
+                                                           steps=refused.steps))
         return web.Response(status=200)
 
     @request_mapping(path="/stop", method="POST", auth_required=False)

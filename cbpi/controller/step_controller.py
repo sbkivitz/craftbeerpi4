@@ -46,6 +46,22 @@ def system_clock_synchronized():
     return ask_timedatectl()[0]
 
 
+class StartRefused(Exception):
+    """START, told which recipe it was pressed on, started nothing (StepController.start).
+
+    reason: "recipe_changed" - the loaded profile isn't that recipe any more -
+    or "already_running" - it is, and a step of it runs already. name and
+    steps say what is loaded: the recipe's name (None when nothing is loaded,
+    or it has no name) and its steps' ids, in order.
+    """
+
+    def __init__(self, reason, name, steps):
+        super().__init__(reason)
+        self.reason = reason
+        self.name = name
+        self.steps = steps
+
+
 class StepController:
 
     # Carrying on by itself after a restart (allow_resume). Real seconds: the
@@ -966,7 +982,19 @@ class StepController:
             held.instance.summary = ""
         self._held_step_id = None
 
-    async def start(self, by_brewer=True):
+    # start()'s steps when START didn't say which recipe it was pressed on:
+    # whatever is loaded starts, as it always has.
+    _ANY_RECIPE = object()
+
+    def _loaded_name(self):
+        """The loaded recipe's name, or None: nothing loaded, or no name."""
+        if not getattr(self, "profile", None):
+            return None
+        basic = self.basic_data if isinstance(self.basic_data, dict) else {}
+        name = basic.get("name")
+        return name if isinstance(name, str) and name.strip() else None
+
+    async def start(self, by_brewer=True, steps=_ANY_RECIPE):
         """Start the next step - resuming a stopped one first.
 
         `by_brewer` is True when the brewer asked (Start, Resume, Next on a
@@ -974,10 +1002,33 @@ class StepController:
         profile is moving on by itself: a step finished, or one was skipped. A
         step that waits for the brewer (_brewer_wait - a boil) is then held
         rather than started, so it never begins heating unattended.
+
+        `steps` is what START on the brew-day screen sends (POST /step2/start):
+        the ids of every step of the recipe it was pressed on, in order. Given,
+        nothing starts unless they are exactly the loaded profile's ids, in
+        their order, and nothing new starts while a step runs: StartRefused,
+        "recipe_changed" or "already_running", checked in that order. A
+        recipe's ids stay the same through a hold, a stop, a failed step, a
+        reset and a restart; adding, deleting or moving a step changes them,
+        and so does loading a recipe, the same one included. Both checks come
+        before the first await here, so no other request can load a recipe or
+        start a step between a check and the start.
         """
+
+        if steps is not self._ANY_RECIPE:
+            loaded = [item.id for item in self.profile]
+            if steps != loaded:
+                name = self._loaded_name()
+                now = "'{}'".format(name) if name else "it has no name" if loaded else "nothing is loaded"
+                logging.warning("Nothing started: START was pressed on a recipe that isn't the one "
+                                "loaded now (%s)", now)
+                raise StartRefused("recipe_changed", name, loaded)
 
         if self.find_by_status(StepState.ACTIVE) is not None:
             logging.error("Steps already running")
+            if steps is not self._ANY_RECIPE:
+                raise StartRefused("already_running", self._loaded_name(),
+                                   [item.id for item in self.profile])
             return
 
         # A failed step is where the profile stopped, and the brewer's Start
