@@ -260,7 +260,9 @@ class TimersController:
             due = clock.monotonic() + self.SAVE_EVERY
             while self._running() or self._ringing():
                 # In slices of about a real second, as the timers wait, so a new speed is followed at once.
-                await clock.sleep_until(min(due, clock.monotonic() + max(1.0, clock.scale())))
+                # due is on clock.monotonic(), and clock.sleep_until() waits for a time on clock.now(): wait
+                # for what is left instead.
+                await clock.sleep(max(0.0, min(due - clock.monotonic(), max(1.0, clock.scale()))))
                 if clock.scale() != scale:
                     scale = clock.scale()
                     self._push()
@@ -567,8 +569,9 @@ class TimersController:
             while t.state == "running" and t.deadline is not None and clock.monotonic() < t.deadline:
                 # In slices of about a real second, as step timers and the rest timer wait: one long sleep
                 # keeps the speed the clock had when it began, and a simulator sets SIM_TIME_SCALE a moment
-                # after start-up.
-                await clock.sleep_until(min(t.deadline, clock.monotonic() + max(1.0, clock.scale())))
+                # after start-up. The deadline is on clock.monotonic(), and clock.sleep_until() waits for a
+                # time on clock.now(): wait for what is left instead.
+                await clock.sleep(max(0.0, min(t.deadline - clock.monotonic(), max(1.0, clock.scale()))))
                 if clock.scale() != scale:
                     scale = clock.scale()
                     self._push()  # the screens count down at the new speed
