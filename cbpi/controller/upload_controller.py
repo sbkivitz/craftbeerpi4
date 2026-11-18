@@ -22,6 +22,7 @@ from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import (Actor, Kettle, NotificationAction,
                                   NotificationType, Sensor)
 from cbpi.controller.kettle_controller import KettleController
+from cbpi.controller.step_controller import StepController
 from voluptuous.schema_builder import message
 
 from ..api.step import StepMove, StepResult, StepState
@@ -112,7 +113,9 @@ class UploadController:
         So one import runs at a time. Its steps are gathered as the recipe is
         read (create_recipe, create_step) and replace the mash profile in one
         write, only once the whole recipe has been read. A failure says so,
-        leaves the profile as it was, and is reported to the caller.
+        leaves the profile as it was, and is reported to the caller. The boil
+        additions the boil step had no reminder for go in the same write, with
+        the recipe's name (StepController.NO_REMINDER_KEY).
 
         Refused before anything is read or changed when the settings would put
         the boil on the wrong vessel - see _import_problem.
@@ -144,12 +147,11 @@ class UploadController:
                 return self._not_imported(
                     "The {} recipe was not imported: {}.".format(label, error))
             staged["steps"] = self._with_mash_out(staged["steps"])
+            basic = {"name": staged["name"], "author": self.cbpi.config.get("AUTHOR", "John Doe")}
+            if staged.get("without_reminder"):
+                basic[StepController.NO_REMINDER_KEY] = staged["without_reminder"]
             try:
-                await self.cbpi.step.load_recipe({
-                    "basic": {"name": staged["name"],
-                              "author": self.cbpi.config.get("AUTHOR", "John Doe")},
-                    "steps": staged["steps"],
-                })
+                await self.cbpi.step.load_recipe({"basic": basic, "steps": staged["steps"]})
             except Exception as e:  # noqa: BLE001
                 logging.exception("could not write the imported recipe")
                 return self._not_imported(
@@ -276,6 +278,24 @@ class UploadController:
                 "of only six. No reminder for: {}. Watch the clock for {}, or set a "
                 "timer on the brew-day screen.".format(
                     len(alerts), named, "it" if len(missed) == 1 else "them"))
+
+    def _keep_unreminded(self, missed):
+        """Keep the boil additions left without a reminder with the recipe, so
+        the pre-brew check can name them again on brew day: [[minutes, label],
+        ...] as getBoilAlerts has them.
+
+        Inside import_recipe they go with the recipe it writes. An importer
+        called on its own has made the mash profile already (create_recipe), so
+        they go in its basic data, which the boil step's own POST saves next.
+        """
+        kept = [dict(name=label or None, minutes=minutes) for minutes, label in missed]
+        if self._staging:
+            if self._staged is not None:
+                self._staged.setdefault("without_reminder", []).extend(kept)
+            return
+        basic = getattr(getattr(self.cbpi, "step", None), "basic_data", None)
+        if isinstance(basic, dict):
+            basic.setdefault(StepController.NO_REMINDER_KEY, []).extend(kept)
 
     async def get_kbh_recipes(self):
         try:
@@ -1787,6 +1807,7 @@ class UploadController:
         if len(alerts) > self.BOIL_REMINDERS:
             self._import_warning("Boil additions without a reminder",
                                  self._unreminded_text(alerts))
+            self._keep_unreminded(alerts[self.BOIL_REMINDERS:])
         whirlpool_temps = sorted(whirlpool, key=lambda x: x[0], reverse=True)
         logging.info("Whirlpool Hops: {}".format(whirlpool_temps))
         try:

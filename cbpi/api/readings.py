@@ -5,7 +5,8 @@ Judged differently, the logic would hold heating and cooling off for a
 DS18B20's 85 C power-on value while a ramp step took the same reading as its
 starting point, kept commanding targets from it after the probe recovered, and
 the logic - finding those targets plausible - heated a beer that was being
-cold-crashed.
+cold-crashed. The pre-brew check (PrecheckController) judges a kettle's probe
+by it too, against the temperatures a kettle can have (KETTLE_C).
 
 A reading is trusted only on affirmative evidence: a finite value, a finite
 age within the sensor's own limit, and a value the vessel can have. A sensor
@@ -21,6 +22,9 @@ import math
 # CraftBeerPi's own "no reading" sentinel. Glycol held at 25-28 F is well
 # inside; a reservoir run below -22 F would need this widened.
 FERMENTER_C = (-30.0, 80.0)
+
+# A kettle's water or wort, or an empty kettle in a freezing garage: -4 F to 230 F, a full boil with room for an offset.
+KETTLE_C = (-20.0, 110.0)
 
 # Age limit for a reading whose sensor declares none (SensorController
 # normally supplies max_age from the sensor's own publish interval).

@@ -36,6 +36,10 @@ class CBPiSensor(CBPiBase, metaclass=ABCMeta):
         # look fresh.
         self.last_update_monotonic = None
         self.last_update_paired = None
+        # When CraftBeerPi started this sensor, on the clock a reading's age is
+        # measured on: how long one that has never given a reading has been
+        # silent (the pre-brew check says so).
+        self.started_monotonic = time.monotonic()
 
     def init(self):
         pass

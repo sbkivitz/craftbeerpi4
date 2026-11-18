@@ -180,6 +180,76 @@ class StepHttpEndpoints:
         await self.controller.next()
         return web.Response(status=200)
 
+    @request_mapping(path="/precheck", auth_required=False)
+    async def http_precheck(self, request):
+        """
+        ---
+        description: |
+          The pre-brew check, which the brew-day screen makes when START is held on a recipe not begun
+          (PrecheckController). It changes nothing. ok is true when all three parts pass; each part has its own ok,
+          and one that can't be worked out says why in error, with ok false.
+
+          probes - whether each kettle's probe gives a reading (kettles only), the HLT, mash tun and boil kettle
+          first. A reading is a number, published, no older than the probe's own limit (max_age), and a temperature
+          a kettle can have (range, in the TEMP_UNIT setting's unit). For each kettle - kettle_id, kettle (its name),
+          role (hlt, mt, bk or null), sensor_id, probe (the probe's name), ok, reason, value, age, max_age and
+          no_reading_for. reason when ok is false - no_probe (none set; it fails), missing, unreadable, never,
+          stale, not_a_number or out_of_range. no_reading_for is how long it hasn't given a reading, in seconds on
+          the monotonic real clock sensor ages use, or null when that isn't known.
+
+          clock - whether the system clock counts as set, by the rule the steps and the brew-day timers use
+          (cbpi.api.system_clock), asked in a thread and kept 5 s. source - network (a time server, as timedatectl
+          reports) or system (the computer's own clock, where there is no timedatectl). reason - synchronized,
+          not_synchronized, unconfirmed (timedatectl failed, timed out, couldn't run or gave an odd answer; detail
+          says which), no_timedatectl, or no_answer_yet. age - real seconds since it was asked.
+
+          reminders - additions counts the boil additions of the loaded recipe - the reminders set in every boil
+          step and the ones its import couldn't give a reminder - and without_reminder lists those, with name and
+          minutes before the end of the boil. boil_steps is how many boil steps the profile has, and per_boil_step
+          how many reminders each holds.
+        tags:
+        - Step
+        responses:
+            "200":
+                description: the check's answer
+                examples:
+                    application/json:
+                        ok: false
+                        probes:
+                            ok: true
+                            unit: F
+                            range: [-4.0, 230.0]
+                            kettles:
+                            - kettle_id: npqm66B5iuYbDt2KrvuDS5
+                              kettle: HLT
+                              role: hlt
+                              sensor_id: afft72Vaoj33KfkXVqyiD8
+                              probe: HLT Temp
+                              ok: true
+                              reason: null
+                              value: 68.2
+                              age: 0.4
+                              max_age: 30.0
+                              no_reading_for: null
+                        clock:
+                            ok: false
+                            source: network
+                            reason: not_synchronized
+                            detail: null
+                            age: 0.0
+                        reminders:
+                            ok: false
+                            additions: 8
+                            without_reminder:
+                            - name: 1.50 oz Citra
+                              minutes: 5.0
+                            - name: 2.00 oz Citra
+                              minutes: 0.0
+                            boil_steps: 1
+                            per_boil_step: 6
+        """
+        return web.json_response(data=await self.cbpi.precheck.check())
+
     @request_mapping(path="/move", method="PUT", auth_required=False)
     async def http_move(self, request):
         """

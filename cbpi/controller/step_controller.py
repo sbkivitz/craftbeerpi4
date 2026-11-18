@@ -1615,6 +1615,38 @@ class StepController:
         self.push_udpate(complete=True)
         self._tell("loaded")
 
+    #: In the basic data of a recipe whose import couldn't give every boil
+    #: addition a reminder: the ones left without, [{"name", "minutes"}, ...]
+    #: (UploadController keeps them, and the pre-brew check names them). Part
+    #: of the recipe, like its name: gone when the profile is cleared or another
+    #: recipe is loaded, kept through a reset, a restart and the recipe book.
+    NO_REMINDER_KEY = "boil_additions_without_reminder"
+
+    def additions_without_reminder(self):
+        """The loaded recipe's boil additions that have no reminder:
+        [{"name", "minutes"}, ...], longest first, each named as the import's
+        warning named it, its minutes before the end of the boil.
+
+        Empty for a recipe built by hand: the boil step's own Hop_1 to Hop_6
+        are all its additions. An entry without a number of minutes is left
+        out; a name the recipe didn't give is None.
+        """
+        basic = self.basic_data if isinstance(self.basic_data, dict) else {}
+        kept = basic.get(self.NO_REMINDER_KEY)
+        found = []
+        for entry in kept if isinstance(kept, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                minutes = float(entry.get("minutes"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(minutes):
+                continue
+            name = entry.get("name")
+            found.append(dict(name=None if name in (None, "") else str(name), minutes=minutes))
+        return found
+
     #: Where an import came from, in a recipe the book keeps for it - as
     #: RecipeController.IMPORTED_FROM. Not part of a recipe the brewer saves.
     IMPORTED_FROM_KEY = "imported_from"

@@ -33,6 +33,7 @@ from cbpi.controller.kettle_controller import KettleController
 from cbpi.controller.log_file_controller import LogController
 from cbpi.controller.notification_controller import NotificationController
 from cbpi.controller.plugin_controller import PluginController
+from cbpi.controller.precheck_controller import PrecheckController
 from cbpi.controller.recipe_controller import RecipeController
 from cbpi.controller.rest_timer_controller import RestTimerController
 from cbpi.controller.satellite_controller import SatelliteController
@@ -217,6 +218,8 @@ class CraftBeerPi:
         self.resttimer : RestTimerController = RestTimerController(self)
         # Its timers, up to four for every screen. The rest timer stays alongside.
         self.timers : TimersController = TimersController(self)
+        # The check before START begins a recipe: probes, clock, reminders (GET /step2/precheck).
+        self.precheck : PrecheckController = PrecheckController(self)
         self.satellite = None
         if str(self.static_config.get("mqtt", False)).lower() == "true":
             self.satellite: SatelliteController = SatelliteController(self)
