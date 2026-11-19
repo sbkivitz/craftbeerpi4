@@ -1595,13 +1595,20 @@ class StepController:
             )
             logging.error("Failed to start step %s" % step)
 
-    async def call_action(self, id, action, parameter) -> None:
+    async def call_action(self, id, action, parameter) -> bool:
+        """Run a declared action on a step. True if it ran; False if it didn't.
+
+        False when no step has that id, the step doesn't declare that action,
+        or the action raised. POST /step2/action/{id} answers 400 on False, as
+        the actor, sensor and kettle endpoints do with
+        BasicController.call_action.
+        """
         logging.info("Step Controller - call all Action {} {}".format(id, action))
         try:
             item = self.find_by_id(id)
             if item is None:
                 logging.error("Step Controller - no such step %s", id)
-                return
+                return False
             method = resolve_action(item.instance, action)
             if method is None:
                 logging.error(
@@ -1610,14 +1617,16 @@ class StepController:
                     action,
                     id,
                 )
-                return
+                return False
             await method(**normalize_action_parameters(parameter))
+            return True
         except Exception as e:
             logging.error(
                 "Step Controller -Failed to call action on {} {} {}".format(
                     id, action, e
                 )
             )
+            return False
 
     async def load_recipe(self, data):
         try:

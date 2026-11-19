@@ -214,6 +214,15 @@ class VirtualTimeSource(TimeSource):
     reacting to a simulated plant that is fine, because the plant is advanced by
     the same clock.
 
+    now() and monotonic() move together but MONOTONIC_OFFSET apart, as the two
+    are apart on a real clock, where now() counts from 1970 and monotonic() from
+    an arbitrary start. Were they one number, code that takes a time from one and
+    uses it as the other would pass every test here and go wrong on a rig: a
+    deadline on monotonic() handed to sleep_until(), which waits for a time on
+    now(), is already past there, so the wait returns at once and the loop
+    spins. monotonic() is ahead here, so such a wait lasts decades instead, and
+    the test fails.
+
     Drive it with `run()`:
 
         virtual = VirtualTimeSource()
@@ -224,6 +233,10 @@ class VirtualTimeSource(TimeSource):
 
     rate = 1.0
 
+    #: Seconds monotonic() runs ahead of now(): about as far as a real clock's
+    #: two are apart.
+    MONOTONIC_OFFSET = 1.7e9
+
     def __init__(self, start: float = 1_000_000.0):
         self._now = float(start)
         self._waiters = []
@@ -233,7 +246,7 @@ class VirtualTimeSource(TimeSource):
         return self._now
 
     def monotonic(self) -> float:
-        return self._now
+        return self._now + self.MONOTONIC_OFFSET
 
     async def sleep(self, seconds: float) -> None:
         try:
