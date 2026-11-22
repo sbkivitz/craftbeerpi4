@@ -133,7 +133,8 @@ class UploadController:
         async with self._import_lock:
             running = self.cbpi.step.running_step()
             if running is not None:
-                return self._not_imported(self.IMPORT_WHILE_RUNNING.format(running.name or "A step"))
+                return self._not_imported(self.IMPORT_WHILE_RUNNING.format(running.name or "A step"),
+                                          NotificationType.INFO)
             self.get_config_values()
             problem = self._import_problem()
             if problem is not None:
@@ -199,10 +200,12 @@ class UploadController:
         return ("Its earlier copy in your Recipe Book was replaced." if replaced
                 else "Kept in your Recipe Book.")
 
-    def _not_imported(self, why):
+    def _not_imported(self, why, kind=NotificationType.ERROR):
+        """(False, why, saying the brew steps are unchanged), after telling every screen: an error, unless `kind`
+        says otherwise - an info for a refusal that needs nothing from the brewer."""
         message = "{} The brew steps are unchanged.".format(why)
         logging.warning("Recipe not imported: %s", message)
-        self.cbpi.notify("Recipe not imported", message, NotificationType.ERROR)
+        self.cbpi.notify("Recipe not imported", message, kind)
         return False, message
 
     def _import_problem(self):

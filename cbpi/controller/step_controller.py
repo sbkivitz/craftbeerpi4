@@ -1203,14 +1203,15 @@ class StepController:
         return self.find_by_status(StepState.ACTIVE)
 
     def _refuse_while_running(self, title, sentence):
-        """Raise StepRunning, after telling the brewer why, when a step runs."""
+        """Raise StepRunning, after telling the brewer why, when a step runs. An info: the brew carries on as it was,
+        and nothing waits for an answer."""
         running = self.running_step()
         if running is None:
             return
         name = running.name or "A step"
         detail = sentence.format(name)
         logging.warning("%s: %s", title, detail)
-        self.cbpi.notify(title, detail, NotificationType.WARNING)
+        self.cbpi.notify(title, detail, NotificationType.INFO)
         raise StepRunning(name, detail)
 
     async def reset_all(self):

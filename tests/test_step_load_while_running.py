@@ -62,7 +62,7 @@ def test_loading_a_recipe_from_the_book_while_a_step_runs_answers_409_and_change
     assert body == {"error": "step_running", "step": "Protein Rest",
                     "detail": "Protein Rest is running. Stop it before loading another recipe."}
     unchanged(steps, tmp_path)
-    steps.cbpi.notify.assert_called_once_with("Recipe not loaded", body["detail"], NotificationType.WARNING)
+    steps.cbpi.notify.assert_called_once_with("Recipe not loaded", body["detail"], NotificationType.INFO)
 
 
 def test_loading_a_recipe_once_nothing_runs_still_loads_it(tmp_path):
@@ -84,7 +84,9 @@ def test_clearing_the_brew_steps_while_a_step_runs_answers_409_and_changes_nothi
     assert json.loads(res.text) == {"error": "step_running", "step": "Protein Rest",
                                     "detail": "Protein Rest is running. Stop it before clearing the brew steps."}
     unchanged(steps, tmp_path)
-    steps.cbpi.notify.assert_called_once()
+    steps.cbpi.notify.assert_called_once_with(
+        "Brew steps not cleared", "Protein Rest is running. Stop it before clearing the brew steps.",
+        NotificationType.INFO)
 
 
 def test_clearing_once_nothing_runs_still_clears(tmp_path):
@@ -117,4 +119,4 @@ def test_an_import_while_a_step_runs_is_refused_before_the_recipe_is_read(tmp_pa
     upload.get_config_values.assert_not_called()
     upload.xml_recipe_creation.assert_not_called()
     unchanged(steps, tmp_path)
-    steps.cbpi.notify.assert_called_once_with("Recipe not imported", message, NotificationType.ERROR)
+    steps.cbpi.notify.assert_called_once_with("Recipe not imported", message, NotificationType.INFO)
