@@ -148,6 +148,50 @@ class TimersHttpEndpoints:
         """
         return await self._do(self.controller.remove, request.match_info["id"])
 
+    @request_mapping(path="/{id}/undo", method="POST", auth_required=False)
+    async def http_undo(self, request):
+        """
+        ---
+        description: Put a timer removed in the last 10 seconds back, with its id and in its place, as it would be now - one counting down has counted on meanwhile, one run out rings again
+        tags:
+        - Timers
+        parameters:
+        - name: "id"
+          in: "path"
+          required: true
+          type: "integer"
+        responses:
+            "200":
+                description: the timers
+            "404":
+                description: no timer of that id was removed in the last 10 seconds
+            "409":
+                description: four timers already, or another of its name
+        """
+        return await self._do(self.controller.undo, request.match_info["id"])
+
+    @request_mapping(path="/{id}/reset", method="POST", auth_required=False)
+    async def http_reset(self, request):
+        """
+        ---
+        description: Back to its own time, stopped, ready to start again - a timer counting down or paused
+        tags:
+        - Timers
+        parameters:
+        - name: "id"
+          in: "path"
+          required: true
+          type: "integer"
+        responses:
+            "200":
+                description: the timers
+            "404":
+                description: no such timer
+            "409":
+                description: it has run out; answer it with /ok or /plus5
+        """
+        return await self._do(self.controller.reset, request.match_info["id"])
+
     @request_mapping(path="/{id}/start", method="POST", auth_required=False)
     async def http_start(self, request):
         """

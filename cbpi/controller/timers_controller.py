@@ -10,6 +10,9 @@ and its alarm waits for an answer). At zero it raises a prompt titled with its
 name, with +5 MIN and OK, which every screen keeps until somebody answers it on
 any one of them. OK puts the timer back to its own time, stopped, ready to start
 again, as a kitchen timer's recall does; +5 MIN runs it for five minutes more.
+BACK TO (reset) puts a timer counting down or paused back to its own time,
+stopped, in the same way. A removed timer can be put back (undo) for
+UNDO_FOR seconds, in its place, as it would be by then.
 
 The screen offers names for a timer from the BREWDAY_TIMER_NAMES setting, a list
 separated by commas.
@@ -137,6 +140,12 @@ class TimersController:
     OK_LABEL = "OK"
     #: A new timer's time when the command gives none: the editor's starting 10 minutes.
     DEFAULT_SET = 10 * 60
+    #: A removed timer can be put back (undo) as long as the screen offers UNDO: this many seconds. It is kept
+    #: UNDO_GRACE seconds longer, for an UNDO pressed just before then and still on its way. Real seconds, as the
+    #: hand pressing it lives by, and never fewer brewing seconds, so a simulator's faster clock still gives a hand
+    #: its time. Meanwhile the timer counts on, by the brewing clock.
+    UNDO_FOR = 10
+    UNDO_GRACE = 2
     NAME_LEN = 24
     NAMES_SETTING = "BREWDAY_TIMER_NAMES"
     NAMES_DEFAULT = "Hop stand, Yeast, Vorlauf"
@@ -161,6 +170,9 @@ class TimersController:
         self.logger = logging.getLogger(__name__)
         self.timers = []  # in the order they were added
         self._next_id = 1
+        # Removed timers that can still be put back: id -> (the timer, how it was when removed). Not kept on disk.
+        self._removed = {}
+        self._real = _REAL
         folder = getattr(cbpi, "config_folder", None)
         self.path = folder.get_file_path(self.FILE) if folder is not None else None
         self._keeper = None  # _keep, while a timer counts down or has run out
@@ -689,11 +701,77 @@ class TimersController:
         return self.get_state()
 
     async def remove(self, ident):
+        """Take a timer away, and its alarm's prompt from every screen. undo puts it back for UNDO_FOR seconds."""
         t = self._find(ident)
+        was = dict(state=t.state, deadline=t.deadline, at=t.at, rang=t.rang,
+                   interrupted=t.interrupted, off=t.off, real=self._real.monotonic() + self.UNDO_FOR + self.UNDO_GRACE,
+                   brewing=clock.monotonic() + self.UNDO_FOR + self.UNDO_GRACE)
         self._cancel(t)
         self._answer(t, "withdrawn")
         t.state = "removed"
         self.timers.remove(t)
+        self._forget_removed()
+        self._removed[t.id] = (t, was)
+        self._changed()
+        return self.get_state()
+
+    def _forget_removed(self):
+        """Removed timers past their time to be put back are gone for good."""
+        real, brewing = self._real.monotonic(), clock.monotonic()
+        for ident, (_, was) in list(self._removed.items()):
+            if real > was["real"] and brewing > was["brewing"]:
+                del self._removed[ident]
+
+    async def undo(self, ident):
+        """Put a timer removed in the last UNDO_FOR seconds back, with its id and in its place, as it would be now:
+        one counting down has counted on, and has run out if its time came meanwhile; one paused, stopped or run out
+        is as it was, a run-out one with its alarm raised again."""
+        self._forget_removed()
+        try:
+            key = int(ident)
+        except (TypeError, ValueError):
+            key = None
+        if key not in self._removed:
+            raise LookupError(f"There is no timer {ident} to put back: a removed timer can be put back for "
+                              f"{self.UNDO_FOR} seconds.")
+        t, was = self._removed[key]
+        if len(self.timers) >= self.MAX:
+            raise TimerRefused(f"Four timers at most. Remove one to put {t.name} back.")
+        twin = self._twin(t.name, t)
+        if twin is not None:
+            raise TimerRefused(f"Another timer is called {twin.name} now. Rename it to put {t.name} back.")
+        del self._removed[key]
+        # The timers are in the order they were added, which is their ids' order.
+        self.timers.insert(next((i for i, z in enumerate(self.timers) if z.id > t.id), len(self.timers)), t)
+        t.state, t.interrupted, t.off = was["state"], was["interrupted"], was["off"]
+        if t.state == "running" and was["deadline"] - clock.monotonic() > 0:
+            t.remaining = was["deadline"] - clock.monotonic()
+            self._start(t)
+        elif t.state in ("running", "done"):
+            if t.state == "running":  # its time came while it was removed
+                t.at = clock.now() - (clock.monotonic() - was["deadline"])
+                t.rang = was["deadline"]
+            else:
+                t.at, t.rang = was["at"], was["rang"]
+            t.state, t.remaining, t.deadline, t.task = "done", 0.0, None, None
+            self._ring(t)
+            self._start_keeper()
+        self._changed()
+        return self.get_state()
+
+    async def reset(self, ident):
+        """Back to its own time, stopped, ready to start again: a timer counting down or paused. One whose alarm
+        waits is answered with OK or +5 MIN instead."""
+        t = self._find(ident)
+        if t.state == "done":
+            raise TimerRefused(f"{t.name} has run out: answer it with OK or +5 MIN.")
+        if t.state == "stopped":
+            return self.get_state()
+        self._cancel(t)
+        t.state = "stopped"
+        t.remaining = t.run = t.set
+        t.deadline = None
+        t.interrupted, t.off = False, None
         self._changed()
         return self.get_state()
 
