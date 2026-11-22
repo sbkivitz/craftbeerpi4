@@ -1029,13 +1029,15 @@ class ConfigUpdate(CBPiExtension):
                 logging.warning("Unable to update database")
 
         # The HLT pump runs whenever a logic heats the HLT before the sparge, so
-        # the water does not stratify. See cbpi/extension/hltpump.
-        if HltPumpWithHeat is None:
-            logging.info("INIT HLT_PUMP_WITH_HEAT")
+        # the water does not stratify. See cbpi/extension/hltpump. Description
+        # and options refreshed with each version; the saved value is kept.
+        if HltPumpWithHeat is None or CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+            if HltPumpWithHeat is None:
+                logging.info("INIT HLT_PUMP_WITH_HEAT")
             try:
                 await self.cbpi.config.add(
                     "HLT_PUMP_WITH_HEAT",
-                    "Yes",
+                    HltPumpWithHeat if HltPumpWithHeat is not None else "Yes",
                     type=ConfigType.SELECT,
                     description="Start the HLT pump (the HLT kettle's agitator) "
                                 "whenever the HLT's AUTO or the mash tun's "
