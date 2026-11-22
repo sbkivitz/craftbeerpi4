@@ -82,10 +82,10 @@ def test_clearing_the_brew_steps_while_a_step_runs_answers_409_and_changes_nothi
     res = asyncio.run(ep.http_clear(None))
     assert res.status == 409
     assert json.loads(res.text) == {"error": "step_running", "step": "Protein Rest",
-                                    "detail": "Protein Rest is running. Stop it before clearing the brew steps."}
+                                    "detail": "Protein Rest is running. Stop it before unloading the recipe."}
     unchanged(steps, tmp_path)
     steps.cbpi.notify.assert_called_once_with(
-        "Brew steps not cleared", "Protein Rest is running. Stop it before clearing the brew steps.",
+        "Recipe not unloaded", "Protein Rest is running. Stop it before unloading the recipe.",
         NotificationType.INFO)
 
 

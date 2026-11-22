@@ -76,6 +76,22 @@ class StepRunning(Exception):
         self.detail = detail
 
 
+class OrderRefused(Exception):
+    """A new order of the brew steps, or a step's place, refused with nothing changed (StepController.reorder, add).
+
+    status: the HTTP status for it. error: bad_body, steps_changed or begun. more: the rest of the answer's body.
+    """
+
+    def __init__(self, status, error, **more):
+        super().__init__(error)
+        self.status = status
+        self.error = error
+        self.more = more
+
+    def body(self):
+        return dict(error=self.error, **self.more)
+
+
 class StepController:
 
     # Carrying on by itself after a restart (allow_resume). Real seconds: the
@@ -760,7 +776,18 @@ class StepController:
         self._load_mash_ph_reminder()
         self._schedule_mash_ph_reminder()
 
-    async def add(self, item: Step):
+    async def add(self, item: Step, index=None):
+        """Add a step, last, or at `index` (0 is first), and return it as saved.
+
+        Raises OrderRefused, adding nothing, for an index that isn't a whole number from 0 to the number of steps
+        (400 bad_body), or one at or above a step that has begun (409 begun): the steps still to come run in order,
+        after the ones that have begun.
+        """
+        if index is not None:
+            if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index <= len(self.profile):
+                raise OrderRefused(400, "bad_body", detail="index is a whole number from 0, first, to %d, last."
+                                   % len(self.profile))
+            self._refuse_above_begun(index)
         logging.debug("Add step")
         item.id = shortuuid.uuid()
         item.status = StepState.INITIAL
@@ -771,10 +798,55 @@ class StepController:
         except Exception as e:
             logging.warning("Failed to create step instance %s - %s " % (id, e))
             item.instance = None
-        self.profile.append(item)
+        if index is None:
+            self.profile.append(item)
+        else:
+            self.profile.insert(index, item)
         await self.save()
         await self._props_saved(item)
         return item
+
+    # Told to whoever asks for a new order, or a step's place, above a step that has begun.
+    BEGUN = "{} has begun, so it can't move, and no step can go above it."
+
+    def _last_begun(self):
+        """(index, step) of the last step that has begun - done, running, stopped or failed - or (-1, None)."""
+        for i in range(len(self.profile) - 1, -1, -1):
+            if self.profile[i].status != StepState.INITIAL:
+                return i, self.profile[i]
+        return -1, None
+
+    def _refuse_above_begun(self, index):
+        """Raise OrderRefused (409 begun) when `index` is at or above the last step that has begun."""
+        last, step = self._last_begun()
+        if index <= last:
+            name = step.name or "A step"
+            raise OrderRefused(409, "begun", detail=self.BEGUN.format(name), step=name)
+
+    async def reorder(self, ids):
+        """Put the brew steps in the order of `ids`: every loaded step's id, each once. Saved, and sent to every
+        page, once. True when the order changed; the same order changes nothing and saves nothing.
+
+        Raises OrderRefused, changing nothing: 400 bad_body for ids that aren't a list of strings; 409
+        steps_changed, with the loaded ids, for ids that aren't exactly the loaded steps' - one missing, extra or
+        repeated - as from a page that hasn't seen a step added or deleted; 409 begun when a step that has begun
+        would move, or a step would go above one. The steps still to come can be ordered while a step runs, as
+        their settings can be changed.
+        """
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise OrderRefused(400, "bad_body", detail='Send {"ids": [...]}: every step\'s id, in the new order.')
+        loaded = [step.id for step in self.profile]
+        if len(ids) != len(set(ids)) or sorted(ids) != sorted(loaded):
+            raise OrderRefused(409, "steps_changed", steps=loaded)
+        last, _ = self._last_begun()
+        if ids[:last + 1] != loaded[:last + 1]:
+            self._refuse_above_begun(last)
+        if ids == loaded:
+            return False
+        by_id = {step.id: step for step in self.profile}
+        self.profile = [by_id[i] for i in ids]
+        await self.save()
+        return True
 
     async def _props_saved(self, item):
         """Let the step act on settings the brewer has just saved.
@@ -1206,7 +1278,7 @@ class StepController:
     # Told to whoever asks for a reset while a step runs (http_reset's 409).
     RESET_WHILE_RUNNING = "A step is running. Stop it before resetting the recipe."
     LOAD_WHILE_RUNNING = "{} is running. Stop it before loading another recipe."
-    CLEAR_WHILE_RUNNING = "{} is running. Stop it before clearing the brew steps."
+    CLEAR_WHILE_RUNNING = "{} is running. Stop it before unloading the recipe."
 
     def running_step(self):
         """The step running now, or None. While one runs, a reset, a load and a clear are refused."""
@@ -1710,7 +1782,7 @@ class StepController:
 
     async def clear(self):
         """Empty the brew steps. Raises StepRunning, changing nothing, while a step runs."""
-        self._refuse_while_running("Brew steps not cleared", self.CLEAR_WHILE_RUNNING)
+        self._refuse_while_running("Recipe not unloaded", self.CLEAR_WHILE_RUNNING)
         try:
             await self.shutdown()
         except:

@@ -4,7 +4,7 @@ import logging
 from aiohttp import web
 from cbpi.api import *
 from cbpi.api.dataclasses import Props, Step
-from cbpi.controller.step_controller import StartRefused, StepController, StepRunning
+from cbpi.controller.step_controller import OrderRefused, StartRefused, StepController, StepRunning
 from cbpi.http_endpoints.http_strike import StrikeHttpEndpoints
 
 
@@ -45,7 +45,12 @@ class StepHttpEndpoints(StrikeHttpEndpoints):
         """
 
         ---
-        description: Add new step to the end of the active brewing recipe
+        description: |
+          Add a new step to the active brewing recipe: last, or at index (0 is first; the number of steps is last).
+          index missing or null: last. An index that isn't a whole number from 0 to the number of steps answers 400
+          with error bad_body. One at or above a step that has begun - done, running, stopped or failed - answers 409
+          with error begun: {"error": "begun", "detail": "<name> has begun, so it can't move, and no step can go
+          above it.", "step": "<name>"}, naming the last step that has begun. Either way nothing is added.
         tags:
         - Step
         parameters:
@@ -62,9 +67,12 @@ class StepHttpEndpoints(StrikeHttpEndpoints):
                 type: string
               props:
                 type: object
+              index:
+                type: integer
             example:
                 name: "Mashstep"
                 type: "MashStep"
+                index: 0
                 props:
                     Timer: "30"
                     Temp: "73"
@@ -73,7 +81,11 @@ class StepHttpEndpoints(StrikeHttpEndpoints):
                     Kettle: "PkVY88NrEX4VYg4H2tY4Ae"
         responses:
             "200":
-                description: successful operation
+                description: the step as saved
+            "400":
+                description: index isn't a whole number from 0 to the number of steps - error bad_body
+            "409":
+                description: index is at or above a step that has begun - error begun
         """
 
         data = await request.json()
@@ -82,8 +94,64 @@ class StepHttpEndpoints(StrikeHttpEndpoints):
             props=Props(data.get("props", {})),
             type=data.get("type"),
         )
-        response_data = await self.controller.add(step)
+        try:
+            response_data = await self.controller.add(step, index=data.get("index"))
+        except OrderRefused as refused:
+            return web.json_response(status=refused.status, data=refused.body())
         return web.json_response(data=response_data.to_dict())
+
+    @request_mapping(path="/order", method="PUT", auth_required=False)
+    async def http_order(self, request):
+        """
+        ---
+        description: |
+          Put the brew steps in a new order, in one change: every loaded step's id, in the new order. Saved once and
+          sent to every page once, on step_update. The same order answers 200 and changes nothing.
+          Refused, with nothing changed:
+          - 400 {"error": "bad_body", "detail"}: not a JSON object, or ids not a list of strings;
+          - 409 {"error": "steps_changed", "steps": [the loaded ids, in order]}: the ids aren't exactly the loaded
+            steps' - one missing, extra or repeated;
+          - 409 {"error": "begun", "detail": "<name> has begun, so it can't move, and no step can go above it.",
+            "step": "<name>"}: a step that has begun - done, running, stopped or failed - would move, or a step would
+            go above one. The steps up to the last one that has begun keep their places; the steps after it can be
+            put in any order, while a step runs too.
+        tags:
+        - Step
+        parameters:
+        - in: body
+          name: body
+          description: every loaded step's id, in the new order
+          required: true
+          schema:
+            type: object
+            properties:
+              ids:
+                type: array
+                items:
+                  type: string
+            example:
+                ids: ["PkVY88NrEX4VYg4H2tY4Ae", "RAuQR8UgWLueQtfXrWxShb", "2Sn46Fc6jRGvES9MuQXHdG"]
+        responses:
+            "200":
+                description: '{"changed": true or false, "steps": [the ids, in the order now]}'
+            "400":
+                description: not a JSON object, or ids not a list of strings - error bad_body
+            "409":
+                description: ids not exactly the loaded steps' (steps_changed), or a step that has begun moved or
+                  passed (begun)
+        """
+        try:
+            data = await request.json()
+        except ValueError:  # not JSON, or not UTF-8
+            data = None
+        if not isinstance(data, dict):
+            return web.json_response(status=400, data=dict(
+                error="bad_body", detail='Send {"ids": [...]}: every step\'s id, in the new order.'))
+        try:
+            changed = await self.controller.reorder(data.get("ids"))
+        except OrderRefused as refused:
+            return web.json_response(status=refused.status, data=refused.body())
+        return web.json_response(data=dict(changed=changed, steps=[step.id for step in self.controller.profile]))
 
     @request_mapping(path="/{id}", method="PUT", auth_required=False)
     async def http_update(self, request):
