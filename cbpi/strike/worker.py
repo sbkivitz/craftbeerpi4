@@ -95,6 +95,12 @@ def job_from(job):
     return brew, rig, model.Grid(job.get("unit", "F")), job.get("rule", "no worse")
 
 
+def step_of(rig):
+    """The replay's step for the Mash Tun's SampleTime. StrikeController offers nothing for a SampleTime no step
+    divides, so the 2 s step left for one only ends in the model's own error."""
+    return model.step_for(rig.herms.sample_time) or model.STEP_S
+
+
 def _number(x):
     return None if x is None or not math.isfinite(x) else x
 
@@ -143,7 +149,7 @@ class Worker:
     def answer_forecast(self, message):
         try:
             brew, rig, _, _ = job_from(message["job"])
-            fc = model.forecast(brew, message["strike_f"], rig, message["cases"])
+            fc = model.forecast(brew, message["strike_f"], rig, message["cases"], dt=step_of(rig))
             self.send({"id": message.get("id"), "forecast": forecast_out(fc, message.get("for") or [])})
         except Exception as e:  # noqa: BLE001 - answered as an error; the worker carries on
             self.send({"id": message.get("id"), "error": _said(e)})
@@ -153,8 +159,9 @@ class Worker:
         job = message["job"]
         try:
             brew, rig, grid, rule = job_from(job)
+            dt = step_of(rig)
             box = model.ranges(brew, rig.plant)
-            planned = model.plan(brew, rig, box=box, rule=rule, grid=grid, tick=self.tick)
+            planned = model.plan(brew, rig, box=box, rule=rule, dt=dt, grid=grid, tick=self.tick)
         except Superseded:
             raise
         except Exception as e:  # noqa: BLE001
@@ -172,12 +179,13 @@ class Worker:
         cases = model.quick_cases(box, found, planned.cautious)
         forecasts = []
         sims = planned.sims
-        # More than MashInStep's own limit above the rest is too far to trust: the screen shows no forecast for it.
-        too_far = use_f is not None and use_f - brew.rest_f > model.MAX_STRIKE_RISE_F + 1e-6
+        # Beyond MashInStep's own limits - more than its rise above the rest, or over its ceiling - is too far to
+        # offer: the screen shows no forecast for it.
+        too_far = model.beyond_limits(brew.rest_f, use_f, planned.far)
         if not too_far:
             try:
                 for s in strikes:
-                    fc = model.forecast(brew, s["strike_f"], rig, cases, tick=self.tick)
+                    fc = model.forecast(brew, s["strike_f"], rig, cases, dt=dt, tick=self.tick)
                     sims += fc.sims
                     forecasts.append(forecast_out(fc, s["for"]))
             except Superseded:
@@ -194,7 +202,7 @@ class Worker:
         try:
             searched = []
             for s in strikes:
-                fc = model.searched_forecast(brew, s["strike_f"], rig, box, found, cases, tick=self.tick)
+                fc = model.searched_forecast(brew, s["strike_f"], rig, box, found, cases, dt=dt, tick=self.tick)
                 searched.append(forecast_out(fc, s["for"]))
             self.send({"id": ident, "part": "searched", "forecasts": searched})
         except Superseded:
@@ -203,7 +211,7 @@ class Worker:
             self.send({"id": ident, "part": "searched", "error": _said(e)})
         if job.get("levers", True):
             try:
-                rise, mid_f = model.levers(brew, rig, box, use_f, rule=rule, grid=grid, tick=self.tick)
+                rise, mid_f = model.levers(brew, rig, box, use_f, rule=rule, dt=dt, grid=grid, tick=self.tick)
                 self.send({"id": ident, "part": "levers", "rise": rise, "mid_f": mid_f})
             except Superseded:
                 raise

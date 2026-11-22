@@ -270,6 +270,10 @@ class MashInStep(CBPiStep):
         self.props["Temp"] = temp
         self.rest_temp = temp
         self.strike_temp = temp
+        # The stall watch starts afresh from here. It doesn't look while the step waits for the water to be moved,
+        # so what it saw last is as old as that wait, and its first look at a new, higher target would call the
+        # whole wait a stall.
+        self.reset_heat_watch()
         kettle = getattr(self, "kettle", None)
         if kettle is not None:
             try:

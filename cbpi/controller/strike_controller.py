@@ -100,11 +100,15 @@ class WorkerClient:
         self.proc = None
         self._out = None
         self._loop = None
+        self._stopped = False
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
     def send(self, message):
+        # Once stop() has begun, nothing starts the worker again: the server is shutting down.
+        if self._stopped:
+            return
         if self._loop is None:
             self._loop = asyncio.get_running_loop()
         if not self.running():
@@ -122,7 +126,7 @@ class WorkerClient:
                                 creationflags=flags)
         out = queue.Queue()
         threading.Thread(target=self._write, args=(proc, out), name="strike-worker-in", daemon=True).start()
-        threading.Thread(target=self._read, args=(proc,), name="strike-worker-out", daemon=True).start()
+        threading.Thread(target=self._read, args=(proc, out), name="strike-worker-out", daemon=True).start()
         self.proc, self._out = proc, out
 
     @staticmethod
@@ -141,7 +145,7 @@ class WorkerClient:
         except (OSError, ValueError):
             pass
 
-    def _read(self, proc):
+    def _read(self, proc, out):
         for line in proc.stdout:
             try:
                 message = json.loads(line.decode("utf-8"))
@@ -149,6 +153,13 @@ class WorkerClient:
                 continue
             if isinstance(message, dict):
                 self._hand(message)
+        # The worker has ended, by itself or by stop(): its writer ends too, closing its end of the pipe, rather than
+        # wait for a message that would never reach it. A worker started again has a writer and a pipe of its own.
+        out.put(None)
+        try:
+            proc.stdout.close()
+        except (OSError, ValueError):
+            pass
         self._hand({"exit": proc.wait(), "pid": proc.pid})
 
     def _hand(self, message):
@@ -161,6 +172,7 @@ class WorkerClient:
             pass
 
     def stop(self):
+        self._stopped = True
         proc, out = self.proc, self._out
         self.proc = self._out = None
         if out is not None:
@@ -296,9 +308,10 @@ class StrikeController:
         if self._task is not None:
             self._task.cancel()
             self._task = None
-        for future in [f for (kind, f) in self._asked.values() if kind == "ask"]:
-            if not future.done():
-                future.cancel()
+        # A forecast asked for by the endpoint is ("ask", future); one asked for the state is ("state", plan, key).
+        for entry in list(self._asked.values()):
+            if entry[0] == "ask" and not entry[1].done():
+                entry[1].cancel()
         self._asked.clear()
         self.client.stop()
 
@@ -450,6 +463,11 @@ class StrikeController:
         return "gal" if unit == "F" else "L"
 
     @staticmethod
+    def ceiling(unit):
+        """MashInStep's ceiling for any strike water (MAX_STRIKE_ABS_C), in the brewery's unit: 179.6 F, 82.0 C."""
+        return round(model.MAX_STRIKE_F, 1) if unit == "F" else model.MAX_STRIKE_C
+
+    @staticmethod
     def _to_unit(value, from_unit, to_unit, kind):
         """A temperature ("temp") or a volume ("vol") in another unit."""
         if value is None or from_unit == to_unit:
@@ -509,6 +527,9 @@ class StrikeController:
             found = self._herms(L.mt, unit)
             if found is None:
                 L.off = "not_herms"
+            elif model.step_for(found[0]["sample_time"]) is None:
+                # A SampleTime that isn't a whole number of seconds: no step of the replay divides it.
+                L.off = "sample_time"
             else:
                 L.herms, L.pid = found
                 at = next((i for i, s in enumerate(profile) if _prop(s, "Kettle") == L.mt.id), None)
@@ -855,7 +876,7 @@ class StrikeController:
         use_f = message.get("use_f")
         use = None if use_f is None else round(use_f if unit == "F" else model.c_of(use_f), 1)
         rest_f = job["job"]["brew"]["rest_f"]
-        too_far = use_f is not None and use_f - rest_f > model.MAX_STRIKE_RISE_F + 1e-6
+        too_far = bool(message.get("far")) or model.beyond_limits(rest_f, use_f)
         forecasts = {}
         for fc in message.get("forecasts") or []:
             forecasts[self._key(unit, fc["strike_f"])] = self._forecast_shown(unit, fc)
@@ -1042,6 +1063,10 @@ class StrikeController:
             raise StrikeRefused(400, "bad_body", detail="do must be use or back, temp a number, steps the recipe's "
                                                         "step ids, and for USE plan its plan id.")
         look = self.update()
+        ceiling = self.ceiling(look.unit)
+        if round(temp, 1) > ceiling + 1e-9:
+            # MashInStep's own ceiling, whatever a plan says: no strike water is heated past it from here.
+            raise StrikeRefused(400, "too_hot", max=ceiling)
         self._same_recipe(look, steps)
         if look.off is not None:
             raise StrikeRefused(409, "off", why=look.off, strike=self.get_state(look))
@@ -1064,6 +1089,25 @@ class StrikeController:
         applied = await self._apply_strike(look, do, round(temp, 1))
         return dict(applied=applied, strike=self.get_state(self.update()))
 
+    def _forget_wait(self, si):
+        """A strike water step stopped, or failed, after it asked for the water to be moved keeps that wait with it,
+        and Start asks again at once, at whatever the HLT holds. For a new temperature the wait is forgotten, so Start
+        heats to it first and asks once the HLT reads it, as change_target does on a running step. A question still
+        kept for the step is taken down. True when there was a wait to forget."""
+        instance = getattr(si, "instance", None)
+        key = getattr(instance, "WAITING_FOR_MALT_PROP", "_waiting_for_malt")
+        props = [p for p in (si.props, getattr(instance, "props", None)) if p is not None]
+        if not any(p.get(key) for p in props):
+            return False
+        for p in props:
+            p[key] = False
+        if instance is not None:
+            instance._waiting_for_malt = False
+        withdraw = getattr(getattr(self.cbpi, "step", None), "withdraw_step_prompt", None)
+        if callable(withdraw):
+            withdraw(si.id, "malt")
+        return True
+
     async def _apply_strike(self, look, do, to):
         unit, si, bs = look.unit, look.si, look.bs
         before = look.inputs["planned"]
@@ -1077,6 +1121,8 @@ class StrikeController:
                 if await change(to):
                     changed.append("question")
                 changed.append("hlt")
+            elif self._forget_wait(si):
+                changed.append("question")
             if bs is not None and bs.status != StepState.DONE and str(_prop(bs, "Timing") or "") == "Ready by":
                 bs.props["Ready_Temp"] = to
                 changed.append("brewstart")

@@ -55,14 +55,16 @@ LB = 0.45359237          # kg in a pound
 
 # MashInStep's own limits: the most a strike may be above the rest (MAX_STRIKE_RISE_C) and at all (MAX_STRIKE_ABS_C).
 MAX_STRIKE_RISE_F = 15.0 * 1.8
-MAX_STRIKE_F = 82.0 * 1.8 + 32.0
+MAX_STRIKE_C = 82.0
+MAX_STRIKE_F = MAX_STRIKE_C * 1.8 + 32.0
 # When every case still stays within the line at the top of that, the planner looks up to here, only to say how far
 # above the rest the figure works out at.
 FAR_RISE_F = 60.0
 BOIL_F = 212.0
 
 # The planner's step. At 2 s PID_HERMS decides every 2 s, as the rig's SampleTime has it, and the plant moves once per
-# decision; 1 s gives the same USE in the bench's cases, and 5 s changes PID_HERMS's own small overshoot.
+# decision; 1 s gives the same USE in the bench's cases, and 5 s changes PID_HERMS's own small overshoot. Another
+# SampleTime takes the step step_for gives it.
 STEP_S = 2
 
 # The cautious search climbs from a few starting corners and has missed the worst case by at most 0.02 F by the rule
@@ -76,6 +78,35 @@ WOBBLE_F = 0.04
 
 # A room or a grain temperature the forecast can use, F: the bounds COMPARE PROBES holds a room's reading to.
 READING_RANGE_F = (35.0, 120.0)
+
+
+def step_for(sample_time):
+    """The replay's step, s, for PID_HERMS's SampleTime: one that divides it, as simulate needs. 2 s for an even
+    SampleTime (the rig runs 2), 5 s for one 5 divides (5 is PID_HERMS's own default, which a blank SampleTime takes),
+    and 1 s for any other whole number of seconds. None for a SampleTime that isn't one: no step divides it."""
+    try:
+        seconds = float(sample_time)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 1 or seconds != int(seconds):
+        return None
+    seconds = int(seconds)
+    if seconds % 2 == 0:
+        return 2
+    if seconds % 5 == 0:
+        return 5
+    return 1
+
+
+def beyond_limits(rest_f, use_f, far=False):
+    """Whether USE is too far to offer: more than MAX_STRIKE_RISE_F above the rest, over MAX_STRIKE_F, or `far`, the
+    planner's word that every case stayed within its line at the top of those limits, so USE is at them or above."""
+    if far:
+        return True
+    if use_f is None:
+        return False
+    return use_f - rest_f > MAX_STRIKE_RISE_F + 1e-6 or use_f > MAX_STRIKE_F + 1e-6
+
 
 # A Spike 20 gal kettle, inside, about 17.5 in across.
 KETTLE_INSIDE_IN = 17.5
@@ -951,7 +982,8 @@ def energy_in_closed_form(brew, strike_f, params, rig):
 
 __all__ = [
     "Brew", "Flow", "Forecast", "Grid", "Herms", "Hlt", "Plan", "Plant", "Ranged", "Rig", "Run", "BOX_ORDER",
-    "SCREEN_ORDER", "STEP_S", "WOBBLE_F", "SEARCH_MARGIN_F", "MAX_STRIKE_RISE_F", "READING_RANGE_F", "c_of", "f_of",
+    "SCREEN_ORDER", "STEP_S", "WOBBLE_F", "SEARCH_MARGIN_F", "MAX_STRIKE_RISE_F", "MAX_STRIKE_C", "MAX_STRIKE_F",
+    "READING_RANGE_F", "c_of", "f_of", "step_for", "beyond_limits",
     "default_guesses", "ranges", "central", "hot_corner", "long_hold_corner", "cold_corner", "known", "simulate",
     "plan", "quick_cases", "forecast", "searched_forecast", "levers", "usable_f", "energy_in_closed_form",
 ]
