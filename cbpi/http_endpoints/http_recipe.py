@@ -2,6 +2,7 @@ from aiohttp import web
 from cbpi.api import *
 from cbpi.api.dataclasses import Props, Step
 from cbpi.controller.recipe_controller import RecipeController
+from cbpi.controller.step_controller import StepRunning
 import logging
 
 class RecipeHttpEndpoints:
@@ -141,9 +142,15 @@ class RecipeHttpEndpoints:
         responses:
             "200":
                 description: successful operation
+            "409":
+                description: a step is running, and nothing changed - error step_running, detail, step
         """
         name = request.match_info["name"]
-        await self.controller.brew(name)
+        try:
+            await self.controller.brew(name)
+        except StepRunning as refused:
+            return web.json_response(status=409, data=dict(error="step_running", detail=refused.detail,
+                                                           step=refused.step))
         return web.Response(status=200)
 
     @request_mapping(path="/{id}/clone", method="POST", auth_required=False)

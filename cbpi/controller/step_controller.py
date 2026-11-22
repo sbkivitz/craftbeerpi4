@@ -62,6 +62,20 @@ class StartRefused(Exception):
         self.steps = steps
 
 
+class StepRunning(Exception):
+    """A load or a clear refused while a step runs, with nothing changed (StepController.load_recipe, clear).
+
+    step: the running step's name. detail: the sentence for the brewer, which says what to do. Either would stop the
+    running step first, which ends a mash rest and switches its kettle's logic off, then replace or empty the brew
+    steps.
+    """
+
+    def __init__(self, step, detail):
+        super().__init__(detail)
+        self.step = step
+        self.detail = detail
+
+
 class StepController:
 
     # Carrying on by itself after a restart (allow_resume). Real seconds: the
@@ -1181,6 +1195,23 @@ class StepController:
 
     # Told to whoever asks for a reset while a step runs (http_reset's 409).
     RESET_WHILE_RUNNING = "A step is running. Stop it before resetting the recipe."
+    LOAD_WHILE_RUNNING = "{} is running. Stop it before loading another recipe."
+    CLEAR_WHILE_RUNNING = "{} is running. Stop it before clearing the brew steps."
+
+    def running_step(self):
+        """The step running now, or None. While one runs, a reset, a load and a clear are refused."""
+        return self.find_by_status(StepState.ACTIVE)
+
+    def _refuse_while_running(self, title, sentence):
+        """Raise StepRunning, after telling the brewer why, when a step runs."""
+        running = self.running_step()
+        if running is None:
+            return
+        name = running.name or "A step"
+        detail = sentence.format(name)
+        logging.warning("%s: %s", title, detail)
+        self.cbpi.notify(title, detail, NotificationType.WARNING)
+        raise StepRunning(name, detail)
 
     async def reset_all(self):
         """Every step back to not started. Returns False, changing nothing, while a step runs."""
@@ -1629,6 +1660,8 @@ class StepController:
             return False
 
     async def load_recipe(self, data):
+        """Make `data` the brew steps, every step waiting. Raises StepRunning, changing nothing, while a step runs."""
+        self._refuse_while_running("Recipe not loaded", self.LOAD_WHILE_RUNNING)
         try:
             await self.shutdown()
         except:
@@ -1660,6 +1693,8 @@ class StepController:
         self._tell("loaded")
 
     async def clear(self):
+        """Empty the brew steps. Raises StepRunning, changing nothing, while a step runs."""
+        self._refuse_while_running("Brew steps not cleared", self.CLEAR_WHILE_RUNNING)
         try:
             await self.shutdown()
         except:

@@ -88,6 +88,11 @@ class UploadController:
     #: How many addition reminders the boil step holds: Hop_1 to Hop_6.
     BOIL_REMINDERS = 6
 
+    #: Why an import is refused while a step runs, with the step's name: an
+    #: import replaces the brew steps.
+    IMPORT_WHILE_RUNNING = ("{} is running. Stop it before importing a recipe: "
+                            "an import replaces the brew steps.")
+
     #: The importers, by the kind the upload endpoints name, and the word the
     #: brewer is told.
     IMPORTERS = {
@@ -118,12 +123,17 @@ class UploadController:
         the recipe's name (StepController.NO_REMINDER_KEY).
 
         Refused before anything is read or changed when the settings would put
-        the boil on the wrong vessel - see _import_problem.
+        the boil on the wrong vessel - see _import_problem - and while a step
+        runs: loading the new steps would stop it, ending a mash rest and
+        switching its kettle's logic off.
         """
         method_name, label = self.IMPORTERS[kind]
         if recipe_id is None or recipe_id == "" or recipe_id == []:
             return self._not_imported("Choose a recipe to import first.")
         async with self._import_lock:
+            running = self.cbpi.step.running_step()
+            if running is not None:
+                return self._not_imported(self.IMPORT_WHILE_RUNNING.format(running.name or "A step"))
             self.get_config_values()
             problem = self._import_problem()
             if problem is not None:

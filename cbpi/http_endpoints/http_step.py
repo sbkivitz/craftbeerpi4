@@ -4,7 +4,7 @@ import logging
 from aiohttp import web
 from cbpi.api import *
 from cbpi.api.dataclasses import Props, Step
-from cbpi.controller.step_controller import StartRefused, StepController
+from cbpi.controller.step_controller import StartRefused, StepController, StepRunning
 
 
 class StepHttpEndpoints:
@@ -448,9 +448,15 @@ class StepHttpEndpoints:
         responses:
             "200":
                 description: successful operation
+            "409":
+                description: a step is running, and nothing changed - error step_running, detail, step
         """
 
-        await self.controller.clear()
+        try:
+            await self.controller.clear()
+        except StepRunning as refused:
+            return web.json_response(status=409, data=dict(error="step_running", detail=refused.detail,
+                                                           step=refused.step))
         return web.Response(status=200)
 
     @request_mapping(path="/savetobook", method="POST", auth_required=False)
