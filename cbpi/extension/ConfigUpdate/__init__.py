@@ -1028,8 +1028,8 @@ class ConfigUpdate(CBPiExtension):
             except Exception:
                 logging.warning("Unable to update database")
 
-        # The HLT pump runs whenever the HLT heats before the sparge, so the
-        # water does not stratify. See cbpi/extension/hltpump.
+        # The HLT pump runs whenever a logic heats the HLT before the sparge, so
+        # the water does not stratify. See cbpi/extension/hltpump.
         if HltPumpWithHeat is None:
             logging.info("INIT HLT_PUMP_WITH_HEAT")
             try:
@@ -1038,15 +1038,18 @@ class ConfigUpdate(CBPiExtension):
                     "Yes",
                     type=ConfigType.SELECT,
                     description="Start the HLT pump (the HLT kettle's agitator) "
-                                "whenever the HLT starts heating, until the "
+                                "whenever the HLT's AUTO or the mash tun's "
+                                "HERMS starts heating the HLT, until the "
                                 "recipe reaches its sparge, so the water does "
-                                "not settle into hot and cool layers. Also when "
-                                "BrewStart heats the water before you are up: "
-                                "starting a BrewStart step asks you to check "
-                                "the pump and its valves. It is left running "
-                                "when the heating stops. You can still stop "
-                                "it; it starts again the next time the HLT "
-                                "starts heating.",
+                                "not settle into hot and cool layers. Never for "
+                                "the HLT element switched on by hand: the pump "
+                                "may not be primed, or its hoses in place. Also "
+                                "when BrewStart heats the water before you are "
+                                "up: starting a BrewStart step asks you to "
+                                "check the pump and its valves. It is left "
+                                "running when the heating stops. You can still "
+                                "stop it; it starts again the next time AUTO "
+                                "or the HERMS starts heating the HLT.",
                     source="steps",
                     options=[
                         {"label": "Yes", "value": "Yes"},

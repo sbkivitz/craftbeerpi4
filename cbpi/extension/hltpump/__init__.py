@@ -1,4 +1,4 @@
-"""Run the HLT pump whenever the HLT heats, until the sparge.
+"""Run the HLT pump whenever a logic heats the HLT, until the sparge.
 
 Water heated from below settles into layers, hot on top, so the HLT's probe
 and the HERMS coil each sit in different water. The HLT pump keeps the HLT
@@ -11,9 +11,12 @@ PID_HERMS only its own pump - the wort pump - and an element switched on by
 hand is just the element: none of them runs the HLT pump.
 
 So, on the server, with no page open too:
-- Before the sparge, when the HLT starts heating - its own AUTO, the mash
-  tun's HERMS, or its element switched on - the HLT pump is switched on, and
-  a notification says why and asks for its valves to be checked.
+- Before the sparge, when a logic starts heating the HLT - its own AUTO or
+  the mash tun's HERMS - the HLT pump is switched on, and a notification says
+  why and asks for its valves to be checked.
+- Never for its element switched on by hand. The brewer heating by hand may
+  not have primed the pump or put its hoses in place, so the pump stays his
+  to start.
 - Including when nobody is there: BrewStart heating the water before the
   brewer is up. A BrewStart step starting asks for the pump and its valves to
   be checked, and waits for an answer. Started with its valves set to move
@@ -22,10 +25,10 @@ So, on the server, with no page open too:
 - It is left on when the heating stops, so it runs the whole time before the
   sparge rather than stopping and starting between rests.
 - The brewer can still stop it, and ALL OFF does. It starts again the next
-  time the HLT starts heating, which includes something else taking the
-  heating over - the recipe's water heating handing over to the mash tun's
-  HERMS. A stop is never fought: the element pulsing under a running logic is
-  not a start.
+  time a logic starts heating the HLT, which includes one logic taking the
+  heating over from another - the recipe's water heating handing over to the
+  mash tun's HERMS - or from the hand. A stop is never fought: the element
+  pulsing under a running logic is not a start.
 - From the sparge on - once the recipe reaches the first step named for the
   runoff, as the first-wort reminder finds it - it is the brewer's, to set the
   valves for the sparge water and start. A recipe that is over, every step
@@ -266,14 +269,17 @@ class HLTPumpWithHeat(CBPiExtension):
                 logger.warning("HLT pump: could not check the HLT: %s", e)
 
     async def look(self):
-        """Switch the HLT pump on if the HLT has just started heating, before the
-        sparge."""
+        """Switch the HLT pump on if a logic has just started heating the HLT,
+        before the sparge."""
         if not self.enabled():
             self._source = None
             return
         hlt, pump_id = hlt_pump(self.cbpi)
         now = heat_source(self.cbpi, hlt) if hlt is not None else None
-        started, self._source = now is not None and now != self._source, now
+        # Only a logic starting to heat starts the pump. The element switched on by hand never does: the brewer heating
+        # by hand may not have primed the pump or put its hoses in place. The hand is still noted as the source, so a
+        # logic taking the heating over from it counts as a start.
+        started, self._source = now not in (None, "hand") and now != self._source, now
         if not started or not pump_id or reached_sparge(self.cbpi):
             return
         pump = self.cbpi.actor.find_by_id(pump_id)
