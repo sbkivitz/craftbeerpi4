@@ -39,6 +39,7 @@ from cbpi.controller.rest_timer_controller import RestTimerController
 from cbpi.controller.satellite_controller import SatelliteController
 from cbpi.controller.sensor_controller import SensorController
 from cbpi.controller.step_controller import StepController
+from cbpi.controller.strike_controller import StrikeController
 from cbpi.controller.system_controller import SystemController
 from cbpi.controller.timers_controller import TimersController
 from cbpi.controller.upload_controller import UploadController
@@ -220,6 +221,8 @@ class CraftBeerPi:
         self.timers : TimersController = TimersController(self)
         # The check before START begins a recipe: probes, clock, reminders (GET /step2/precheck).
         self.precheck : PrecheckController = PrecheckController(self)
+        # The strike water helper: USE for the loaded recipe, worked out in a process of its own (GET /step2/strike).
+        self.strike : StrikeController = StrikeController(self)
         self.satellite = None
         if str(self.static_config.get("mqtt", False)).lower() == "true":
             self.satellite: SatelliteController = SatelliteController(self)
@@ -419,6 +422,8 @@ class CraftBeerPi:
         await self.kettle.init()
         # The brew-day timers saved before the last stop: back, but none counting down (TimersController).
         await self.timers.init()
+        # The strike water helper's brew day and last answer, then its look at the numbers once a second.
+        await self.strike.init()
         await self.call_initializer(self.app)
         await self.dashboard.init()
 

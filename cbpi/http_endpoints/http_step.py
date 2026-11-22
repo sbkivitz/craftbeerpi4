@@ -5,9 +5,11 @@ from aiohttp import web
 from cbpi.api import *
 from cbpi.api.dataclasses import Props, Step
 from cbpi.controller.step_controller import StartRefused, StepController, StepRunning
+from cbpi.http_endpoints.http_strike import StrikeHttpEndpoints
 
 
-class StepHttpEndpoints:
+class StepHttpEndpoints(StrikeHttpEndpoints):
+    """The /step2 endpoints: the mash profile's, and the strike water helper's (StrikeHttpEndpoints)."""
 
     def __init__(self, cbpi):
         self.cbpi = cbpi

@@ -74,6 +74,10 @@ class UploadController:
     MASH_OUT_TEMP = {"C": 76, "F": 168}
     MASH_OUT_MINUTES = 10
 
+    #: In the basic data of a BeerXML recipe imported: what a strike water forecast needs from it (getMashNumbers).
+    #: Part of the recipe, like its name: kept through a reset, a restart and the Recipe Book.
+    MASH_NUMBERS_KEY = "mash_numbers"
+
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.logger = logging.getLogger(__name__)
@@ -161,6 +165,8 @@ class UploadController:
             basic = {"name": staged["name"], "author": self.cbpi.config.get("AUTHOR", "John Doe")}
             if staged.get("without_reminder"):
                 basic[StepController.NO_REMINDER_KEY] = staged["without_reminder"]
+            if staged.get("mash_numbers"):
+                basic[self.MASH_NUMBERS_KEY] = staged["mash_numbers"]
             try:
                 await self.cbpi.step.load_recipe({"basic": basic, "steps": staged["steps"]})
             except Exception as e:  # noqa: BLE001
@@ -1167,6 +1173,8 @@ class UploadController:
                 FirstWort = self.getFirstWort(hops, "xml")
 
                 await self.create_recipe(name)
+                if self._staging and self._staged is not None:
+                    self._staged["mash_numbers"] = self.getMashNumbers(recipe)
                 # Mash Steps -> first step is different as it heats up to defined temp and stops with notification to add malt
                 # AutoMode is yes to start and stop automatic mode or each step
                 MashIn_Flag = True
@@ -2008,6 +2016,117 @@ class UploadController:
             logging.warning("Could not read fermentables for grain mass: %s", e)
             return 0.0
         return round(total, 3)
+
+    #: Litres in each unit BeerSmith's display amounts use.
+    _LITRES = {"qt": 0.946352946, "gal": 3.785411784, "l": 1.0, "ml": 0.001, "pt": 0.473176473,
+               "floz": 0.0295735296, "oz": 0.0295735296}
+    #: Kilograms in each unit its display weights use.
+    _KILOGRAMS = {"lb": 0.45359237, "lbs": 0.45359237, "oz": 0.028349523125, "kg": 1.0, "g": 0.001}
+
+    @staticmethod
+    def _xml_number(element, path):
+        if element is None:
+            return None
+        text = element.findtext(path)
+        try:
+            number = float(str(text).strip())
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    @classmethod
+    def _display_quantity(cls, text, units):
+        """BeerSmith's display amount, such as "33.04 qt" or "33 lbs", in the unit `units` counts in; None if it
+        can't be read."""
+        parts = str(text or "").strip().split()
+        if len(parts) != 2:
+            return None
+        try:
+            number = float(parts[0])
+        except ValueError:
+            return None
+        per = units.get(parts[1].lower().replace(" ", "").rstrip("."))
+        return number * per if per is not None and math.isfinite(number) else None
+
+    @staticmethod
+    def _display_celsius(text):
+        """A display temperature such as "134.6 F" or "57.0 C", in C; None if it can't be read."""
+        parts = str(text or "").strip().split()
+        try:
+            number = float(parts[0])
+        except (IndexError, ValueError):
+            return None
+        unit = parts[1].upper() if len(parts) > 1 else "C"
+        if not math.isfinite(number):
+            return None
+        return (number - 32.0) / 1.8 if unit.startswith("F") else number
+
+    def getMashNumbers(self, recipe):
+        """What a strike water forecast needs from a BeerXML recipe, kept with the mash profile in its basic data as
+        mash_numbers, in SI units and C as BeerXML has them (StrikeController reads them):
+
+        - grain_kg: the grain bill, as getGrainMass counts it, unrounded;
+        - infuse_l: all the water of the first infusion as BeerSmith shows it (DISPLAY_INFUSE_AMT), the recoverable
+          dead space it adds included; INFUSE_AMOUNT without it;
+        - for_grain_l: INFUSE_AMOUNT, the part for the grain;
+        - tun_kg and tun_cal_g_c: the equipment profile's TUN_WEIGHT and TUN_SPECIFIC_HEAT, else the mash section's -
+          its DISPLAY_TUN_WEIGHT, or its TUN_WEIGHT, which BeerSmith writes in ounces;
+        - infuse_temp_c, grain_temp_c, tun_temp_c: BeerSmith's own strike (INFUSE_TEMP) and the grain and tun
+          temperatures it was worked out for (GRAIN_TEMP, TUN_TEMP);
+        - lacks: those the recipe doesn't have, of grain, water, tun, infuse_temp, grain_temp and tun_temp.
+
+        Never raises: a recipe that can't be read lacks them all.
+        """
+        found = {}
+        try:
+            total, mashed = 0.0, ("grain", "adjunct", "dry extract")
+            for f in recipe.findall("./FERMENTABLES/FERMENTABLE"):
+                kind = (f.findtext("TYPE") or "").strip().lower()
+                if kind and kind not in mashed:
+                    continue
+                amount = self._xml_number(f, "AMOUNT")
+                if amount is not None:
+                    total += amount
+            if total > 0:
+                found["grain_kg"] = round(total, 6)
+            mash = recipe.find("MASH")
+            infusion = None
+            if mash is not None:
+                infusion = next((s for s in mash.iter("MASH_STEP")
+                                 if (s.findtext("TYPE") or "").strip().lower() == "infusion"), None)
+            if infusion is not None:
+                for_grain = self._xml_number(infusion, "INFUSE_AMOUNT")
+                shown = self._display_quantity(infusion.findtext("DISPLAY_INFUSE_AMT"), self._LITRES)
+                water = shown if shown else for_grain
+                if water and water > 0:
+                    found["infuse_l"] = round(water, 6)
+                if for_grain and for_grain > 0:
+                    found["for_grain_l"] = round(for_grain, 6)
+                infuse = self._display_celsius(infusion.findtext("INFUSE_TEMP"))
+                if infuse is not None:
+                    found["infuse_temp_c"] = round(infuse, 4)
+            equipment = recipe.find("EQUIPMENT")
+            tun = self._xml_number(equipment, "TUN_WEIGHT")
+            if not tun and mash is not None:
+                tun = self._display_quantity(mash.findtext("DISPLAY_TUN_WEIGHT"), self._KILOGRAMS)
+                if not tun:
+                    ounces = self._xml_number(mash, "TUN_WEIGHT")
+                    tun = ounces * self._KILOGRAMS["oz"] if ounces else None
+            heat = self._xml_number(equipment, "TUN_SPECIFIC_HEAT") or self._xml_number(mash, "TUN_SPECIFIC_HEAT")
+            if tun and tun > 0 and heat and heat > 0:
+                found["tun_kg"] = round(tun, 6)
+                found["tun_cal_g_c"] = heat
+            for key, path in (("grain_temp_c", "GRAIN_TEMP"), ("tun_temp_c", "TUN_TEMP")):
+                value = self._xml_number(mash, path)
+                if value is not None:
+                    found[key] = round(value, 4)
+        except Exception as e:  # noqa: BLE001 - the recipe still imports, without them
+            logging.warning("Could not read the recipe's mash numbers: %s", e)
+            found = {}
+        names = (("grain", "grain_kg"), ("water", "infuse_l"), ("tun", "tun_kg"), ("infuse_temp", "infuse_temp_c"),
+                 ("grain_temp", "grain_temp_c"), ("tun_temp", "tun_temp_c"))
+        found["lacks"] = [name for name, key in names if key not in found]
+        return found
 
     def getFirstWort(self, hops, recipe_type):
         alert = "No"

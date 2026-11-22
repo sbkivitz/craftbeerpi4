@@ -131,6 +131,8 @@ class CBPiWebSocket:
         add("resttimer", lambda: self.cbpi.resttimer.get_state())
         # Its timers, the same way: a screen opened while one counts down shows it at once.
         add("timers", lambda: self.cbpi.timers.get_state())
+        # The strike water helper: USE, its forecasts and whether it is being worked out again.
+        add("strike", lambda: self.cbpi.strike.get_state())
         # Prompts. First which ones still wait for an answer: a page drops any
         # other it shows - left from before a restart, its buttons now doing
         # nothing. Then the ones kept for every page (notify(keep=True)), shown

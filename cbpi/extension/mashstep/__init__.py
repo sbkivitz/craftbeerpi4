@@ -253,6 +253,48 @@ class MashInStep(CBPiStep):
             **_keep(self.cbpi),
         ), "malt")
 
+    async def change_target(self, temp):
+        """Heat or hold to `temp` from now on, while the step runs.
+
+        For the brew-day screen's USE and BACK TO on the strike water step, a
+        MashInStep on the HLT: its temperature changes after it has started,
+        and a running step reads its target from what on_start worked out, not
+        from Temp. If it had already reached the old temperature and asked its
+        question (to move the strike water, or for the malt), that question is
+        taken down from every page, the hold for the dough-in is let go, and the
+        step asks again once its kettle reads the new temperature - at once if
+        the water is already there, as the HLT can't cool it. Returns True when
+        a question was taken down.
+        """
+        temp = float(temp)
+        self.props["Temp"] = temp
+        self.rest_temp = temp
+        self.strike_temp = temp
+        kettle = getattr(self, "kettle", None)
+        if kettle is not None:
+            try:
+                await self.cbpi.kettle.set_target_temp(kettle.id, temp)
+            except Exception as e:  # noqa: BLE001 - the step's own target still moves
+                logging.warning("Could not set %s's target: %s", kettle.name, e)
+                kettle.target_temp = temp
+        asked = bool(getattr(self, "_waiting_for_malt", False))
+        timer = getattr(self, "timer", None)
+        if asked or (timer is not None and timer.is_running is True):
+            if timer is not None:
+                await timer.stop()
+            self.timer = Timer(1, on_update=self.on_timer_update, on_done=self.on_timer_done)
+        if asked:
+            self._waiting_for_malt = False
+            withdraw = getattr(getattr(self.cbpi, "step", None), "withdraw_step_prompt", None)
+            if callable(withdraw):
+                withdraw(self.id, "malt")
+            self._set_pump_hold(False)
+            self._set_grain_present(False)
+            await self.record(self.WAITING_FOR_MALT_PROP, False)
+            self.summary = "Waiting for Target Temp"
+        await self.push_update()
+        return asked
+
     async def on_timer_update(self, timer, seconds):
         await self.push_update()
 

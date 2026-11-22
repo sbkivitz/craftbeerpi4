@@ -511,6 +511,16 @@ class StepController:
                 self._retire_prompt(earlier)
         prompts[notification_id] = (kind, step_id, lambda step: step.status in states)
 
+    def withdraw_step_prompt(self, step_id, kind):
+        """Take a step's kept prompt of this kind down from every page now: the
+        question no longer stands. The strike water's temperature changed after
+        its step had asked for the water to be moved, and the step asks again
+        at the new one (MashInStep.change_target)."""
+        prompts = self.__dict__.get("_kept_prompts") or {}
+        for notification_id, (k, other, _) in list(prompts.items()):
+            if k == kind and other == step_id:
+                self._retire_prompt(notification_id)
+
     def _retire_prompts(self, everything=False):
         """Take down the kept prompts that no longer apply - or, when the profile
         is reset or replaced, all of them. Run on every save, which follows
