@@ -1309,9 +1309,14 @@ class StepController:
         }
 
     async def move(self, id, direction: StepMove):
+        """Swap a step with its neighbour above (-1) or below (1). Nothing moves past either end: a page whose list
+        is out of date can ask for that, and the profile's last step would otherwise take the first one's place."""
         index = self.get_index_by_id(id)
         if direction not in [-1, 1]:
             self.logger.error("Cant move. Direction 1 and -1 allowed")
+            return
+        if index is None or not 0 <= index + direction < len(self.profile):
+            self.logger.warning("Step %s not moved: it is already at that end of the brew steps", id)
             return
         self.profile[index], self.profile[index + direction] = (
             self.profile[index + direction],
