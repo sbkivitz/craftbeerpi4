@@ -508,7 +508,7 @@ class StrikeController:
         basic = basic if isinstance(basic, dict) else {}
         L = types.SimpleNamespace(unit=unit, mass_unit="lb" if unit == "F" else "kg", ids=[s.id for s in profile],
                                   off=None, phase=None, by=None, bs=None, si=None, mi=None, hlt=None, mt=None, bk=None,
-                                  herms=None, pid=None, model=None, key=None, numbers=None)
+                                  herms=None, pid=None, sample_time=None, model=None, key=None, numbers=None)
         name = basic.get("name")
         L.name = name if profile and isinstance(name, str) and name.strip() else None
         try:
@@ -527,11 +527,11 @@ class StrikeController:
             found = self._herms(L.mt, unit)
             if found is None:
                 L.off = "not_herms"
-            elif model.step_for(found[0]["sample_time"]) is None:
-                # A SampleTime that isn't a whole number of seconds: no step of the replay divides it.
-                L.off = "sample_time"
             else:
+                # A SampleTime the replay can't step through is a number missing, not a reason the helper is off: the
+                # box stays, and says so.
                 L.herms, L.pid = found
+                L.sample_time = L.herms["sample_time"]
                 at = next((i for i, s in enumerate(profile) if _prop(s, "Kettle") == L.mt.id), None)
                 if at is None or profile[at].type != "MashInStep":
                     L.off = "no_mash_in"
@@ -623,6 +623,9 @@ class StrikeController:
                         grain_from="you" if typed is not None and not typed_bad else "probe", probe=setup["probe"])
         if grain_kg is None or infuse_l is None or rest is None:
             L.miss = "recipe"
+        elif L.sample_time is not None and model.step_for(L.sample_time) is None:
+            # A SampleTime that isn't a whole number of seconds: no step of the replay divides it.
+            L.miss = "sample_time"
         elif room is None:
             L.miss = "probe"
         elif not low <= room <= high:
@@ -991,11 +994,13 @@ class StrikeController:
         miss = self._miss(look)
         state = dict(
             version=self.VERSION, unit=unit, vol_unit=look.vol_unit, mass_unit=look.mass_unit,
+            ceiling=self.ceiling(unit),
             now=round(clock.now(), 3), scale=clock.scale(), recipe=look.recipe,
             applies=look.off is None, off=look.off, phase=look.phase, by=look.by,
             step_ids=dict(brewstart=getattr(look.bs, "id", None), strike=getattr(look.si, "id", None),
                           mash_in=getattr(look.mi, "id", None)),
-            inputs=look.inputs, rig=look.rig, guesses=look.guesses if miss in (None, "far") else None,
+            inputs=look.inputs, rig=look.rig, sample_time=look.sample_time,
+            guesses=look.guesses if miss in (None, "far") else None,
             miss=miss, was=was, working=working,
             failed=None if self.failed is None else dict(at=self.failed["at"], detail=self.failed["detail"]),
             answer=self._answer_shown(look, was))
