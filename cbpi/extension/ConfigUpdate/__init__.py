@@ -13,6 +13,7 @@ import yaml
 from aiohttp import web
 from cbpi import __version__
 from cbpi.api import *
+from cbpi.api import timefmt
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 
@@ -85,6 +86,7 @@ class ConfigUpdate(CBPiExtension):
         AddMashIn = self.cbpi.config.get("AddMashInStep", None)
         AddMashOut = self.cbpi.config.get("AddMashOutStep", None)
         GrainAbsorption = self.cbpi.config.get("GRAIN_ABSORPTION", None)
+        ClockFormat = self.cbpi.config.get(timefmt.SETTING, None)
         bfuserid = self.cbpi.config.get("brewfather_user_id", None)
         bfapikey = self.cbpi.config.get("brewfather_api_key", None)
         bflistlength = self.cbpi.config.get("brewfather_list_length", None)
@@ -567,6 +569,24 @@ class ConfigUpdate(CBPiExtension):
                     type=ConfigType.NUMBER,
                     description=grain_absorption_description,
                     source="steps",
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Unable to update config: %s", e)
+
+        # How the times of day CraftBeerPi writes for people are shown
+        # (cbpi.api.timefmt). The description and options are refreshed with
+        # each version; a saved value is kept.
+        if ClockFormat is None or CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+            if ClockFormat is None:
+                logger.info("INIT CLOCK_FORMAT")
+            try:
+                await self.cbpi.config.add(
+                    timefmt.SETTING,
+                    ClockFormat if ClockFormat is not None else timefmt.DEFAULT,
+                    type=ConfigType.SELECT,
+                    description=timefmt.DESCRIPTION,
+                    source="craftbeerpi",
+                    options=[{"label": f, "value": f} for f in timefmt.FORMATS],
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("Unable to update config: %s", e)

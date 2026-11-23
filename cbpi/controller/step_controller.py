@@ -18,7 +18,7 @@ from os.path import isfile, join
 import cbpi
 import shortuuid
 import yaml
-from cbpi.api import clock
+from cbpi.api import clock, timefmt
 from cbpi.api.dataclasses import (NotificationAction, NotificationType, Props,
                                   Step)
 from tabulate import tabulate
@@ -579,15 +579,18 @@ class StepController:
             return None
         return until if math.isfinite(until) else None
 
-    @staticmethod
-    def _clock_time(seconds):
-        """'07:00' - or 'Sat 07:00' on another day - on the brewing clock."""
+    def _clock_time(self, seconds):
+        """'07:00' - or 'Sat 07:00' on another day - on the brewing clock, as
+        CLOCK_FORMAT shows times of day: '7:00 AM', 'Sat 7:00 AM' at 12-hour."""
         try:
             moment = datetime.fromtimestamp(float(seconds))
             today = datetime.fromtimestamp(clock.now()).date()
         except (TypeError, ValueError, OverflowError, OSError):
             return "?"
-        return moment.strftime("%H:%M" if moment.date() == today else "%a %H:%M")
+        cbpi = getattr(self, "cbpi", None)
+        if moment.date() == today:
+            return timefmt.time_of_day(moment, cbpi)
+        return timefmt.day_and_time(moment, cbpi)
 
     async def allow_resume(self, step_id, until, by=None):
         """Let a step carry on by itself if a restart interrupts it before `until`.

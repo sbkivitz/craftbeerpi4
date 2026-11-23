@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 
 from cbpi.api import *
-from cbpi.api import CBPiSensor, Property, parameters
+from cbpi.api import CBPiSensor, Property, parameters, timefmt
 from cbpi.api.dataclasses import NotificationAction, NotificationType
 
 
@@ -114,7 +114,7 @@ class MQTTSensor(CBPiSensor):
             "Sensor '"
             + str(self.sensor.name)
             + "' did not respond. Last data received: "
-            + target_timestring.strftime("%D %H:%M"),
+            + timefmt.day_and_time(target_timestring, self.cbpi, day="%D"),
             NotificationType.WARNING,
             action=[NotificationAction("OK", self.Confirm)],
         )
@@ -318,7 +318,7 @@ class MQTTSensorOffset(CBPiSensor):
             "Sensor '"
             + str(self.sensor.name)
             + "' did not respond. Last data received: "
-            + target_timestring.strftime("%D %H:%M"),
+            + timefmt.day_and_time(target_timestring, self.cbpi, day="%D"),
             NotificationType.WARNING,
             action=[NotificationAction("OK", self.Confirm)],
         )

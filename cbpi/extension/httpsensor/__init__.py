@@ -7,6 +7,7 @@ from datetime import datetime
 
 from aiohttp import web
 from cbpi.api import *
+from cbpi.api import timefmt
 from cbpi.api.dataclasses import NotificationAction, NotificationType
 
 cache = {}
@@ -91,7 +92,7 @@ class HTTPSensor(CBPiSensor):
             "Sensor '"
             + str(self.sensor.name)
             + "' did not respond.  Last data received: "
-            + target_timestring.strftime("%D %H:%M"),
+            + timefmt.day_and_time(target_timestring, self.cbpi, day="%D"),
             NotificationType.WARNING,
             action=[NotificationAction("OK", self.Confirm)],
         )

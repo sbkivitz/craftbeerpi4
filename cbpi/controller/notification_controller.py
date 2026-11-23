@@ -8,6 +8,7 @@ from email import message
 
 import shortuuid
 from cbpi.api import *
+from cbpi.api import timefmt
 from cbpi.api.dataclasses import NotificationType
 
 
@@ -213,7 +214,8 @@ class NotificationController:
         )
         self.cbpi.push_update(topic="cbpi/notification", data=data)
         self.notifications.insert(
-            0, [f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}: {title} | {message}']
+            0, [f'{timefmt.day_and_time(datetime.now(), self.cbpi, day="%Y-%m-%d", seconds=True)}: '
+                f'{title} | {message}']
         )
         if len(self.notifications) > 100:
             self.notifications = self.notifications[:100]

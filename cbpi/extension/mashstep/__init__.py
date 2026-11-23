@@ -11,7 +11,7 @@ from typing import KeysView
 import numpy as np
 from cbpi.api import *
 from cbpi.api import Property, action, parameters
-from cbpi.api import clock
+from cbpi.api import clock, timefmt
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import Kettle, NotificationAction, NotificationType, Props
@@ -21,8 +21,10 @@ from cbpi.api.timer import Timer
 from voluptuous.schema_builder import message
 
 
-def _completion_time(timer):
-    """Wall-clock HH:MM at which a timer that has just started reaches zero.
+def _completion_time(timer, source=None):
+    """The wall-clock time of day at which a timer that has just started reaches
+    zero, as `source`'s CLOCK_FORMAT shows it (cbpi.api.timefmt): "11:15 PM" or
+    "23:15".
 
     From what the timer will actually run, not the step's configured length:
     a rest resumed after a power cut with forty minutes left ends in forty
@@ -36,7 +38,7 @@ def _completion_time(timer):
     """
     try:
         seconds = timer.seconds_left() / clock.scale()
-        return datetime.fromtimestamp(time.time() + seconds).strftime("%H:%M")
+        return timefmt.time_of_day(time.time() + seconds, source)
     except Exception as e:  # noqa: BLE001
         logging.warning("Could not work out when the step ends: %s", e)
         return "unknown"
@@ -662,7 +664,7 @@ class MashStep(CBPiStep):
                 self.cbpi.notify(
                     self.name,
                     "Timer started. Estimated completion: {}".format(
-                        _completion_time(self.timer)
+                        _completion_time(self.timer, self.cbpi)
                     ),
                     NotificationType.INFO,
                 )
@@ -960,7 +962,7 @@ class SpargeStep(CBPiStep):
                 said.append(SPARGE_HLT_OFF_TEXT)
             if self.timer is not None:
                 said.append("Sparge timer started. Estimated completion: {}".format(
-                    _completion_time(self.timer)))
+                    _completion_time(self.timer, self.cbpi)))
             if said:
                 self.cbpi.notify(self.name, " ".join(said), NotificationType.INFO)
         await self.push_update()
@@ -2061,7 +2063,7 @@ class BoilStep(CBPiStep):
                     self.cbpi.notify(
                         self.name,
                         "Timer started automatically. Estimated completion: {}".format(
-                            _completion_time(self.timer)
+                            _completion_time(self.timer, self.cbpi)
                         ),
                         NotificationType.INFO,
                     )
@@ -2100,7 +2102,7 @@ class BoilStep(CBPiStep):
                 self.cbpi.notify(
                     self.name,
                     "Timer started. Estimated completion: {}".format(
-                        _completion_time(self.timer)
+                        _completion_time(self.timer, self.cbpi)
                     ),
                     NotificationType.INFO,
                 )
@@ -2224,7 +2226,7 @@ class CooldownStep(CBPiStep):
         timestring = datetime.fromtimestamp(self.start_time)
         if self.actor is not None:
             await self.actor_on(self.actor)
-        self.summary = "Started: {}".format(timestring.strftime("%H:%M"))
+        self.summary = "Started: {}".format(timefmt.time_of_day(timestring, self.cbpi))
         await self.push_update()
         while self.running == True:
             current_temp = self.get_sensor_value(self.props.get("Sensor", None)).get(
@@ -2245,13 +2247,13 @@ class CooldownStep(CBPiStep):
                 )
                 target_time = cooldown_model(self.target_temp)
                 target_timestring = datetime.fromtimestamp(target_time)
-                self.summary = "ECT: {}".format(target_timestring.strftime("%H:%M"))
+                self.summary = "ECT: {}".format(timefmt.time_of_day(target_timestring, self.cbpi))
                 self.cbpi.notify(
                     "Cooldown Step",
                     "Current: {}°, reaching {}° at {}".format(
                         round(current_temp, 1),
                         self.target_temp,
-                        target_timestring.strftime("%d.%m %H:%M"),
+                        timefmt.day_and_time(target_timestring, self.cbpi, day="%d.%m"),
                     ),
                     NotificationType.INFO,
                 )
