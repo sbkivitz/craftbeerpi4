@@ -53,6 +53,11 @@ class RestTimerController:
     def get_state(self):
         return dict(remaining=round(self.left(), 3), running=self.running, scale=clock.scale())
 
+    def clock_moved(self, seconds):
+        """The brewing clock's now() has just jumped (CraftBeerPi.brewing_clock). The rest counts on
+        clock.monotonic(), which doesn't, so it keeps its time left; every screen is told the new speed."""
+        self._push()
+
     def _push(self):
         try:
             self.cbpi.ws.send(dict(topic=self.TOPIC, data=self.get_state()))

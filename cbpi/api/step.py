@@ -334,6 +334,22 @@ class CBPiStep(_TargetArrival, CBPiBase):
             except Exception:
                 self.props[self.ELAPSED_PROP] = 0
 
+    def clock_moved(self, seconds):
+        """The brewing clock's now() has just jumped by `seconds`: a simulator's
+        speed changed, and CraftBeerPi's clock went back to the computer's time
+        (CraftBeerPi.brewing_clock). Move what this step keeps on now() with it,
+        so the step carries on as if nothing had happened: when progress was
+        last written, and where the stalled-heating watch began.
+
+        Its timer moves itself (Timer.clock_moved_all), and the brewing-clock
+        times in its props are moved by StepController.clock_moved. A step that
+        keeps more times on now() moves them too, calling this first. Never
+        called on a rig."""
+        if getattr(self, "_elapsed_saved_at", 0.0):
+            self._elapsed_saved_at += seconds
+        if getattr(self, "_stall_anchor_value", None) is not None:
+            self._stall_anchor_at += seconds
+
     async def record(self, key, value):
         """Keep a fact about this run with the step, on disk now.
 

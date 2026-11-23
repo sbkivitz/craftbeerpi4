@@ -7,6 +7,17 @@ from cbpi.api.extension import CBPiExtension
 
 
 class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
+    """A kettle's AUTO: what drives its element, and its agitator, toward its target.
+
+    A logic may define clock_moved(self, seconds): told, while it runs, that the
+    brewing clock's now() has just jumped by `seconds` - on a simulator whose
+    speed changed, which takes the clock back to the computer's time
+    (CraftBeerPi.brewing_clock; never on a rig). It moves whatever it keeps on
+    now() by as much, and runs on. A running logic without it is stopped and
+    started again instead, as AUTO off and on would (KettleController.
+    restart_after_clock_reset): kept times on a clock that went back would hold
+    a PID's output until the clock caught up.
+    """
 
     def __init__(self, cbpi, id, props):
         self.cbpi = cbpi

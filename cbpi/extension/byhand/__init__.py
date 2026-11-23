@@ -161,6 +161,13 @@ class HeatingByHand(CBPiExtension):
             unit = "C"
         return "F" if unit.startswith("F") else "C"
 
+    def clock_moved(self, seconds):
+        """The brewing clock's now() has just jumped by `seconds` (CraftBeerPi.brewing_clock): each stretch's
+        since moves with it, so the alarm still comes AFTER brewing seconds into it."""
+        for s in self._stretch.values():
+            if s.get("since") is not None:
+                s["since"] += seconds
+
     def boil_from(self, bk, unit):
         """Where BoilPower boils (the screen's boilFrom): the boil kettle's
         Boil_Threshold, or BoilPower's default. An older BoilPower, without

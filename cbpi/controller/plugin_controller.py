@@ -18,6 +18,9 @@ class PluginController:
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
+        # Every extension registered (CBPiExtension), in the order they were: so CraftBeerPi.brewing_clock can tell
+        # each that holds brewing-clock times when a simulator sets the clock back.
+        self.extensions = []
 
     def load_plugins(self):
 
@@ -155,6 +158,7 @@ class PluginController:
 
         if issubclass(clazz, CBPiExtension):
             self.c = clazz(self.cbpi)
+            self.__dict__.setdefault("extensions", []).append(self.c)
 
     def _parse_property_object(self, p):
         result = self._parse_property_fields(p)

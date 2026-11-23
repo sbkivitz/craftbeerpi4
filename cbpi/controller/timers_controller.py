@@ -221,6 +221,18 @@ class TimersController:
         self._save()
         self._push()
 
+    def clock_moved(self, seconds):
+        """The brewing clock's now() has just jumped by `seconds` (CraftBeerPi.brewing_clock). The countdowns are on
+        clock.monotonic(), which doesn't jump, so each keeps its time left; only when a timer ran out (at, on now())
+        moves, a removed one's too. Every screen is told: its now and scale are new."""
+        for t in list(self.timers) + [t for t, _ in self._removed.values()]:
+            if t.at is not None:
+                t.at += seconds
+        for _, was in self._removed.values():
+            if was.get("at") is not None:
+                was["at"] += seconds
+        self._push()
+
     # -- kept on disk ---------------------------------------------------------------------------
 
     STATES = ("stopped", "running", "paused", "done")

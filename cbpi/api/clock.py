@@ -32,6 +32,12 @@ On real hardware the default source is real time, `now()` is `time.time()` and
 `sleep()` is `asyncio.sleep()`. Nothing changes, and no caller needs to know
 whether it is being simulated.
 
+Only a simulator changes the speed. `set_scale()` keeps simulated time where it
+is; `reset()` takes now() back to the computer's date and time and runs at the
+new speed from there, leaving monotonic() unbroken. Whatever holds a time on
+now() has to move with it, which is CraftBeerPi.brewing_clock's job
+(cbpi.controller.clock_controller).
+
 ## Extending
 
 The source is pluggable. Implement `TimeSource` and install it:
@@ -64,6 +70,7 @@ __all__ = [
     "sleep_until",
     "scale",
     "set_scale",
+    "reset",
     "is_scaled",
     "get_source",
     "set_source",
@@ -171,6 +178,26 @@ class ScaledTimeSource(TimeSource):
         self._sim_mono_anchor = self.monotonic()
         self._real_mono_anchor = self._reference.monotonic()
         self._rate = value
+
+    def reset(self, rate) -> float:
+        """Back to the reference clock's date and time, running at `rate` from there.
+
+        Unlike setting `rate`, which carries on from where simulated time is,
+        this undoes what an accelerated run did to the date: now() is the
+        reference's (the computer's) again. monotonic() carries on from where it
+        is, as a monotonic clock must, so whatever measures an interval on it
+        goes on unbroken. Returns how far now() moved, in seconds: negative
+        when it went back. Whatever holds a time on now() has to move it by as
+        much (CraftBeerPi.brewing_clock does that for the server).
+        """
+        rate = self._validate(rate)
+        before = self.now()
+        self._sim_mono_anchor = self.monotonic()
+        self._real_mono_anchor = self._reference.monotonic()
+        self._real_anchor = self._reference.now()
+        self._sim_anchor = self._real_anchor
+        self._rate = rate
+        return self._sim_anchor - before
 
     def now(self) -> float:
         elapsed = self._reference.now() - self._real_anchor
@@ -374,3 +401,38 @@ def set_scale(value) -> float:
     elif rate != 1.0:
         _source = ScaledTimeSource(rate)
     return _source.rate
+
+
+def reset(value):
+    """Back to the computer's date and time, running at `value` from there.
+
+    For a simulator changing its speed (cbpi4-simvessel's SIM_TIME_SCALE);
+    nothing on a rig calls it. set_scale() keeps simulated time where it is, so
+    an hour at 30x leaves the clock thirty hours ahead of the computer's; this
+    puts it back. monotonic() carries on unbroken (ScaledTimeSource.reset).
+
+    Returns how far now() moved, in seconds (negative: back), or None when
+    `value` is not a usable rate, and nothing changes. Whatever holds a time on
+    now() must move it by as much: CraftBeerPi.brewing_clock does that for the
+    server, and is what a plugin should call rather than this.
+    """
+    global _source
+    try:
+        rate = ScaledTimeSource._validate(value)
+    except ValueError:
+        return None
+    if isinstance(_source, ScaledTimeSource):
+        return _source.reset(rate)
+    if isinstance(_source, RealTimeSource):
+        if rate != 1.0:
+            # Starts at the computer's time, and its monotonic() at the real one.
+            _source = ScaledTimeSource(rate)
+        return 0.0
+    # Any other source - a virtual clock in a test - gives way to the computer's
+    # time at that rate, its monotonic() carrying on from where it was.
+    previous = _source
+    before, mono = previous.now(), previous.monotonic()
+    scaled = ScaledTimeSource(rate)
+    scaled._sim_mono_anchor = mono
+    _source = scaled
+    return scaled.now() - before

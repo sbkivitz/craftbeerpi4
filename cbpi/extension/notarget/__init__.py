@@ -80,6 +80,12 @@ class NoTargetWarning(CBPiExtension):
             except Exception as e:  # noqa: BLE001 - one bad look must not end the watch
                 logger.warning("No-target warning: could not check the kettles: %s", e)
 
+    def clock_moved(self, seconds):
+        """The brewing clock's now() has just jumped by `seconds` (CraftBeerPi.brewing_clock): when each kettle
+        began running with no target moves with it, so the warning still comes GRACE brewing seconds after."""
+        for kettle_id in list(self._since):
+            self._since[kettle_id] += seconds
+
     def look(self, now=None):
         """Warn for each kettle that has run AUTO with no target for GRACE; take
         the warning down for each that no longer does."""

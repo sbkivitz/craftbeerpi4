@@ -6,6 +6,7 @@ import io
 import logging
 import math
 import os
+import time
 import zipfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -36,6 +37,8 @@ class LogController:
         self.logsFolderPath = self.cbpi.config_folder.logsFolderPath
         self.logger.info("Log folder path  : " + self.logsFolderPath)
         self.sensor_data_listeners = {}
+        # The archived logs being zipped (archive_logs_ahead), while that runs.
+        self.archive_zipping = None
 
     def add_sensor_data_listener(self, method):
         listener_id = shortuuid.uuid()
@@ -545,29 +548,150 @@ class LogController:
         logging.info(f"Deleting logfiles for sensor {name}.")
 
         if name in self.datalogger:
-            # Close, not just remove. removeHandler() detaches the handler from
-            # the logger but leaves its file open, and on Windows an open handle
-            # makes both the rotation rename and the os.remove below fail - so
-            # "clear log" would leave the files in place and the next rollover
-            # would start throwing.
-            #
-            # Every handler, not handlers[0]. A logger is a process-global
-            # singleton, so a previous leak can have left more than one attached
-            # to the same file, and taking only the first leaves the rest
-            # holding it open.
-            for handler in list(self.datalogger[name].handlers):
-                try:
-                    self.datalogger[name].removeHandler(handler)
-                    handler.close()
-                except Exception as e:
-                    logging.warning("Could not close log handler for %s: %s", name, e)
-            del self.datalogger[name]
+            self._close_datalogger(name)
 
         for f in all_filenames:
             try:
                 os.remove(f)
             except Exception as e:
                 logging.warning(e)
+
+    def _close_datalogger(self, name):
+        """Close every file handler of a sensor's log, its batch written first, and forget the logger, so its files
+        can be removed or moved. The next reading opens the log afresh (SensorLogTarget_CSV)."""
+        data_logger = self.datalogger.pop(name, None)
+        if data_logger is None:
+            return
+        # Close, not just remove. removeHandler() detaches the handler from
+        # the logger but leaves its file open, and on Windows an open handle
+        # makes both the rotation rename and a remove or move of the file fail.
+        #
+        # Every handler, not handlers[0]. A logger is a process-global
+        # singleton, so a previous leak can have left more than one attached
+        # to the same file, and taking only the first leaves the rest
+        # holding it open.
+        for handler in list(data_logger.handlers):
+            try:
+                data_logger.removeHandler(handler)
+                handler.close()
+            except Exception as e:
+                logging.warning("Could not close log handler for %s: %s", name, e)
+
+    #: How far past the clock a log's newest row must be to have been stamped by
+    #: a clock that has since been set back (archive_logs_ahead).
+    AHEAD_MARGIN_S = 5.0
+
+    @staticmethod
+    def _newest_row_time(path):
+        """The time of a log file's last row, as epoch seconds; None if it has none."""
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 4096))
+                tail = f.read().replace(b"\x00", b"").decode("utf-8", "replace")
+        except OSError:
+            return None
+        for line in reversed(tail.splitlines()):
+            stamp = line.split(",", 1)[0].strip()
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    return datetime.strptime(stamp, fmt).timestamp()
+                except ValueError:
+                    continue
+        return None
+
+    #: How often, and how far apart in seconds, a move refused for a file held open is tried (_replace).
+    REPLACE_TRIES = 20
+    REPLACE_PAUSE_S = 0.05
+
+    @classmethod
+    def _replace(cls, source, target):
+        """os.replace, tried again for a moment while it is refused. On Windows another program - a virus
+        scanner, the search indexer - can hold a log open briefly after it was written, and a move fails
+        meanwhile; left where it is, the archived run's rows would stay in the log the next readings go into."""
+        for attempt in range(cls.REPLACE_TRIES):
+            try:
+                os.replace(source, target)
+                return
+            except PermissionError:
+                if attempt == cls.REPLACE_TRIES - 1:
+                    raise
+                time.sleep(cls.REPLACE_PAUSE_S)
+
+    def archive_logs_ahead(self, now):
+        """Archive each log that has rows stamped later than `now`.
+
+        For the brewing clock set back to the computer's time while the server
+        runs (CraftBeerPi.brewing_clock): the rows an accelerated run wrote are
+        ahead of it, and the rows written from now on would go in behind them,
+        into the same files, so a graph would go back in time. As a simulator
+        does with the logs of an earlier accelerated run as it starts: each such
+        log's files are moved, unchanged, into <logs>/archive/<time>-simulation/,
+        and zipped into the logs folder as "<time>-sensor-<id>.zip", listed and
+        downloadable as any. Nothing is deleted.
+
+        Every log's batch is written first, so rows still held in memory count.
+        A log archived is closed; the next reading starts a new file. The series
+        logged only when they change - a kettle's target and AUTO, a switch's
+        level - are logged again at their next look, so a graph has them from
+        the start. The files are moved here, at once; they are zipped in a
+        thread of their own afterwards (archive_zipping, while it runs).
+
+        Returns None when no log is ahead, else {"sensors": [ids], "latest": the
+        newest row's time, "folder": the archive folder, "zips": [file names]}.
+        """
+        folder = self.logsFolderPath
+        if not folder or not os.path.isdir(folder):
+            return None
+        for data_logger in list(self.datalogger.values()):
+            for handler in list(data_logger.handlers):
+                try:
+                    handler.flush()
+                except Exception as e:  # noqa: BLE001 - its file is still judged by what it has
+                    logging.warning("Could not write a sensor log's batch: %s", e)
+        ahead = []
+        for path in glob.glob(os.path.join(glob.escape(folder), "sensor_*.log")):
+            name = os.path.basename(path)[len("sensor_"):-len(".log")]
+            stamps = [self._newest_row_time(f) for f in self._log_files_oldest_first(name)]
+            stamps = [s for s in stamps if s is not None]
+            if stamps and max(stamps) > now + self.AHEAD_MARGIN_S:
+                ahead.append((name, max(stamps)))
+        if not ahead:
+            return None
+        stamp = datetime.fromtimestamp(now)
+        archive = os.path.join(folder, "archive", stamp.strftime("%Y%m%d-%H%M%S") + "-simulation")
+        os.makedirs(archive, exist_ok=True)
+        moved = {}
+        last = getattr(self, "_last_change", None) or {}
+        for name, _ in ahead:
+            self._close_datalogger(name)
+            files = []
+            for f in self._log_files_oldest_first(name):
+                target = os.path.join(archive, os.path.basename(f))
+                try:
+                    self._replace(f, target)
+                    files.append(target)
+                except OSError as e:
+                    self.logger.warning("Could not archive %s: %s", f, e)
+            if files:
+                moved["{}-sensor-{}.zip".format(stamp.strftime("%Y-%m-%d-%H_%M_%S"), name)] = files
+            last.pop(name, None)
+
+        def zip_them():
+            for zip_name, files in moved.items():
+                try:
+                    with zipfile.ZipFile(os.path.join(folder, zip_name), "w", zipfile.ZIP_DEFLATED) as z:
+                        for f in files:
+                            z.write(f, os.path.basename(f))
+                except Exception as e:  # noqa: BLE001 - the move already separated the runs
+                    self.logger.warning("Could not zip %s: %s", zip_name, e)
+
+        try:
+            self.archive_zipping = asyncio.get_running_loop().run_in_executor(None, zip_them)
+        except RuntimeError:
+            zip_them()
+        return {"sensors": [name for name, _ in ahead], "latest": max(newest for _, newest in ahead),
+                "folder": archive, "zips": list(moved)}
 
     def get_all_zip_file_names(self, name: str) -> list:
         """

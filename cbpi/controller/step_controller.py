@@ -628,6 +628,92 @@ class StepController:
         await self.save()
         return True
 
+    #: Brewing-clock times a step keeps in its props, with the places they are
+    #: rounded to: moved with the clock (clock_moved).
+    CLOCK_PROPS = ((CBPiStep.RESUME_UNTIL_PROP, 1), (STARTED_AT_PROP, 3))
+
+    @staticmethod
+    def _moved(value, seconds, places):
+        """`value` + `seconds`, rounded, if `value` is a finite number; else None."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        return round(value + seconds, places)
+
+    def clock_moved(self, seconds):
+        """The brewing clock's now() has just jumped by `seconds` (CraftBeerPi.
+        brewing_clock: a simulator's speed changed, and the clock went back to
+        the computer's time). Moves every time the brew steps keep on it by as
+        much, so the brew carries on as it was, with as long to go:
+
+        - each step's props: until when it may carry on by itself after a
+          restart (_resume_until), and when it first started (_started_at);
+        - each step's own times (CBPiStep.clock_moved); its timer moves itself;
+        - the basic data's loaded_at, and the mash pH reminder's confirmed_at
+          and due_at, so the reminder comes as many minutes after mash-in.
+
+        BrewStart's planned moment is not moved: it plans again
+        (replan_after_clock_reset). Saved by the caller. Never raises."""
+        for step in list(getattr(self, "profile", None) or []):
+            props = step.props
+            try:
+                for key, places in self.CLOCK_PROPS:
+                    moved = self._moved(props.get(key, None), seconds, places) if props is not None else None
+                    if moved is not None:
+                        props[key] = moved
+            except Exception as e:  # noqa: BLE001
+                logging.warning("Could not move the clock times of '%s': %s", step.name, e)
+            moved = getattr(step.instance, "clock_moved", None)
+            if callable(moved):
+                try:
+                    moved(seconds)
+                except Exception as e:  # noqa: BLE001
+                    logging.warning("'%s' could not move its times with the clock: %s", step.name, e)
+        basic = getattr(self, "basic_data", None)
+        if not isinstance(basic, dict):
+            return
+        loaded = self._moved(basic.get(self.LOADED_AT_KEY, None), seconds, 3)
+        if loaded is not None:
+            basic[self.LOADED_AT_KEY] = loaded
+        reminder = basic.get(self.MASH_PH_REMINDER_KEY)
+        if isinstance(reminder, dict):
+            for key in ("confirmed_at", "due_at"):
+                moved = self._moved(reminder.get(key, None), seconds, 3)
+                if moved is not None:
+                    reminder[key] = moved
+
+    async def replan_after_clock_reset(self):
+        """BrewStart plans again from its settings, as START does: Today and
+        Tomorrow are counted from the clock as it is now. After clock_moved.
+
+        Its planned moment (_brewstart_planned) is on the clock as it was, and
+        a BrewStart started again would wait for it: Tuesday's 23:15, after an
+        accelerated run had taken the clock to Sunday's, for "Today 23:15". So
+        each BrewStart not yet done forgets it (its reset()), and one waiting
+        now is stopped and started again around that, quietly: the same step
+        going on, so nobody is told it started. One that moves its own times
+        with the clock (its own clock_moved) is left to it. True if any
+        planned again."""
+        replanned = False
+        for step in list(getattr(self, "profile", None) or []):
+            instance = step.instance
+            if step.type != self.BREWSTART_TYPE or instance is None or step.status == StepState.DONE:
+                continue
+            if getattr(type(instance), "clock_moved", CBPiStep.clock_moved) is not CBPiStep.clock_moved:
+                continue
+            task = getattr(instance, "task", None)
+            waiting = step.status == StepState.ACTIVE and task is not None and not task.done()
+            try:
+                if waiting:
+                    await instance.stop()
+                await instance.reset()
+                if waiting:
+                    await instance.start()
+                replanned = True
+                logging.info("'%s' plans again from its settings, the clock having been reset", step.name)
+            except Exception as e:  # noqa: BLE001
+                logging.warning("'%s' could not plan again after the clock was reset: %s", step.name, e)
+        return replanned
+
     async def _start_resume(self, app=None):
         # A task of its own: start-up must not wait on the clock or the probes.
         self._resume_task = asyncio.create_task(self._resume_interrupted())

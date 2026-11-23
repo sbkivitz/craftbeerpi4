@@ -53,6 +53,11 @@ class BatchingRotatingFileHandler(RotatingFileHandler):
         self.max_records = max(1, int(max_records))
 
     def emit(self, record):
+        # Closed - the log cleared or archived - it writes nothing. A reading
+        # already on its way here when it closed would otherwise open the file
+        # again, and put its row back where the log was just taken away.
+        if getattr(self, "_closed", False):
+            return
         try:
             self._pending.append(self.format(record))
         except Exception:  # noqa: BLE001 - never let logging break a brew day

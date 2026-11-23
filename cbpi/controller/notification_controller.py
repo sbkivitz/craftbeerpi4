@@ -8,7 +8,7 @@ from email import message
 
 import shortuuid
 from cbpi.api import *
-from cbpi.api import timefmt
+from cbpi.api import clock, timefmt
 from cbpi.api.dataclasses import NotificationType
 
 
@@ -69,7 +69,7 @@ class NotificationController:
                     self.notifications.insert(
                         0,
                         [
-                            f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}: Restore Error | {line}'
+                            f'{datetime.fromtimestamp(clock.now()).strftime("%Y-%m-%d %H:%M:%S")}: Restore Error | {line}'
                         ],
                     )
             os.remove(self.restore_error)
@@ -213,8 +213,10 @@ class NotificationController:
             timeout=timeout,
         )
         self.cbpi.push_update(topic="cbpi/notification", data=data)
+        # Stamped on CraftBeerPi's clock (cbpi.api.clock), the one every screen shows: on a simulator it runs
+        # SIM_TIME_SCALE times as fast, and the computer's would put the list at another time than Brew Day's LOG.
         self.notifications.insert(
-            0, [f'{timefmt.day_and_time(datetime.now(), self.cbpi, day="%Y-%m-%d", seconds=True)}: '
+            0, [f'{timefmt.day_and_time(clock.now(), self.cbpi, day="%Y-%m-%d", seconds=True)}: '
                 f'{title} | {message}']
         )
         if len(self.notifications) > 100:

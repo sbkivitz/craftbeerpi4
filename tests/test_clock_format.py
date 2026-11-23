@@ -18,7 +18,6 @@ from datetime import datetime, time as day_time
 
 import pytest
 
-import cbpi.controller.notification_controller as notification_controller
 from cbpi.api import clock
 from cbpi.api.dataclasses import Props
 from cbpi.api.timer import Timer
@@ -216,7 +215,8 @@ async def _timed(kind, cbpi):
 
 
 def announced(kind, values, now):
-    """What a step of `kind` says as its sixty-minute timer starts, with the wall clock at `now`."""
+    """What a step of `kind` says as its sixty-minute timer starts, with CraftBeerPi's clock at `now`: the real
+    clock, as on a rig, set to `now`."""
     cbpi = server(dict(values, CONFIRM_BEFORE_BOIL="No"))
     real = time.time
     time.time = lambda: now
@@ -238,7 +238,7 @@ SAID = {MashStep: "Timer started. Estimated completion: ", BoilStep: "Timer star
     (TWELVE, (23, 0), "12:00 AM"), (TWENTY_FOUR, (23, 0), "00:00"),     # and at midnight
 ], ids=_id)
 def test_a_timer_names_its_end_in_each_format(kind, values, start, said):
-    # The estimate is on the wall clock the brew day is watched by (mashstep._completion_time).
+    # The estimate is on CraftBeerPi's clock, the one Brew Day shows (mashstep._completion_time).
     assert announced(kind, values, local(2026, 11, 22, *start)) == SAID[kind] + said
 
 
@@ -305,17 +305,8 @@ def test_until_when_a_step_may_carry_on_by_itself():
         clock.set_source(previous)
 
 
-class At(datetime):
-    """datetime, its now() a fixed moment."""
-    moment = None
-
-    @classmethod
-    def now(cls, tz=None):
-        return cls.moment
-
-
 def listed(values, moment):
-    """The notification list's newest line after one notification at `moment`."""
+    """The notification list's newest line after one notification at `moment` on CraftBeerPi's clock."""
     notes = NotificationController.__new__(NotificationController)
     notes.cbpi = server(values)
     notes.callback_cache, notes.listener, notes.notifications = {}, {}, []
@@ -325,12 +316,11 @@ def listed(values, moment):
         notes.notify("Boil", "Add the hops")
         await asyncio.sleep(0)
 
-    real, notification_controller.datetime = notification_controller.datetime, At
-    At.moment = At(*moment)
+    previous = clock.set_source(clock.VirtualTimeSource(start=local(*moment)))
     try:
         asyncio.run(notify())
     finally:
-        notification_controller.datetime = real
+        clock.set_source(previous)
     return notes.notifications[0][0]
 
 

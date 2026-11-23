@@ -24,6 +24,10 @@ class Timer(object):
     #: does not know whose it is; StepController.add_listener finds out.
     _observers = []
 
+    #: Every timer there is, held weakly, so that all of them move with the
+    #: brewing clock when a simulator sets it back (clock_moved_all).
+    _all = weakref.WeakSet()
+
     def __init__(self, timeout, on_done=None, on_update=None) -> None:
         super().__init__()
         self.timeout = timeout
@@ -39,6 +43,31 @@ class Timer(object):
         # Counting down now, and since when (brewing clock) - for state().
         self._counting = False
         self._counting_since = None
+        Timer._all.add(self)
+
+    def clock_moved(self, seconds):
+        """The brewing clock's now() has just jumped by `seconds` (cbpi.api.clock.reset):
+        move this countdown's times with it, so it has as long to run as before.
+
+        The countdown re-reads its deadline every pass, so a sleep begun before
+        the jump wakes to the moved one."""
+        if self._deadline is not None:
+            self._deadline += seconds
+        if self._counting_since is not None:
+            self._counting_since += seconds
+        if self.start_time is not None:
+            self.start_time = int(round(self.start_time + seconds))
+        if self.end_time is not None:
+            self.end_time = int(round(self.end_time + seconds))
+
+    @classmethod
+    def clock_moved_all(cls, seconds):
+        """Every timer's clock_moved."""
+        for timer in list(Timer._all):
+            try:
+                timer.clock_moved(seconds)
+            except Exception:  # noqa: BLE001 - one timer never keeps the others behind
+                logging.exception("A timer could not move with the clock")
 
     @classmethod
     def add_observer(cls, method):

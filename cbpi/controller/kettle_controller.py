@@ -362,6 +362,54 @@ class KettleController(BasicController):
         except Exception as e:
             logging.error("Failed to switch off KettleLogic {} {}".format(id, e))
 
+    #: What a step tells a running logic about its vessel (MashInStep): carried
+    #: to the logic started again across a clock reset (restart_after_clock_reset),
+    #: as a step starting one hands them over (start's preset).
+    CARRIED = ("grain_present", "pump_hold")
+
+    def clock_moved(self, seconds):
+        """The brewing clock's now() has just jumped by `seconds` (CraftBeerPi.
+        brewing_clock). A running logic that keeps times on now() moves them
+        itself in its clock_moved(seconds), and runs on. One without it can't
+        be told: a PID whose last sample is a time ahead of the clock waits for
+        the clock to catch up before it samples again, holding its output
+        meanwhile. Returns the ids of the running ones without it, for
+        restart_after_clock_reset. Never raises."""
+        restart = []
+        for item in list(self.data):
+            instance = getattr(item, "instance", None)
+            if instance is None or not getattr(instance, "state", False):
+                continue
+            moved = getattr(instance, "clock_moved", None)
+            if not callable(moved):
+                restart.append(item.id)
+                continue
+            try:
+                moved(seconds)
+            except Exception as e:  # noqa: BLE001 - started again instead
+                logging.warning("Kettle %s's logic could not move its times with the clock, so it starts again: %s",
+                                getattr(item, "name", item.id), e)
+                restart.append(item.id)
+        return restart
+
+    async def restart_after_clock_reset(self, ids):
+        """Stop each of these kettles' logics and start a new one, as AUTO off
+        and on would, so it starts with no time from before the clock was reset.
+        What a step told the old one about the vessel (CARRIED) the new one has
+        from its first moment. Returns the ids started again."""
+        started = []
+        for kettle_id in ids:
+            item = self.find_by_id(kettle_id)
+            instance = getattr(item, "instance", None) if item is not None else None
+            if instance is None or not getattr(instance, "state", False):
+                continue
+            preset = {name: getattr(instance, name) for name in self.CARRIED if hasattr(instance, name)}
+            logging.info("Kettle %s's logic starts again: the brewing clock was reset", getattr(item, "name", kettle_id))
+            await self.stop(kettle_id)
+            await self.start(kettle_id, preset=preset or None)
+            started.append(kettle_id)
+        return started
+
     # A kettle's settings as a file of its own (kettle_file): the Hardware
     # page's "Save to file..." and "Load from file...".
 

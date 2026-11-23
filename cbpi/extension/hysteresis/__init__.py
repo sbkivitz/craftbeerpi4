@@ -41,6 +41,10 @@ class Hysteresis(CBPiKettleLogic):
         """An empty offset is 0, in either unit."""
         return dict(cls.BLANK)
 
+    def clock_moved(self, seconds):
+        """Nothing here is kept on the brewing clock's now(), so it runs on when a
+        simulator sets that clock back (CBPiKettleLogic.clock_moved)."""
+
     @staticmethod
     def _finite(value):
         """The number in `value`, or None if it is not a usable temperature.

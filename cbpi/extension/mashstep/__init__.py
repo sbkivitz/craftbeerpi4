@@ -22,14 +22,16 @@ from voluptuous.schema_builder import message
 
 
 def _completion_time(timer, source=None):
-    """The wall-clock time of day at which a timer that has just started reaches
-    zero, as `source`'s CLOCK_FORMAT shows it (cbpi.api.timefmt): "11:15 PM" or
-    "23:15".
+    """The time of day at which a timer that has just started reaches zero, on
+    CraftBeerPi's clock (cbpi.api.clock), as `source`'s CLOCK_FORMAT shows it
+    (cbpi.api.timefmt): "11:15 PM" or "23:15".
 
     From what the timer will actually run, not the step's configured length:
     a rest resumed after a power cut with forty minutes left ends in forty
-    minutes. Divided by the clock's scale so a simulated brew day names a
-    time on the clock it is watched by; on a rig the scale is 1.
+    minutes. On CraftBeerPi's clock because that is the one every screen shows
+    (Brew Day's title bar and LOG): on a simulator it runs SIM_TIME_SCALE times
+    as fast, and the end is the time that clock will say. On a rig it is the
+    computer's.
 
     Never raises. It runs inside the step's run() loop, just after the timer
     starts, and an exception here would end the step: an end past what the
@@ -37,8 +39,7 @@ def _completion_time(timer, source=None):
     seconds_left(). A courtesy must not cost the rest.
     """
     try:
-        seconds = timer.seconds_left() / clock.scale()
-        return timefmt.time_of_day(time.time() + seconds, source)
+        return timefmt.time_of_day(clock.now() + timer.seconds_left(), source)
     except Exception as e:  # noqa: BLE001
         logging.warning("Could not work out when the step ends: %s", e)
         return "unknown"
@@ -1624,6 +1625,14 @@ class BoilStep(CBPiStep):
             return sorted({int(n) for n in done})
         except (TypeError, ValueError):
             return []
+
+    def clock_moved(self, seconds):
+        """CBPiStep.clock_moved, and the times of the readings the boil's
+        auto-timer judges a steady boil from."""
+        super().clock_moved(seconds)
+        times = getattr(self, "temptimes", None)
+        if times is not None and getattr(times, "size", 0):
+            self.temptimes = times + seconds
 
     def first_wort_due(self):
         """The first-wort hops still to ask for this brew, as the reminder names

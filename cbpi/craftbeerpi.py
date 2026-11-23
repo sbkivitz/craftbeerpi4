@@ -23,6 +23,7 @@ from cbpi.api.dataclasses import NotificationType
 from cbpi.api.exceptions import CBPiException
 from cbpi.api.sd_notify import Heartbeat
 from cbpi.controller.actor_controller import ActorController
+from cbpi.controller.clock_controller import ClockController
 from cbpi.controller.config_controller import ConfigController
 from cbpi.controller.dashboard_controller import DashboardController
 from cbpi.controller.fermentation_controller import FermentationController
@@ -227,6 +228,9 @@ class CraftBeerPi:
         self.strike : StrikeController = StrikeController(self)
         # Figures from past brews: the brews in the logs and BrewScribe, and USE for what they measured (GET /figures).
         self.figures : FiguresController = FiguresController(self)
+        # The brewing clock set back to the computer's time, with everything that keeps a time on it, when a
+        # simulator's speed changes (cbpi4-simvessel). Nothing on a rig calls it.
+        self.brewing_clock : ClockController = ClockController(self)
         self.satellite = None
         if str(self.static_config.get("mqtt", False)).lower() == "true":
             self.satellite: SatelliteController = SatelliteController(self)
