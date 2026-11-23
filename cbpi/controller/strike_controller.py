@@ -14,11 +14,17 @@ Volume_Unit, masses in lb or kg. The model works in F, gallons and kg; this cont
 The brew day's own figures (the HLT's water and the grain's temperature by hand, the strike water before the first
 USE, and where each USE wrote its figure) and the last answer are kept in config/strike_day.json with the recipe's
 step ids: loading a recipe, the same one included, starts a new brew day.
+
+For the Figures page: as the malt goes in, the forecast for the strike in force is kept in
+config/strike_landings.jsonl (S1), and a worker of its own fits the share of the tun's steel the strike water warms to
+those landings (S2, cbpi.strike.landings), kept in config/strike_fit.json. The numbers the rig has measured are sent in
+the state's `measured` (S3), and set_measured / clear_measured write them to the plant file.
 """
 
 import asyncio
 import base64
 import dataclasses
+import datetime
 import hashlib
 import importlib
 import json
@@ -29,6 +35,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import types
 
 from cbpi.api import clock, readings
@@ -36,7 +43,7 @@ from cbpi.api.persist import atomic_write_json
 from cbpi.api.step import StepState
 from cbpi.controller.step_controller import StepController
 from cbpi.extension.hltpump import kettle_roles
-from cbpi.strike import model
+from cbpi.strike import landings, model
 
 logger = logging.getLogger(__name__)
 
@@ -288,11 +295,22 @@ class StrikeController:
     FORECAST_WAIT = 120.0
     #: The order a change is named in when several moved.
     WHY_ORDER = ("vol", "grain", "room", "rest", "rig")
+    #: Seconds on CraftBeerPi's clock after a landing's window ends before its readings are looked for at last.
+    FIT_MARGIN_S = 60.0
+    #: Real seconds between looks for a landing's readings while its window isn't over, at most and at least, and
+    #: before a fit that failed is tried again.
+    FIT_RECHECK_S = (5.0, 300.0)
+    FIT_RETRY_S = 600.0
+    #: Real seconds a fit may take before it is set going again.
+    FIT_TIMEOUT_S = 3600.0
+    #: Why no landing was kept as the malt went in, as the log says it.
+    NOT_LANDED = {"no_answer": "the box had no forecast for the strike water in force",
+                  "no_strike": "the strike water in force isn't known"}
 
     def __init__(self, cbpi, watch=True):
         self.cbpi = cbpi
         self.watch = watch
-        self.day = {"steps": None, "vol": None, "grain": None, "was": None, "used": None}
+        self.day = {"steps": None, "vol": None, "grain": None, "was": None, "used": None, "landed": None}
         self.answer = None
         self.job = None
         self.failed = None
@@ -302,13 +320,21 @@ class StrikeController:
         self._task = None
         self._pushed = None
         self._plant_cache = None
+        self._planned_seen = None
+        self._landing_said = None
+        self.fit = None
+        self._fitting = None
+        self._fit_recheck = None
+        self._fit_said = None
         self.client = WorkerClient(self._heard)
+        self.fitter = WorkerClient(self._fit_heard)
         app = getattr(cbpi, "app", None)
         if app is not None and hasattr(app, "on_cleanup"):
             app.on_cleanup.append(self.shutdown)
 
     async def init(self):
         self._load_day()
+        self._load_fit()
         if self.watch:
             self._task = asyncio.get_running_loop().create_task(self._watch())
 
@@ -322,6 +348,7 @@ class StrikeController:
                 entry[1].cancel()
         self._asked.clear()
         self.client.stop()
+        self.fitter.stop()
 
     async def _watch(self):
         said = None
@@ -361,6 +388,8 @@ class StrikeController:
         used = data.get("used")
         used = [u for u in used if _written(u)] if isinstance(used, list) else []
         self.day["used"] = used or None
+        landed = data.get("landed")
+        self.day["landed"] = landed if landed is True or isinstance(landed, str) else None
         answer = data.get("answer")
         if isinstance(answer, dict) and isinstance(answer.get("plan"), str) and isinstance(answer.get("_job"), dict):
             if answer.get("levers_status") == "working":
@@ -425,8 +454,14 @@ class StrikeController:
                 logger.warning("Strike water: %s could not be read, so the defaults are used: %s",
                                self.PLANT_FILE, e)
         found = read_plant(data)
-        self._plant_cache = (stamp, found)
+        # The file as read, too: read_plant leaves out what a measured number says besides its value.
+        self._plant_cache = (stamp, found, data if isinstance(data, dict) else {})
         return found
+
+    def _plant_data(self):
+        """The plant file as last read, a copy."""
+        self._plant()
+        return json.loads(json.dumps(self._plant_cache[2], default=str)) if self._plant_cache else {}
 
     # -- looking at the numbers ----------------------------------------------------------------------------------
 
@@ -572,7 +607,8 @@ class StrikeController:
         basic = basic if isinstance(basic, dict) else {}
         L = types.SimpleNamespace(unit=unit, mass_unit="lb" if unit == "F" else "kg", ids=[s.id for s in profile],
                                   off=None, phase=None, by=None, bs=None, si=None, mi=None, hlt=None, mt=None, bk=None,
-                                  herms=None, pid=None, sample_time=None, model=None, key=None, numbers=None)
+                                  herms=None, pid=None, sample_time=None, model=None, key=None, numbers=None,
+                                  measured=None)
         name = basic.get("name")
         L.name = name if profile and isinstance(name, str) and name.strip() else None
         try:
@@ -737,6 +773,7 @@ class StrikeController:
             try:
                 box = model.ranges(model.Brew(**brew), plant)
                 L.guesses = self._guesses_shown(box, unit, L.vol_unit)
+                L.measured = self._measured_shown(box, unit, self._plant_cache[2] if self._plant_cache else {})
             except ValueError:
                 L.guesses = None
         return L
@@ -767,6 +804,31 @@ class StrikeController:
             shown.append(entry)
         return shown
 
+    @staticmethod
+    def _measured_shown(box, unit, data):
+        """The numbers the rig has measured, in SCREEN_ORDER: {"name", "value", "unit", "date", "method", "brews"}.
+        value and unit as _guesses_shown gives a guess's; date and method as the plant file's `measured` says; brews,
+        how many brews its list names, or None for a number measured some other way."""
+        stated = data.get("guesses") if isinstance(data, dict) and isinstance(data.get("guesses"), dict) else {}
+        shown = []
+        for name in model.SCREEN_ORDER:
+            r = box.get(name)
+            if r is None or r.provenance != model.MEASURED:
+                continue
+            value, shown_unit = r.central, r.unit
+            if name == "transfer_f":
+                shown_unit = unit
+                if unit == "C":
+                    value = value / 1.8
+            entry = stated.get(name) if isinstance(stated.get(name), dict) else {}
+            measured = entry.get("measured") if isinstance(entry.get("measured"), dict) else {}
+            brews = measured.get("brews")
+            shown.append(dict(name=name, value=round(value, 3), unit=shown_unit,
+                              date=measured.get("date") if isinstance(measured.get("date"), str) else None,
+                              method=measured.get("method") if isinstance(measured.get("method"), str) else None,
+                              brews=len(brews) if isinstance(brews, list) else None))
+        return shown
+
     # -- deciding when to work USE out ---------------------------------------------------------------------------
 
     def _differs(self, a, look):
@@ -791,6 +853,17 @@ class StrikeController:
         look = self._look()
         if self.day.get("steps") != look.ids:
             self._new_day(look.ids)
+        if look.off == "malt_in":
+            try:
+                self._landed(look)
+            except Exception as e:  # noqa: BLE001 - Figures' record never stops the strike water box
+                if str(e) != self._landing_said:
+                    self._landing_said = str(e)
+                    logger.warning("Strike water: could not keep where the strike water landed: %s", e)
+        elif look.off is None and look.inputs["planned"] is not None:
+            # By hand the strike water in force is the HLT's target, which PID_HERMS has taken over by the time the
+            # malt is in: the last one seen before then stands for it.
+            self._planned_seen = (list(look.ids), look.inputs["planned"])
         if look.off is not None or look.miss is not None:
             self._stop_job()
         else:
@@ -810,11 +883,17 @@ class StrikeController:
             else:
                 self._start_job(look, moved[0])
         self._push(look)
+        try:
+            self._fit_check()
+        except Exception as e:  # noqa: BLE001 - Figures' fit never stops the strike water box
+            if str(e) != self._fit_said:
+                self._fit_said = str(e)
+                logger.warning("Strike water: could not look at the landings for Figures: %s", e)
         return look
 
     def _new_day(self, ids):
         self._stop_job()
-        self.day = {"steps": list(ids), "vol": None, "grain": None, "was": None, "used": None}
+        self.day = {"steps": list(ids), "vol": None, "grain": None, "was": None, "used": None, "landed": None}
         self.answer = None
         self.failed = None
         self._save_day()
@@ -1074,6 +1153,7 @@ class StrikeController:
                           mash_in=getattr(look.mi, "id", None)),
             inputs=look.inputs, rig=look.rig, sample_time=look.sample_time,
             guesses=look.guesses if miss in (None, "far") else None,
+            measured=look.measured if miss in (None, "far") else None,
             miss=miss, was=was, working=working,
             failed=None if self.failed is None else dict(at=self.failed["at"], detail=self.failed["detail"]),
             answer=self._answer_shown(look, was))
@@ -1359,6 +1439,296 @@ class StrikeController:
             self._asked.pop(ident, None)
             raise StrikeRefused(503, "failed", detail=str(e) or "no answer from the worker") from None
         return dict(plan=answer["plan"], forecast=dict(self._forecast_shown(answer["unit"], fc), **{"for": ["asked"]}))
+
+    # -- Figures: where the strike water landed (S1), the fit (S2), the numbers measured (S3) ----------------------
+
+    def _landings_path(self):
+        return self.cbpi.config_folder.get_file_path(landings.LANDINGS_FILE)
+
+    def _fit_path(self):
+        return self.cbpi.config_folder.get_file_path(landings.FIT_FILE)
+
+    def _landed(self, look):
+        """The first time the malt is in for the day's steps, the box's forecast for the strike water in force goes
+        into config/strike_landings.jsonl, once a brew day: strike_day.json's "landed" is then true, or why there was
+        none to keep."""
+        if self.day.get("landed") is not None or self.day.get("steps") != look.ids:
+            return
+        record, why = self._landing(look)
+        if record is None:
+            self.day["landed"] = why
+            self._save_day()
+            logger.info("Strike water: the malt is in, but %s, so no landing is kept for Figures",
+                        self.NOT_LANDED.get(why, why))
+            return
+        try:
+            landings.append_landing(self._landings_path(), record)
+        except Exception as e:  # noqa: BLE001 - tried again at the next look
+            if str(e) != self._landing_said:
+                self._landing_said = str(e)
+                logger.warning("Strike water: could not keep where the strike water landed: %s", e)
+            return
+        self._landing_said = None
+        self.day["landed"] = True
+        self._save_day()
+        logger.info("Strike water: the malt is in; the forecast for %.1f °%s, %s to %s, kept for Figures",
+                    record["strike"], record["unit"], record["lands"][0], record["lands"][1])
+
+    def _landing(self, look):
+        """(The landing's record, None), or (None, why there is none): no answer with a forecast for the strike water
+        in force ("no_answer"), or no strike water in force known ("no_strike")."""
+        answer = self.answer
+        if answer is None or answer.get("unit") != look.unit:
+            return None, "no_answer"
+        strike = look.inputs["planned"]
+        if strike is None and self._planned_seen is not None and self._planned_seen[0] == look.ids:
+            strike = self._planned_seen[1]
+        if strike is None:
+            return None, "no_strike"
+        fc = (answer.get("forecasts") or {}).get("%.1f" % strike)
+        if not isinstance(fc, dict) or len(fc.get("lo") or []) != 61 or len(fc.get("hi") or []) != 61:
+            return None, "no_answer"
+        return dict(
+            version=landings.VERSION, t=self._malt_in_at(look), steps=list(look.ids), name=look.name, unit=look.unit,
+            strike=round(strike, 1), rest=look.inputs["rest"], lands=[fc["lo"][0], fc["hi"][0]], lo=list(fc["lo"]),
+            hi=list(fc["hi"]), searched=bool(fc.get("searched")),
+            numbers={k: v for k, v in answer["numbers"].items() if k != "key"}, plant=self._plant_data(),
+            plan=answer["plan"], sensor=getattr(look.mt, "sensor", None) or None, job=answer["_job"]), None
+
+    def _malt_in_at(self, look):
+        """When the malt went in, as CraftBeerPi knows it: the brewer's Next on MashIn, when the step after it started
+        (its _started_at), else now."""
+        profile = list(getattr(self.cbpi.step, "profile", None) or [])
+        at = next((i for i, s in enumerate(profile) if s is look.mi), None)
+        following = profile[at + 1] if at is not None and at + 1 < len(profile) else None
+        started = _number(_prop(following, StepController.STARTED_AT_PROP)) if following is not None else None
+        return round(started if started is not None else clock.now(), 3)
+
+    def _logs_folder(self):
+        log = getattr(self.cbpi, "log", None)
+        return getattr(log, "logsFolderPath", None) or getattr(self.cbpi.config_folder, "logsFolderPath", None)
+
+    def _load_fit(self):
+        try:
+            with open(self._fit_path(), encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as e:  # noqa: BLE001 - worked out again from the landings
+            logger.warning("Strike water: %s could not be read, so the fit is worked out again: %s",
+                           landings.FIT_FILE, e)
+            return
+        if isinstance(data, dict) and data.get("version") == landings.VERSION and list(data.get("grid") or []) \
+                == list(landings.GRID) and isinstance(data.get("landings"), list):
+            self.fit = data
+            # A landing whose window wasn't over is looked at again now.
+            if any(isinstance(e, dict) and e.get("why") == "waiting" for e in data["landings"]):
+                self._fit_recheck = time.monotonic()
+
+    def fit_state(self):
+        """For Figures (S2): the fit as strike_fit.json keeps it, or None before the first, and whether it's being
+        worked out."""
+        return dict(fit=self.fit, working=self._fitting is not None)
+
+    def _fit_check(self):
+        """Sets the fit's own worker on the landings when one was added, or its window is over, or the file changed."""
+        if self._fitting is not None:
+            if time.monotonic() - self._fitting["started"] < self.FIT_TIMEOUT_S:
+                return
+            logger.warning("Strike water: the fit for Figures took over an hour, so it is worked out again")
+            self.fitter.send({"kind": "cancel"})
+            self._fitting = None
+        path = self._landings_path()
+        key = landings.file_key(path)
+        if key is None:
+            return
+        fit = self.fit or {}
+        if fit.get("key") == key and (self._fit_recheck is None or time.monotonic() < self._fit_recheck):
+            return
+        self._fit_recheck = None
+        records = [r for r in landings.read_landings(path) if landings.usable_record(r)]
+        kept = {e.get("id"): e for e in fit.get("landings") or [] if isinstance(e, dict)}
+        todo = []
+        for record in records:
+            entry = kept.get(landings.landing_id(record)) or {}
+            # A probe at the coil's outlet can't tell the steel: no curves for it, only its readings.
+            curves = landings.probe_of(record) != "coil" and not (
+                isinstance(entry.get("mid"), list) and len(entry["mid"]) == len(landings.GRID))
+            if curves or entry.get("landed") is None:
+                todo.append(dict(record=record, curves=curves))
+        if not todo:
+            self._fit_take(records, key, [])
+            return
+        loop = asyncio.get_running_loop()
+        self._ids += 1
+        self._fitting = dict(id=self._ids, key=key, since=clock.now(), started=time.monotonic(), records=records)
+        sensors = {t["record"].get("sensor") for t in todo if t["record"].get("sensor")}
+        message = {"kind": "fit", "id": self._ids, "landings": todo, "logs": self._logs_folder()}
+        loop.create_task(self._send_fit(sensors, message))
+
+    async def _send_fit(self, sensors, message):
+        # The probe's readings of the last minute may still be waiting to be written: written first.
+        flush = getattr(getattr(self.cbpi, "log", None), "_flush_datalogger", None)
+        for sensor in sensors:
+            if callable(flush):
+                try:
+                    await flush(sensor)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("Strike water: could not write %s's readings first: %s", sensor, e)
+        self.fitter.send(message)
+
+    def _fit_heard(self, message):
+        try:
+            self._fit_answer(message)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Strike water: could not use the fit's answer: %s", e)
+
+    def _fit_answer(self, message):
+        job = self._fitting
+        if "exit" in message or "fatal" in message:
+            if "fatal" in message:
+                logger.warning("Strike water: the fit's worker failed: %s", message.get("fatal"))
+            if job is not None:
+                self._fitting = None
+                self._fit_recheck = time.monotonic() + self.FIT_RETRY_S
+            return
+        if job is None or message.get("id") != job["id"]:
+            return
+        self._fitting = None
+        self._fit_take(job["records"], job["key"], message.get("fit") or [])
+
+    def _fit_take(self, records, key, found):
+        """The landings' entries, kept ones with what the worker found added, and the fit across them, into
+        strike_fit.json."""
+        kept = {e.get("id"): e for e in (self.fit or {}).get("landings") or [] if isinstance(e, dict)}
+        got = {f.get("id"): f for f in found if isinstance(f, dict)}
+        now = clock.now()
+        entries, waiting = [], []
+        for record in records:
+            lid = landings.landing_id(record)
+            entry = dict(kept.get(lid) or {})
+            new = got.get(lid) or {}
+            unit = record["unit"]
+            probe = landings.probe_of(record)
+            entry.update(id=lid, t=record["t"], steps=list(record["steps"]), name=record.get("name"), unit=unit,
+                         strike=record["strike"], probe=probe, sensor=record.get("sensor"))
+            curves = new.get("curves")
+            if isinstance(curves, dict):
+                entry.update(mid=curves["mid"], lo0=curves["lo0"], hi0=curves["hi0"],
+                             next_min=curves.get("next_min"))
+            if new.get("error"):
+                entry["error"] = new["error"]
+            # A landing found once is kept: its probe's log rotates away within days.
+            if new.get("landed") is not None or entry.get("landed") is None:
+                entry["landed"] = new.get("landed")
+                entry["readings"] = new.get("readings", entry.get("readings"))
+            has_curves = all(isinstance(entry.get(k), list) and len(entry[k]) == len(landings.GRID)
+                             for k in ("mid", "lo0", "hi0"))
+            spread = (max(entry["mid"]) - min(entry["mid"])) / landings.per_f(unit) if has_curves else None
+            entry["spread"] = None if spread is None else round(spread * landings.per_f(unit), 3)
+            end = landings.window(record)[1]
+            late = entry.get("landed") is None and now < end + self.FIT_MARGIN_S
+            if late:
+                waiting.append(end + self.FIT_MARGIN_S)
+            if probe == "coil":
+                # It reads the wort leaving the coil, which PID_HERMS holds: not where the mash landed.
+                entry["why"] = "probe_at_coil"
+            elif not has_curves:
+                entry["why"] = "no_model"
+            elif entry.get("landed") is None:
+                entry["why"] = "waiting" if late else "no_readings"
+            elif spread < landings.BLIND_F:
+                entry["why"] = "blind"
+            else:
+                entry["why"] = None
+            entry["share"] = landings.best([entry])[0] if entry["why"] is None else None
+            entries.append(entry)
+        result = landings.fit(entries)
+        for entry in entries:
+            entry.update(result["landings"].get(entry["id"]) or dict(fit_mid=None, fit_lo=None, fit_hi=None,
+                                                                     off=None))
+        self.fit = dict(version=landings.VERSION, key=key, at=round(now, 3), grid=list(landings.GRID),
+                        window_min=list(landings.WINDOW_MIN), guess=landings.FIT_GUESS, value=result["value"],
+                        why=result["why"], brews=result["brews"], rms_f=result["rms_f"], edge=result["edge"],
+                        landings=entries)
+        try:
+            atomic_write_json(self._fit_path(), self.fit)
+        except Exception as e:  # noqa: BLE001 - kept in memory either way
+            logger.warning("Strike water: could not save %s: %s", landings.FIT_FILE, e)
+        if waiting:
+            low, high = self.FIT_RECHECK_S
+            wait = (min(waiting) - now) / max(clock.scale(), 1e-9)
+            self._fit_recheck = time.monotonic() + min(high, max(low, wait))
+        logger.info("Strike water: the tun's steel fitted to %d landing(s): %s", result["brews"],
+                    "%.0f %%" % (result["value"] * 100) if result["value"] is not None else result["why"])
+
+    def _plant_file(self):
+        """(The plant file's path, its contents as they are on the disk now, or what it holds until the rig is
+        measured further)."""
+        path = self.cbpi.config_folder.get_file_path(self.PLANT_FILE)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = default_plant_file()
+        if not isinstance(data, dict):
+            raise ValueError("%s doesn't hold an object" % self.PLANT_FILE)
+        return path, data
+
+    def set_measured(self, name, value, brews=None, method="figures"):
+        """One of the numbers the rig hadn't given, measured: config/strike_plant.json's guesses.<name>.measured =
+        {"value", "date" (CraftBeerPi's clock), "method", "brews"}, written whole, so read_plant fixes it at `value`,
+        and the strike water box works USE out again with it. For Figures' USE (C4).
+
+        Returns {"name", "measured", "before": the measured entry it replaced or None, "range": the guess's
+        {"low", "central", "high"} it had in the file, or the model's own}. Raises ValueError for a name that isn't
+        one of them, or a value that can't be one."""
+        guesses = model.default_guesses()
+        if name not in guesses:
+            raise ValueError("%r isn't one of the numbers the rig hasn't given" % (name,))
+        number = _number(value)
+        if number is None or (guesses[name].unit == "share" and not 0.0 < number <= 1.0):
+            raise ValueError("%r can't be %s" % (value, guesses[name].label))
+        if brews is not None and not _id_list(brews):
+            raise ValueError("brews must be a list of the brews' ids")
+        path, data = self._plant_file()
+        stated = data.setdefault("guesses", {})
+        entry = stated.get(name) if isinstance(stated.get(name), dict) else {}
+        before = entry.get("measured") if isinstance(entry.get("measured"), dict) else None
+        r = guesses[name]
+        shown = dict(low=_number(entry.get("low")), central=_number(entry.get("central")),
+                     high=_number(entry.get("high")))
+        shown = {k: (getattr(r, k) if v is None else v) for k, v in shown.items()}
+        measured = dict(value=number, date=datetime.datetime.fromtimestamp(clock.now()).isoformat(timespec="seconds"),
+                        method=str(method), brews=list(brews) if brews is not None else None)
+        stated[name] = dict(entry, measured=measured)
+        self._write_plant(path, data)
+        logger.info("Strike water: %s measured at %s (%s)", r.label, number, method)
+        return dict(name=name, measured=measured, before=before, range=shown)
+
+    def clear_measured(self, name):
+        """The number measured for `name` taken out of config/strike_plant.json, so it's a range again: Figures'
+        BACK TO (C4). Returns the measured entry taken out, or None when there was none."""
+        if name not in model.default_guesses():
+            raise ValueError("%r isn't one of the numbers the rig hasn't given" % (name,))
+        path, data = self._plant_file()
+        entry = (data.get("guesses") or {}).get(name)
+        if not isinstance(entry, dict) or "measured" not in entry:
+            return None
+        before = entry.pop("measured")
+        self._write_plant(path, data)
+        logger.info("Strike water: %s is a range again", model.default_guesses()[name].label)
+        return before if isinstance(before, dict) else None
+
+    def _write_plant(self, path, data):
+        atomic_write_json(path, data, indent=4)
+        self._plant_cache = None
+        # The box works USE out again with it at its next look, now when a loop runs.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self.update()
 
 
 def dataclass_fields(item):

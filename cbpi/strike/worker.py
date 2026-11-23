@@ -11,10 +11,14 @@ its stdin, answers on its stdout. Each message is an object with a "kind" and an
   that fails at "use" ends the job.
 - "forecast": one forecast without a search, for the cases given, answered at once as {"id", "forecast"}, even in
   the middle of a plan.
+- "fit": for Figures (S2), each landing given - {"record": a line of strike_landings.jsonl, "curves": whether its
+  model curves are wanted} - with the mash probe's average from the logs in "logs", answered as {"id", "fit": [...]}
+  (fit_landing). StrikeController sends these to a worker of their own, so a fit never holds up USE.
 - "cancel": drop the plan in hand. "stop": end.
 
-A newer "plan" replaces the one in hand: the worker looks at its inbox before every replay, answers a "forecast"
-there and then, and drops the plan in hand for a newer one. Its stdout carries nothing but these answers.
+A newer "plan" replaces the one in hand, and a newer "fit" the fit in hand: the worker looks at its inbox before every
+replay, answers a "forecast" there and then, and drops what it has in hand for a newer one. Its stdout carries nothing
+but these answers.
 """
 
 import importlib
@@ -28,7 +32,7 @@ import sys
 import threading
 import traceback
 
-from cbpi.strike import model
+from cbpi.strike import landings, model
 
 
 class Superseded(Exception):
@@ -110,6 +114,58 @@ def forecast_out(fc, roles):
             "high_f": fc.high_f, "highest_f": fc.highest_f, "reads_f": _number(fc.reads_f), "sims": fc.sims}
 
 
+def landing_curves(record, tick=None):
+    """For one landing, at each value of landings.GRID for the tun's steel, every other number at its central guess:
+    what the mash probe reads over landings.WINDOW_MIN after Next ("mid"), and the forecast's lowest and highest as the
+    malt goes in, from its central case and corners ("lo0", "hi0"), in the landing's unit. The model's Next is
+    next_min, at its central guess, after the malt."""
+    brew, rig, _, _ = job_from(record["job"])
+    dt = step_of(rig)
+    box = model.ranges(brew, rig.plant)
+    unit = record["unit"]
+    strike_f = landings.to_f(float(record["strike"]), unit)
+    next_min = box["next_min"].central
+    first, last = next_min + landings.WINDOW_MIN[0], next_min + landings.WINDOW_MIN[1]
+    mid, lo0, hi0 = [], [], []
+    for value in landings.GRID:
+        cases = model.quick_cases(model.known(box, landings.FIT_GUESS, value), [], None)
+        lands, middle = [], None
+        for name, params in cases.items():
+            if tick is not None:
+                tick()
+            run = model.simulate(brew, strike_f, params, rig, dt=dt)
+            lands.append(run.landing_f)
+            if name == "central":
+                middle = landings.window_average(run.probe_minutes, first, last)
+        mid.append(round(landings.from_f(middle, unit), 3))
+        lo0.append(round(landings.from_f(min(lands), unit), 3))
+        hi0.append(round(landings.from_f(max(lands), unit), 3))
+    return {"mid": mid, "lo0": lo0, "hi0": hi0, "next_min": next_min}
+
+
+def fit_landing(record, logs, curves=True, tick=None):
+    """One landing for the fit: {"id", "landed", "readings"} - the mash probe's average over its window from the
+    logs, None without enough readings - and, when wanted, "curves" (landing_curves), or "error" when its model
+    can't be run."""
+    out = {"id": landings.landing_id(record if isinstance(record, dict) else {})}
+    if not landings.usable_record(record):
+        out["error"] = "not a landing the fit can use"
+        return out
+    start, end = landings.window(record)
+    readings = landings.probe_readings(logs, record.get("sensor"), start, end)
+    landed = landings.landed_from(readings, start, end)
+    out["readings"] = len(readings)
+    out["landed"] = None if landed is None else round(landed, 3)
+    if curves:
+        try:
+            out["curves"] = landing_curves(record, tick)
+        except Superseded:
+            raise
+        except Exception as e:  # noqa: BLE001 - this landing has no curves; the others still count
+            out["error"] = _said(e)
+    return out
+
+
 class Worker:
 
     def __init__(self, inbox, send):
@@ -130,9 +186,15 @@ class Worker:
                     self.run_plan(message)
                 except Superseded as dropped:
                     self.later = dropped.then
+            elif kind == "fit":
+                try:
+                    self.run_fit(message)
+                except Superseded as dropped:
+                    self.later = dropped.then
 
     def tick(self):
-        """Before every replay of a plan: answer the forecasts waiting, and drop the plan for a newer one."""
+        """Before every replay of a plan or a fit: answer the forecasts waiting, and drop what is in hand for a newer
+        one."""
         while True:
             try:
                 message = self.inbox.get_nowait()
@@ -141,10 +203,19 @@ class Worker:
             kind = message.get("kind")
             if kind == "forecast":
                 self.answer_forecast(message)
-            elif kind in ("plan", "stop"):
+            elif kind in ("plan", "fit", "stop"):
                 raise Superseded(message)
             elif kind == "cancel":
                 raise Superseded(None)
+
+    def run_fit(self, message):
+        found = []
+        for item in message.get("landings") or []:
+            item = item if isinstance(item, dict) else {}
+            self.tick()
+            found.append(fit_landing(item.get("record"), message.get("logs"), curves=item.get("curves", True),
+                                     tick=self.tick))
+        self.send({"id": message.get("id"), "fit": found})
 
     def answer_forecast(self, message):
         try:
