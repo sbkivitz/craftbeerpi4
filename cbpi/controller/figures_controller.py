@@ -27,7 +27,7 @@ import aiohttp
 from cbpi.api import clock
 from cbpi.api.persist import atomic_write_json
 from cbpi.extension.hltpump import kettle_roles
-from cbpi.figures import ledger, plant
+from cbpi.figures import analysis, ledger, plant
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +194,8 @@ class FiguresController:
 
     STORE = "figures.json"
     CACHE = "figures_cache.json"
+    #: The last brews worked out, for the first request after a restart while they're worked out again.
+    LAST = "figures_last.json"
     LANDINGS = "strike_landings.jsonl"
     FIT = "strike_fit.json"
     TOPIC = "figures"
@@ -204,13 +206,25 @@ class FiguresController:
     ANALYSE_TIMEOUT_S = 1800.0
     GRAPH_TIMEOUT_S = 120.0
     GRAPH_POINTS = 600
+    #: Seconds a request waits for the brews being worked out before it's answered with the last ones and "working":
+    #: a person's wait, so real seconds, whatever the brewing clock's speed. The first time on a simulator's months of
+    #: archived runs takes minutes.
+    WAIT_S = 3.0
+    #: Seconds on the brewing clock with nothing heating, after something did, before a brew found only in the logs
+    #: has ended: stretches of heating less apart than this are one brew (cbpi.figures.analysis).
+    QUIET_S = analysis.BREW_GAP_S
+    #: How often the watch for that looks, on the brewing clock.
+    WATCH_S = 60.0
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.worker = WorkerClient()
         self._made = None
         self._working = None
+        self._waited = False
         self._days = {}
+        self._heated_at = None
+        self._watching = None
         app = getattr(cbpi, "app", None)
         if app is not None:
             app.on_cleanup.append(self._cleanup)
@@ -219,8 +233,11 @@ class FiguresController:
         steps = getattr(self.cbpi, "step", None)
         if steps is not None and hasattr(steps, "add_listener"):
             steps.add_listener(self._step_told)
+        self._watching = asyncio.create_task(self._watch())
 
     async def _cleanup(self, app=None):
+        if self._watching is not None:
+            self._watching.cancel()
         await asyncio.get_running_loop().run_in_executor(None, self.worker.stop)
 
     def _step_told(self, event, snapshot):
@@ -230,7 +247,41 @@ class FiguresController:
         steps = snapshot.get("steps") or []
         if steps and all(s.get("status") == "D" for s in steps):
             self._made = None
+            # Told now, so not again when the heating has been off long enough.
+            self._heated_at = None
             self._send("brew", None)
+
+    def _heating(self):
+        """Whether the HLT, the mash tun or the boil kettle is being heated now: its AUTO on, or its element."""
+        actors = getattr(self.cbpi, "actor", None)
+        for kettle in self._roles().values():
+            if kettle is None:
+                continue
+            if getattr(getattr(kettle, "instance", None), "state", False) is True:
+                return True
+            try:
+                element = actors.find_by_id(kettle.heater) if actors is not None and kettle.heater else None
+            except Exception:  # noqa: BLE001 - an element that can't be found isn't heating
+                element = None
+            if getattr(getattr(element, "instance", None), "state", False) is True:
+                return True
+        return False
+
+    async def _watch(self):
+        """A brew with no recipe running ends with no step to say so. Once something has heated and nothing has for
+        QUIET_S on the brewing clock - as long as the logs' brews are apart - the brew it was is over: screens are
+        told, as at the end of a recipe."""
+        while True:
+            await clock.sleep(self.WATCH_S)
+            try:
+                if self._heating():
+                    self._heated_at = clock.monotonic()
+                elif self._heated_at is not None and clock.monotonic() - self._heated_at >= self.QUIET_S:
+                    self._heated_at = None
+                    self._made = None
+                    self._send("brew", None)
+            except Exception as e:  # noqa: BLE001 - the watch carries on
+                logger.warning("Figures: could not tell whether a vessel is heating: %s", e)
 
     def _send(self, changed, figure):
         try:
@@ -458,6 +509,12 @@ class FiguresController:
             readings.append((t, stage, e))
             if t is not None and ledger.entry_celsius(e) is None:
                 probes.append({"key": e["entry_id"], "vessel": ledger.PROBE_FOR[stage], "t": t})
+            # When the HLT's level before the sparge was given, if BrewScribe kept it (level_before_at, from
+            # 0.1.0.dev56): the HLT's reading then stands for that level's temperature.
+            before = (e.get("data") or {}).get("level_before_at") if stage == "sparge_water" else None
+            before_t = c(_number(before) if _number(before) is not None else _seconds(before))
+            if before_t is not None and ledger.entry_celsius(e) is None:
+                probes.append({"key": e["entry_id"] + ledger.BEFORE, "vessel": "hlt", "t": before_t})
         window = None
         if c.matched and start is not None and end is not None:
             window = {"id": day["day_id"], "start": c(start), "end": c(end), "probes": probes}
@@ -474,13 +531,69 @@ class FiguresController:
             raise FiguresRefused(503, "failed", reason=str(e))
 
     async def brews(self, port, fresh=True):
-        """(the brews as GET /figures sends them, each brew's own record by id, and the answer's head). Worked out
-        again unless `fresh` is false and there's an answer already; two requests at once share one."""
-        if not fresh and self._made is not None:
-            return self._made
-        if self._working is None or self._working.done():
+        """((the brews as GET /figures sends them, each brew's own record by id, the answer's head, the job's
+        params), working). Worked out again, unless `fresh` is false and some are known; two requests at once share
+        the work. A request waits for it at most WAIT_S: then it has the last brews worked out - from before a restart
+        too (LAST) - or none, with working true, and the screens are told when the new ones are ready (the topic
+        figures, "worked")."""
+        working = self._working is not None and not self._working.done()
+        if not fresh:
+            made = self._made or self._kept()
+            if made is not None:
+                return made, working
+        if not working:
             self._working = asyncio.ensure_future(self._work(port))
-        return await asyncio.shield(self._working)
+            self._working.add_done_callback(self._worked)
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._working), self.WAIT_S), False
+        except asyncio.TimeoutError:
+            self._waited = True
+            return self._made or self._kept() or self._nothing_yet(), True
+
+    def _worked(self, task):
+        """The brews worked out: the screens a request answered "working" are told they're ready."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("Figures: the brews could not be worked out: %s",
+                           getattr(error, "more", None) or error)
+            self._waited = False
+            return
+        if self._waited:
+            self._waited = False
+            self._send("worked", None)
+
+    def _kept(self):
+        """The last brews worked out before a restart (LAST), or None."""
+        data = self._read_json(self.LAST, None)
+        if not isinstance(data, dict) or data.get("version") != self.VERSION:
+            return None
+        try:
+            made = (list(data["brews"]), dict(data["records"]), dict(data["head"]), dict(data["params"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+        self._made = made
+        return made
+
+    def _keep(self, made):
+        public, records, head, params = made
+        try:
+            atomic_write_json(self._path(self.LAST), {"version": self.VERSION, "brews": public, "records": records,
+                                                      "head": head, "params": params})
+        except Exception as e:  # noqa: BLE001 - kept in memory either way
+            logger.warning("Figures: could not keep the brews in %s: %s", self.LAST, e)
+
+    def _head(self, params, simulated, brewscribe):
+        unit = params["unit"]
+        return {"brewery": self.cbpi.config.get("BREWERY_NAME", None) or "CraftBeerPi", "simulated": simulated,
+                "unit": unit, "vol_unit": "L" if unit == "C" else "gal", "mass_unit": "kg" if unit == "C" else "lb",
+                "brewscribe": brewscribe, "as_of": None}
+
+    def _nothing_yet(self):
+        """No brews worked out yet: the answer's head, BrewScribe not asked yet (null)."""
+        params = self._params()
+        return [], {}, self._head(params, self._simulated(params), None), params
 
     async def _work(self, port):
         params = self._params()
@@ -552,10 +665,9 @@ class FiguresController:
                         for t, stage, e in plan["readings"] if t is not None]
             records[ident] = {"source": best_source, "brew": best, "landing": landing, "readings": readings}
         public.sort(key=lambda b: b["start"] if b["start"] is not None else -math.inf, reverse=True)
-        head = {"brewery": self.cbpi.config.get("BREWERY_NAME", None) or "CraftBeerPi", "simulated": simulated,
-                "unit": unit, "vol_unit": "L" if unit == "C" else "gal", "mass_unit": "kg" if unit == "C" else "lb",
-                "brewscribe": state}
+        head = dict(self._head(params, simulated, state), as_of=clock.now())
         self._made = (public, records, head, params)
+        await asyncio.get_running_loop().run_in_executor(None, self._keep, self._made)
         return self._made
 
     @staticmethod
@@ -592,9 +704,9 @@ class FiguresController:
 
     async def state(self, port, fresh=True):
         """GET /figures."""
-        public, _, head, params = await self.brews(port, fresh=fresh)
-        return dict({"version": self.VERSION, "now": clock.now(), "scale": clock.scale()}, **head, brews=public,
-                    figures=self.figures(public, head["unit"]))
+        (public, _, head, params), working = await self.brews(port, fresh=fresh)
+        return dict({"version": self.VERSION, "now": clock.now(), "scale": clock.scale()}, **head, working=working,
+                    brews=public, figures=self.figures(public, head["unit"]))
 
     # -- C2: one brew's graph ------------------------------------------------------------------------------------
 
@@ -603,13 +715,13 @@ class FiguresController:
     async def graph(self, brew_id, figure, port):
         if figure not in ledger.FIGURES:
             raise FiguresRefused(404, "no_figure")
-        public, records, head, params = await self.brews(port, fresh=False)
+        (public, records, head, params), working = await self.brews(port, fresh=False)
         record = records.get(brew_id)
         if record is None:
-            public, records, head, params = await self.brews(port)
+            (public, records, head, params), working = await self.brews(port)
             record = records.get(brew_id)
         if record is None:
-            raise FiguresRefused(404, "no_brew")
+            raise self._refuse(409, "working", public, head["unit"]) if working else FiguresRefused(404, "no_brew")
         brew = record["brew"]
         vessel = self.VESSEL_FOR[figure]
         start, end = brew.get("start"), brew.get("end")
@@ -666,8 +778,10 @@ class FiguresController:
         brews = body.get("brews") if isinstance(body, dict) else None
         if value is None or not isinstance(brews, list) or not all(isinstance(b, str) for b in brews):
             raise FiguresRefused(400, "bad_body")
-        public, _, head, _ = await self.brews(port)
+        (public, _, head, _), working = await self.brews(port)
         unit = head["unit"]
+        if working:
+            raise self._refuse(409, "working", public, unit)
         now = self.figures(public, unit)[figure]
         if figure == "hlt" and now["why_not"] == "brewstart_old":
             raise self._refuse(409, "brewstart_old", public, unit)
@@ -714,7 +828,7 @@ class FiguresController:
         value = _number(body.get("value")) if isinstance(body, dict) else None
         if value is None:
             raise FiguresRefused(400, "bad_body")
-        public, _, head, _ = await self.brews(port, fresh=False)
+        (public, _, head, _), _ = await self.brews(port, fresh=False)
         unit = head["unit"]
         store = self.store()
         record = store["in_use"].get(figure)
@@ -757,10 +871,12 @@ class FiguresController:
         leave = body.get("out") if isinstance(body, dict) else None
         if not isinstance(brew, str) or not isinstance(leave, bool):
             raise FiguresRefused(400, "bad_body")
-        public, _, head, _ = await self.brews(port, fresh=False)
+        (public, _, head, _), working = await self.brews(port, fresh=False)
         if not any(b["id"] == brew for b in public):
-            public, _, head, _ = await self.brews(port)
+            (public, _, head, _), working = await self.brews(port)
             if not any(b["id"] == brew for b in public):
+                if working:
+                    raise self._refuse(409, "working", public, head["unit"])
                 raise FiguresRefused(404, "no_brew")
         store = self.store()
         left = [b for b in store["out"].get(figure, []) if b != brew]

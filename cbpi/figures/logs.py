@@ -8,6 +8,10 @@ The probes log as `sensor_<sensor id>.log`; the brew-day graphs' change logs as 
 Where logs are: the live logs folder (source "now"), and each accelerated simulator run SimVessel moved into
 `archive/<time>-simulation/` when it ended (source <that folder's name>). An archived run never changes, so what is
 worked out from it is kept (worker.py).
+
+Rows a power cut stamped with the wrong time are left out by the charts' own rule (cbpi.api.logclock): the readings
+the rig took before NTP set its clock again, stamped up to hours early among older ones, would otherwise put a dip in a
+rest that never happened.
 """
 
 import glob
@@ -19,11 +23,14 @@ import time
 import numpy as np
 import pandas as pd
 
+from cbpi.api import logclock
+
 ARCHIVE = "archive"
 SIMULATION_SUFFIX = "-simulation"
 LIVE = "now"
 
 _EMPTY = (np.zeros(0), np.zeros(0))
+_EMPTY_FILE = (np.zeros(0), np.zeros(0), np.zeros(0))
 
 
 def log_files(folder, name):
@@ -100,31 +107,33 @@ def _local_seconds(naive):
 
 
 def _parse(raw):
-    """(times, values) from one log file's bytes: rows whose time or value can't be read are left out, as are the
-    NUL bytes a power cut leaves where the file had grown but the data never reached the card."""
+    """(stamps, times, values) from one log file's bytes, in the order written: the stamps as written (seconds, read
+    as UTC), the times they mean, and the values, NaN for one that can't be read - its stamp still says something
+    about the clock. Rows whose time can't be read are left out, as are the NUL bytes a power cut leaves where the
+    file had grown but the data never reached the card."""
     raw = raw.replace(b"\x00", b"")
     if not raw.strip():
-        return _EMPTY
+        return _EMPTY_FILE
     df = pd.read_csv(io.BytesIO(raw), names=["t", "v"], header=None, dtype=str, on_bad_lines="skip",
                      skip_blank_lines=True, engine="c")
     if df.empty:
-        return _EMPTY
+        return _EMPTY_FILE
     stamps = pd.to_datetime(df["t"], format="ISO8601", errors="coerce")
     values = pd.to_numeric(df["v"], errors="coerce").to_numpy(dtype=float)
-    ok = (~stamps.isna()).to_numpy() & np.isfinite(values)
+    ok = (~stamps.isna()).to_numpy()
     if not ok.any():
-        return _EMPTY
+        return _EMPTY_FILE
     naive = stamps[ok].dt.as_unit("ns").to_numpy().astype(np.int64) / 1e9
-    return _local_seconds(naive), values[ok]
+    return naive, _local_seconds(naive), values[ok]
 
 
 def read_file(path, cache=None):
-    """One log file's readings in the order written. `cache`, a dict, keeps files already read by their size and
-    time: a rotated file keeps both when it's renamed, so it isn't read again."""
+    """One log file's rows in the order written, as _parse gives them. `cache`, a dict, keeps files already read by
+    their size and time: a rotated file keeps both when it's renamed, so it isn't read again."""
     try:
         st = os.stat(path)
     except OSError:
-        return _EMPTY
+        return _EMPTY_FILE
     key = (os.path.basename(path).split(".log", 1)[0], st.st_size, st.st_mtime_ns)
     if cache is not None and key in cache:
         return cache[key]
@@ -133,20 +142,25 @@ def read_file(path, cache=None):
             raw = f.read()
         found = _parse(raw)
     except (OSError, ValueError, pd.errors.ParserError):
-        found = _EMPTY
+        found = _EMPTY_FILE
     if cache is not None:
         cache[key] = found
     return found
 
 
 def read_series(folder, name, cache=None):
-    """Every reading of `name`'s logs in `folder`, sorted by time: (times, values) as numpy arrays."""
+    """Every reading of `name`'s logs in `folder`, sorted by time: (times, values) as numpy arrays. The rows a clock
+    that went back and was put right stamped are left out, judged in the order the files were written, as the charts
+    judge them; then the values that can't be read."""
     parts = [read_file(path, cache) for path in log_files(folder, name)]
     parts = [p for p in parts if len(p[0])]
     if not parts:
         return _EMPTY
-    t = np.concatenate([p[0] for p in parts])
-    v = np.concatenate([p[1] for p in parts])
+    stamps = np.concatenate([p[0] for p in parts])
+    t = np.concatenate([p[1] for p in parts])
+    v = np.concatenate([p[2] for p in parts])
+    keep = ~logclock.misstamped(stamps) & np.isfinite(v)
+    t, v = t[keep], v[keep]
     order = np.argsort(t, kind="stable")
     return t[order], v[order]
 

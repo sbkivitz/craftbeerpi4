@@ -1,6 +1,7 @@
 """Figures from past brews (cbpi.figures): the brews found in logs, each figure's state, grain absorption, and the
 steps' numbers in the logs (BUILDERS.md C1, C3)."""
 
+import asyncio
 import datetime
 import os
 import shutil
@@ -9,8 +10,10 @@ import uuid
 
 import pytest
 
-from cbpi.api.dataclasses import Step
+from cbpi.api import clock
+from cbpi.api.dataclasses import Kettle, Props, Step
 from cbpi.api.step import StepState
+from cbpi.controller.figures_controller import FiguresController
 from cbpi.controller.step_controller import StepController
 from cbpi.figures import analysis, ledger
 
@@ -133,6 +136,28 @@ def test_a_rest_how_far_it_came_over_and_held(folder):
     assert brew["cells"]["hlt"] == {"none": "pump_on"}
 
 
+def test_readings_a_power_cut_misstamped_are_left_out(folder):
+    """The rig's clock goes back to the time it last saved when the power comes back, and NTP sets it right two
+    minutes later. The readings taken in those two minutes - the mash cooled to 150.5 F - are written stamped 90 s
+    before the cut, among the rest's own: left in, the rest would seem to have wandered 1.5 F."""
+    arrive = BASE + 600.0 + (152.0 - 60.0) / 1.5 * 60.0
+    cut = arrive + 2400.0
+    back = cut + 70 * 60.0
+
+    def m(t):
+        return 60.0 + (t - BASE - 600.0) / 60.0 * 1.5 if BASE + 600.0 <= t < arrive else (60.0 if t < arrive else 152.0)
+
+    before = series(BASE, cut, m)
+    misstamped = series(cut - 90.0, cut + 30.0, lambda t: 150.5)
+    after = series(back, back + 1800.0, lambda t: min(168.0, 152.0 + (t - back) / 60.0))
+    write(folder, "M", before + misstamped + after)
+    write(folder, "H", series(BASE, back + 1800.0, lambda t: 60.0))
+    write(folder, "B", series(BASE, back + 1800.0, lambda t: 60.0))
+    rest = analysis.analyse(folder, PARAMS)["brews"][0]["cells"]["mash"]["rests"][0]
+    assert rest["target"] == 152.0
+    assert rest["held"] == 0.0 and rest["over"] == 0.0
+
+
 def test_brews_less_than_three_hours_apart_are_one(folder):
     mash_rest(folder, BASE, 0.2)
     mash_rest(folder, BASE + 4 * 3600 + 1800, 0.2)
@@ -250,6 +275,16 @@ def test_grain_absorption_takes_a_probes_reading_for_a_volume_without_its_temper
     assert cell["sparge_before"] == pytest.approx(ledger.at_68(9.9, (168.0 - 32) * 5 / 9), abs=0.005)
 
 
+def test_the_level_before_the_sparge_at_the_hlts_reading_when_it_was_given():
+    found = ledger.volumes([volume("f", "strike_water", 15.0, 68.0),
+                            volume("s", "sparge_water", 5.4, None, level_before=9.9,
+                                   level_before_at="2026-11-23T09:00:00-08:00"),
+                            volume("p", "pre_boil", 8.6, 68.0)])
+    cell = ledger.grain_cell(found, {"s": 150.0, "s" + ledger.BEFORE: 168.0}, {"grain_kg": 6.0}, "F")
+    assert cell["sparge_before"] == pytest.approx(ledger.at_68(9.9, (168.0 - 32) * 5 / 9), abs=0.005)
+    assert cell["sparge"] == pytest.approx(ledger.at_68(5.4, (150.0 - 32) * 5 / 9), abs=0.005)
+
+
 def test_grain_absorption_says_why_not():
     fill, pre = volume("f", "strike_water", 15.0), volume("p", "pre_boil", 8.6)
     no_levels = ledger.volumes([fill, volume("s", "sparge_water", 5.4), pre])
@@ -279,3 +314,45 @@ def test_the_active_step_is_logged_each_time_it_changes():
     controller.profile[1].status = StepState.DONE
     controller.push_udpate()
     assert logged == [("steps.active", 2), ("steps.active", 0)]
+
+
+class Heating:
+    """The HLT's AUTO, on or off."""
+
+    def __init__(self):
+        self.state = False
+
+
+def test_a_brew_with_no_recipe_tells_the_screens_once_heating_has_stopped_for_three_hours():
+    heating = Heating()
+    sent = []
+    hlt = Kettle(id="hk", name="HLT", type="PIDBoil", sensor="H", heater="he", instance=heating, props=Props({}))
+    cbpi = types.SimpleNamespace(
+        app=None, ws=types.SimpleNamespace(send=sent.append),
+        kettle=types.SimpleNamespace(types={}, data=[hlt]), config=types.SimpleNamespace(get=lambda k, d=None: d),
+        actor=types.SimpleNamespace(find_by_id=lambda i: None))
+    controller = FiguresController(cbpi)
+    virtual = clock.VirtualTimeSource()
+    previous = clock.set_source(virtual)
+
+    async def go():
+        start = virtual.now()
+        watch = asyncio.create_task(controller._watch())
+        heating.state = True
+        await virtual.run(until=start + 3600.0)
+        heating.state = False
+        await virtual.run(until=start + 3600.0 + analysis.BREW_GAP_S - 120.0)
+        quiet = list(sent)
+        await virtual.run(until=start + 3600.0 + analysis.BREW_GAP_S + 120.0)
+        told = list(sent)
+        await virtual.run(until=start + 3600.0 + 3 * analysis.BREW_GAP_S)
+        watch.cancel()
+        return quiet, told, list(sent)
+
+    try:
+        quiet, told, later = asyncio.run(go())
+    finally:
+        clock.set_source(previous)
+    assert quiet == []
+    assert told == [{"topic": "figures", "data": {"changed": "brew", "figure": None}}]
+    assert later == told

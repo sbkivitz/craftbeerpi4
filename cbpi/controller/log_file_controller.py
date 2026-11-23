@@ -18,6 +18,7 @@ import pandas as pd
 import shortuuid
 from cbpi.api import *
 from cbpi.api import clock as sim_clock
+from cbpi.api import logclock
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from urllib3 import PoolManager, Timeout
@@ -220,13 +221,13 @@ class LogController:
         return "{}ms".format(max(100, int(seconds * 1000)))
 
     # A step back in a log's timestamps bigger than this is the clock being
-    # changed, not two readings racing each other.
-    CLOCK_BACK_TOLERANCE_S = 2.0
+    # changed, not two readings racing each other (cbpi.api.logclock).
+    CLOCK_BACK_TOLERANCE_S = logclock.BACK_TOLERANCE_S
 
     # How long a clock that went back may run before it is put right, measured
     # on that clock. After a power cut, NTP sets the rig's clock about two
     # minutes after it boots.
-    CLOCK_FIX_WITHIN_S = 900.0
+    CLOCK_FIX_WITHIN_S = logclock.FIX_WITHIN_S
 
     def _log_files_oldest_first(self, name):
         """A sensor's log files in the order they were written.
@@ -300,50 +301,14 @@ class LogController:
         Left out rather than restamped: their true time is known only to about
         a reading interval, and a chart missing two minutes is honest where one
         with two guessed minutes is not.
+
+        The rule is cbpi.api.logclock's, which Figures reads the logs by too.
         """
-        n = len(times)
-        drop = np.zeros(n, dtype=bool)
-        if n < 2:
-            return drop
+        if len(times) < 2:
+            return np.zeros(len(times), dtype=bool)
         s = (pd.to_datetime(times).to_numpy(dtype="datetime64[ns]")
              .astype("int64") / 1e9)
-        tol = self.CLOCK_BACK_TOLERANCE_S
-
-        def next_step_back(start, latest):
-            if start >= n:
-                return None
-            run = np.maximum.accumulate(np.concatenate(([latest], s[start:])))
-            behind = np.nonzero(run[:-1] - s[start:] > tol)[0]
-            if behind.size == 0:
-                return None
-            k = int(behind[0])
-            return start + k, float(run[k])
-
-        found = next_step_back(0, -np.inf)
-        if found is None:
-            return drop  # nearly every log: the clock never went back
-        steps = np.diff(s)
-        positive = steps[steps > 0]
-        usual = float(np.median(positive)) if positive.size else 0.0
-
-        while found is not None:
-            i, latest = found
-            lost = latest - s[i]
-            fixed_at = None
-            for k in range(i + 1, n):
-                if (s[k] - s[k - 1]) - usual >= lost - tol and s[k] > latest:
-                    fixed_at = k
-                    break
-                if s[k] - s[i] > self.CLOCK_FIX_WITHIN_S:
-                    break
-            if fixed_at is None:
-                # The clock that went back was right: keep its rows, and judge
-                # what follows by it.
-                found = next_step_back(i + 1, s[i])
-            else:
-                drop[i:fixed_at] = True
-                found = next_step_back(fixed_at, latest)
-        return drop
+        return logclock.misstamped(s, self.CLOCK_BACK_TOLERANCE_S, self.CLOCK_FIX_WITHIN_S)
 
     def _read_sensor_log(self, name, column):
         """Every reading in a sensor's logs, indexed by time and sorted, with

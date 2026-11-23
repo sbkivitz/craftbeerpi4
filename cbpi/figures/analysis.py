@@ -23,7 +23,7 @@ import numpy as np
 from cbpi.figures import logs
 
 #: Changes whenever what this works out changes, so results kept from an earlier version are worked out again.
-VERSION = 1
+VERSION = 2
 
 HEAT_RISE_F = 15.0
 HEAT_RATE_F = 0.5

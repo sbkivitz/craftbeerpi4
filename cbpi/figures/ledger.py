@@ -119,12 +119,16 @@ def entry_celsius(entry):
 
 #: Which probe stands for a volume's temperature when its entry has none.
 PROBE_FOR = {"strike_water": "hlt", "sparge_water": "hlt", "pre_boil": "boil"}
+#: The probes' key for the HLT's reading when its level before the sparge was given (a sparge_water entry's
+#: level_before_at, BrewScribe 0.1.0.dev56): <entry id> + BEFORE.
+BEFORE = ":level_before"
 
 
 def grain_cell(found, probes, recipe, unit):
     """A brew's grain absorption from BrewScribe's volumes (`found`, volumes()), the probes' readings at their times
-    (`probes`, {entry id: reading in the brewery's unit}) and the recipe's mash numbers. Every volume is taken as at
-    68 F before it's added or subtracted. The strike is the HLT's fill less its level before the sparge."""
+    (`probes`, {entry id: reading in the brewery's unit}, and the HLT's when its level before the sparge was given,
+    under <entry id> + BEFORE) and the recipe's mash numbers. Every volume is taken as at 68 F before it's added or
+    subtracted. The strike is the HLT's fill less its level before the sparge."""
     fill, sparge, pre = (found.get(s) for s in ("strike_water", "sparge_water", "pre_boil"))
     if not (fill and sparge and pre):
         return {"none": "no_volumes"}
@@ -135,18 +139,22 @@ def grain_cell(found, probes, recipe, unit):
         return {"none": "no_grain_weight"}
     dead_l = number((recipe or {}).get("lauter_dead_l")) or 0.0
 
-    def celsius(entry, stage):
+    def celsius(entry, field):
         own = entry_celsius(entry)
         if own is not None:
             return own
-        reading = number((probes or {}).get(entry.get("entry_id")))
+        reading = None
+        if field == "level_before":
+            reading = number((probes or {}).get(str(entry.get("entry_id")) + BEFORE))
+        if reading is None:
+            reading = number((probes or {}).get(entry.get("entry_id")))
         if reading is None:
             return None
         return (reading - 32.0) * 5.0 / 9.0 if unit == "F" else reading
 
     def litres(entry, field="value"):
         data = entry["data"]
-        return at_68(to_litres(number(data[field]), data["unit"]), celsius(entry, data["measurement_stage"]))
+        return at_68(to_litres(number(data[field]), data["unit"]), celsius(entry, field))
 
     hlt_fill = litres(fill)
     sparge_before = litres(sparge, "level_before")

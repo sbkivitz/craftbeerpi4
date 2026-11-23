@@ -228,7 +228,23 @@ def stand_in(root, simulated=True, grain_kg=None, settings=None):
     cbpi.register = lambda obj, url_prefix=None, static=None: CraftBeerPi.register_http_endpoints(
         cbpi, obj, url_prefix, static)
     cbpi.figures = FiguresController(cbpi)
+    # Every request waits for the brews here; working_at_once() checks the answer given while they're worked out.
+    cbpi.figures.WAIT_S = 120.0
     cbpi.http_figures = FiguresHttpEndpoints(cbpi)
+    return cbpi
+
+
+def slow(cbpi, seconds=2.0, wait=0.3):
+    """The stand-in's brews taking `seconds` longer to work out, and a request waiting `wait` for them."""
+    analyse = cbpi.figures._analyse
+
+    async def slower(job, timeout):
+        if job.get("kind") == "analyse":
+            await asyncio.sleep(seconds)
+        return await analyse(job, timeout)
+
+    cbpi.figures._analyse = slower
+    cbpi.figures.WAIT_S = wait
     return cbpi
 
 
@@ -504,6 +520,20 @@ def test_brewscribe_days_and_grain_absorption(root):
     assert late["brewscribe"] == "no_answer" and all(x["id"].startswith("log:") for x in late["brews"])
 
 
+def test_the_hlt_is_read_when_its_level_before_the_sparge_was_given(root):
+    def entry(eid, at, **more):
+        data = dict({"vessel": "HLT", "measurement_stage": "sparge_water", "value": 5.4, "unit": "us_gal"}, **more)
+        return {"entry_id": eid, "kind": "volume", "occurred_at": at, "received_at": at, "data": data}
+
+    figures = stand_in(root, simulated=False).figures
+    for given, want in (("2026-11-23T09:00:00+00:00", 1795424400.0), (None, None), ("not a time", None)):
+        more = {"level_before": 9.9} if given is None else {"level_before": 9.9, "level_before_at": given}
+        day = {"day_id": "d", "entries": [entry("s", "2026-11-23T10:00:00+00:00", **more)]}
+        probes = figures._day_plan(day, False)["window"]["probes"]
+        assert probes[0] == {"key": "s", "vessel": "hlt", "t": 1795428000.0}
+        assert probes[1:] == ([{"key": "s:level_before", "vessel": "hlt", "t": want}] if want else [])
+
+
 def test_strike_use_writes_the_plant_file(root):
     logs = Logs(root / "logs")
     a = brew(logs, BASE, 0.84, 2.0, 0.3)
@@ -555,3 +585,42 @@ def test_a_rigs_heat_up_needs_brewstarts_record(root):
     h = brews[1]["cells"]["hlt"]
     assert h["eff"] == pytest.approx(0.86, abs=0.004) and h["planned_by"] == "brewstart" and h["planned"] == 30.0
     assert h["early"] == pytest.approx((BASE + DAY + 3000 - b["ready"]) / 60, abs=0.2)
+
+def test_the_first_request_answers_at_once_while_the_brews_are_worked_out(root):
+    ids, a = four_brews(root)
+    two = [ids["b"], ids["a"]]
+
+    async def until_worked(cbpi):
+        for _ in range(300):
+            if {"changed": "worked", "figure": None} in topics(cbpi):
+                return True
+            await asyncio.sleep(0.1)
+        return False
+
+    async def first():
+        cbpi = slow(stand_in(root))
+        cbpi.config.register("BREWSTART_EFFICIENCY", "")
+        async with Server(cbpi) as s:
+            early = await s.call("/figures/")
+            use = await s.call("/figures/hlt/use", {"value": 0.85, "brews": two}, "POST")
+            told = await until_worked(cbpi)
+            cbpi.figures.WAIT_S = 120.0
+            late = await s.call("/figures/")
+            return early, use, told, late
+
+    early, use, told, late = run(first())
+    assert early[0] == 200 and early[1]["working"] is True and early[1]["brews"] == []
+    assert early[1]["brewscribe"] is None and early[1]["as_of"] is None and early[1]["brewery"] == "Test Brewery"
+    assert early[1]["figures"]["hlt"]["state"] == "none"
+    assert (use[0], use[1]["error"]) == (409, "working") and "figures" in use[1]
+    assert told
+    assert late[1]["working"] is False and len(late[1]["brews"]) == 4 and isinstance(late[1]["as_of"], float)
+
+    async def after_restart():
+        cbpi = slow(stand_in(root))
+        async with Server(cbpi) as s:
+            return await s.call("/figures/")
+
+    status, kept = run(after_restart())
+    assert kept["working"] is True and [b["id"] for b in kept["brews"]] == [b["id"] for b in late[1]["brews"]]
+    assert kept["as_of"] == late[1]["as_of"] and kept["brewscribe"] == "none"
