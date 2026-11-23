@@ -112,7 +112,7 @@ class UploadHttpEndpoints:
         """
 
         ---
-        description: Keep the recipe with this id from the uploaded BeerXML file in the Recipe Book. The brew steps are left as they are
+        description: Keep the recipe with this id from the uploaded BeerXML file in the Recipe Book, with a BeerXML file of its own (basic data source_xml, source_xml_recipe). The brew steps are left as they are
         tags:
         - Upload
         parameters:

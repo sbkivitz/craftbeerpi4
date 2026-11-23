@@ -122,9 +122,62 @@ class KettleHttpEndpoints:
             agitator=data.get("agitator"),
             props=Props(data.get("props", {})),
             type=data.get("type"),
+            **self.controller.measures(data),
         )
         response_data = await self.controller.add(kettle)
         return web.json_response(data=response_data.to_dict())
+
+    @request_mapping(path="/{id}/vessel", method="PUT", auth_required=False)
+    async def http_vessel(self, request):
+        """
+        ---
+        description: "Save only what a kettle measures: capacity, empty_weight, material and specific_heat. Each
+          field the body has is saved, null clearing it; one it leaves out stays. Nothing else changes, and the
+          kettle's AUTO goes on as it was, unlike PUT /kettle/{id}, which stops it."
+        tags:
+        - Kettle
+        parameters:
+        - name: "id"
+          in: "path"
+          description: "Kettle ID"
+          required: true
+          type: "string"
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            properties:
+              capacity:
+                type: number
+              empty_weight:
+                type: number
+              material:
+                type: string
+              specific_heat:
+                type: number
+        responses:
+            "200":
+                description: the kettle, as GET /kettle/ lists it
+            "400":
+                description: "the body isn't a JSON object: error bad_body, detail"
+            "404":
+                description: no such kettle
+        """
+        id = request.match_info["id"]
+        try:
+            data = await request.json()
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            return web.json_response(status=400, data={
+                "error": "bad_body",
+                "detail": "Send the measurements to save: {\"capacity\", \"empty_weight\", \"material\", "
+                          "\"specific_heat\"}, any of them."})
+        item = await self.controller.save_measures(id, data)
+        if item is None:
+            return _no_kettle(id)
+        return web.json_response(data=item.to_dict())
 
     @request_mapping(path="/{id}", method="PUT", auth_required=False)
     async def http_update(self, request):
@@ -153,6 +206,18 @@ class KettleHttpEndpoints:
                 type: string
               config:
                 props: object
+              capacity:
+                type: number
+                description: "How much it holds: gal on a F brewery, L on a C one. Null for unknown; left out, kept"
+              empty_weight:
+                type: number
+                description: "What it weighs empty: lb on a F brewery, kg on a C one. Null for unknown; left out, kept"
+              material:
+                type: string
+                description: "stainless_steel, aluminium or other. Null for unknown; left out, kept"
+              specific_heat:
+                type: number
+                description: "With other, cal/g.C, as BeerSmith's TUN_SPECIFIC_HEAT. Null for unknown; left out, kept"
         responses:
             "200":
                 description: successful operation
@@ -167,6 +232,7 @@ class KettleHttpEndpoints:
             agitator=data.get("agitator"),
             props=Props(data.get("props", {})),
             type=data.get("type"),
+            **self.controller.measures(data, kept=self.controller.find_by_id(id)),
         )
         return web.json_response(data=(await self.controller.update(kettle)).to_dict())
 

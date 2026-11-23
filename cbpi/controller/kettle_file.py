@@ -22,6 +22,12 @@ now, one the file has empty, or any the file leaves out of a new kettle - is
 listed in the plan's "blank", with the value the logic uses for it when it is
 empty (CBPiKettleLogic.blank_defaults). Planned with fill, those values are
 filled in instead: they show as changes, and loading saves them.
+
+What the kettle measures (cbpi.api.kettle_measures: capacity, empty weight,
+material, specific heat) goes in the file's "measurements" when the kettle has
+any. Loading a file with them sets each one it has; one it leaves out stays as
+it is. A file without them - every file saved before they existed - plans and
+loads exactly as it did, and an odd value in one never refuses the file.
 """
 
 import hashlib
@@ -30,7 +36,7 @@ import math
 import re
 from datetime import datetime
 
-from cbpi.api import clock
+from cbpi.api import clock, kettle_measures
 
 FORMAT = "CraftBeerPi kettle settings"
 VERSION = 1
@@ -136,6 +142,10 @@ def export(kettle, types, things, version):
     for key, _word, kind in LINKS:
         data[key] = _link(getattr(kettle, key, None), things.get(kind))
     data["setting_links"] = setting_links
+    # Only what the kettle has: a kettle without measurements makes the file it always made.
+    measured = kettle_measures.of(kettle)
+    if measured:
+        data["measurements"] = measured
     return data
 
 
@@ -212,6 +222,7 @@ def parse(text):
         raise KettleFileError("This kettle settings file can't be read: its setting_links aren't names and links.")
     saved_by = data.get("craftbeerpi")
     saved = data.get("saved")
+    measured = data.get("measurements")
     return {
         "format_version": version,
         "craftbeerpi": saved_by if isinstance(saved_by, str) else None,
@@ -224,6 +235,11 @@ def parse(text):
         "setting_links": {
             str(label): _parse_link(link, "link for {}".format(label)) for label, link in setting_links.items()
         },
+        # Only the measurements the file has, each as kettle.json would keep it; never a reason to refuse a file.
+        "measurements": {
+            field: kettle_measures.stored(field, measured[field])
+            for field in kettle_measures.FIELDS if field in measured
+        } if isinstance(measured, dict) else {},
     }
 
 
@@ -447,7 +463,7 @@ def _link_row(key, word, kind, now, wanted, items):
 def _record(kettle):
     if kettle is None:
         return None
-    return {
+    record = {
         "name": kettle.name,
         "type": kettle.type or None,
         "props": _props(kettle),
@@ -456,6 +472,10 @@ def _record(kettle):
         "agitator": getattr(kettle, "agitator", None) or None,
         "props_by_type": getattr(kettle, "props_by_type", None) or {},
     }
+    measured = kettle_measures.of(kettle)
+    if measured:
+        record["measurements"] = measured
+    return record
 
 
 def token(before, after):
@@ -598,15 +618,24 @@ def plan(current, data, types, things, defaults=None, fill=False):
         "heater": after_links["heater"],
         "agitator": after_links["agitator"],
     }
+    # The measurements the file has (kettle_measures), each changing what the kettle has; one it leaves out stays.
+    # A file without any plans exactly as before.
+    measures = []
+    for field, value in (data.get("measurements") or {}).items():
+        now = getattr(current, field, None) if current is not None else None
+        measures.append({"field": field, "now": now, "after": value, "changes": now != value})
+    if measures:
+        after["measurements"] = {m["field"]: m["after"] for m in measures}
     logic_row = {"now": now_type, "after": logic, "changes": now_type != logic, "note": None}
     if logic_row["changes"] and now_type:
         logic_row["note"] = "{}'s settings are put aside on this kettle, for switching back.".format(now_type)
-    changes = sum(1 for r in rows if r["changes"]) + sum(1 for r in links if r["changes"]) + int(logic_row["changes"])
+    changes = (sum(1 for r in rows if r["changes"]) + sum(1 for r in links if r["changes"]) + int(logic_row["changes"])
+               + sum(1 for m in measures if m["changes"]))
     other = (
         current is not None and bool(data["kettle"]) and bool(current.name)
         and _norm(data["kettle"]) != _norm(current.name)
     )
-    return {
+    result = {
         "kettle": None if current is None else {"id": current.id, "name": current.name},
         "file": {
             "kettle": data["kettle"],
@@ -628,3 +657,6 @@ def plan(current, data, types, things, defaults=None, fill=False):
         "after": after,
         "token": token(_record(current), after),
     }
+    if measures:
+        result["measurements"] = measures
+    return result

@@ -1901,7 +1901,8 @@ class StepController:
         From the Recipe Book (RecipeController.brew), `book_file` is the book recipe's file, and `book_modified` its
         modified time as it was read: both kept in the basic data, with when it was loaded (BOOK_FILE_KEY,
         LOADED_AT_KEY, BOOK_MODIFIED_KEY). Whatever `data` holds of another brew (BREW_KEYS) goes, so a new brew
-        starts with nothing answered.
+        starts with nothing answered. The recipe's own basic data comes with it: a BeerXML import's file and its
+        recipe's name too (SOURCE_KEYS).
         """
         self._refuse_while_running("Recipe not loaded", self.LOAD_WHILE_RUNNING)
         try:
@@ -2015,6 +2016,15 @@ class StepController:
     #: What belongs to this brew of the steps rather than to the recipe.
     BREW_KEYS = BOOK_KEYS + (GRAIN_PLACE_KEY,)
 
+    #: In the basic data of a book recipe imported from BeerXML, and of the brew steps loaded from it: the BeerXML
+    #: file the book keeps for it, and the NAME of the recipe in that file (RecipeController.SOURCE_KEYS). LOAD
+    #: brings them with the recipe, and the brew steps keep them, through SAVE TO BOOK too: they say which file
+    #: these steps came from. The book's are the book's: book_data() leaves them out, so a new book recipe has
+    #: none, and SAVE TO BOOK in place of a recipe keeps the ones it has (savetobook).
+    SOURCE_XML_KEY = "source_xml"
+    SOURCE_XML_RECIPE_KEY = "source_xml_recipe"
+    SOURCE_KEYS = (SOURCE_XML_KEY, SOURCE_XML_RECIPE_KEY)
+
     #: A BrewStart, and how Brew Day gives its day for one brew: as a date (Mode Date; DateTime in older forms). The
     #: Recipe Book gets it as Tomorrow, at the same time (book_data).
     BREWSTART_TYPE = "BrewStart"
@@ -2026,9 +2036,11 @@ class StepController:
 
         What SAVE TO BOOK writes. Not the mash pH reminder, which belongs to
         this brew; not which book recipe the steps are a copy of, or when they
-        were loaded, or where tonight's grain spent the night (BREW_KEYS); and
-        not where an import came from: a copy the brewer saves is the
-        brewer's own, and an import of the same name never replaces it
+        were loaded, or where tonight's grain spent the night (BREW_KEYS); not
+        the BeerXML file a book recipe was imported with (SOURCE_KEYS), which
+        savetobook gives back to a recipe replaced in place; and not where an
+        import came from: a copy the brewer saves is the brewer's own, and an
+        import of the same name never replaces it
         (RecipeController.keep_import).
 
         Nor three things Brew Day sets in the steps for one brew, which go in
@@ -2044,6 +2056,8 @@ class StepController:
         basic = copy.deepcopy(self.basic_data)
         basic.pop(self.MASH_PH_REMINDER_KEY, None)
         basic.pop(self.IMPORTED_FROM_KEY, None)
+        for key in self.SOURCE_KEYS:
+            basic.pop(key, None)
         for key in self.BREW_KEYS:
             basic.pop(key, None)
         steps = list(map(lambda item: item.to_dict(), self.profile))
@@ -2088,12 +2102,28 @@ class StepController:
                 and not file.startswith(".") and os.path.basename(file) == file
                 and "/" not in file and "\\" not in file)
 
+    @classmethod
+    def _book_source(cls, path):
+        """{source_xml, source_xml_recipe} as the book recipe at `path` has them (SOURCE_KEYS), or {}."""
+        try:
+            with open(path) as file:
+                basic = (yaml.load(file, Loader=yaml.FullLoader) or {}).get("basic") or {}
+        except Exception:  # noqa: BLE001 - the recipe is then saved without them
+            logging.exception("SAVE TO BOOK: could not read %s to keep its BeerXML file", path)
+            return {}
+        if not isinstance(basic, dict):
+            return {}
+        return {key: basic[key] for key in cls.SOURCE_KEYS if key in basic}
+
     async def savetobook(self, file=None, name=None):
         """Keep the brew steps in the Recipe Book (book_data). -> the book file's id.
 
         - `file`: in place of that book recipe, named as the steps are;
         - `name`: as a new book recipe of that name, which the steps are then called too;
         - neither: as a new book recipe named as the steps are, as SAVE TO BOOK always did.
+
+        A recipe replaced in place keeps the BeerXML file it was imported with (SOURCE_KEYS); a new one has none.
+        The brew steps keep theirs either way.
 
         With `file` or `name`, the steps then know which book recipe they are a copy of (BOOK_FILE_KEY,
         BOOK_MODIFIED_KEY), saved and sent to every page on mash_profile_update. Raises BookRefused, changing
@@ -2122,6 +2152,7 @@ class StepController:
             path = self.cbpi.config_folder.get_recipe_file_by_id(book_id)
             if not os.path.isfile(path):
                 raise BookRefused(404, "not_in_book", detail=self.NOT_IN_BOOK, file=book_id)
+            data["basic"].update(self._book_source(path))
         else:
             if not isinstance(name, str) or not name.strip():
                 raise BookRefused(400, "bad_body", detail=self.NEEDS_A_NAME)

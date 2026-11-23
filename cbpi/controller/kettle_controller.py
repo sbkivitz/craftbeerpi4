@@ -3,7 +3,7 @@ import logging
 import math
 from collections.abc import Mapping
 
-from cbpi.api import clock
+from cbpi.api import clock, kettle_measures
 from cbpi.api.dataclasses import Kettle, Props
 from cbpi.controller import kettle_file
 from cbpi.controller.basic_controller2 import BasicController
@@ -83,7 +83,32 @@ class KettleController(BasicController):
             agitator=data.get("agitator"),
             target_temp=data.get("target_temp", 0),
             props_by_type=self._stored_settings(data.get("props_by_type")),
+            **self.measures(data),
         )
+
+    @staticmethod
+    def measures(data, kept=None):
+        """{field: value} of the kettle measurements (kettle_measures.FIELDS) in `data`, as kettle.json keeps them
+        (kettle_measures.stored). One `data` doesn't have is the kettle `kept`'s, or blank: a kettle saved by a page
+        that doesn't know them keeps its own. Never raises: an odd value is kept as given, or blank."""
+        data = data if isinstance(data, Mapping) else {}
+        return {
+            field: kettle_measures.stored(field, data[field]) if field in data else getattr(kept, field, None)
+            for field in kettle_measures.FIELDS
+        }
+
+    async def save_measures(self, id, data):
+        """Save only what kettle `id` measures, from `data` (PUT /kettle/{id}/vessel): each field it has, as
+        measures() keeps it; one it leaves out stays. Nothing else about the kettle changes, and its logic is
+        neither stopped nor started, unlike update(): AUTO goes on heating as it was, so a pot's size can be put
+        right mid-brew. Saved and sent to every page. -> the kettle, or None for an unknown id."""
+        item = self.find_by_id(id)
+        if item is None:
+            return None
+        for field, value in self.measures(data, kept=item).items():
+            setattr(item, field, value)
+        await self.save()
+        return item
 
     @staticmethod
     def _stored_settings(value):
@@ -530,5 +555,6 @@ class KettleController(BasicController):
             agitator=after["agitator"],
             target_temp=item.target_temp,
             props_by_type=dict(getattr(item, "props_by_type", None) or {}),
+            **self.measures(after.get("measurements"), kept=item),
         ))
         return loaded, result

@@ -77,6 +77,38 @@ def atomic_write_text(path, text, encoding="utf-8"):
                 pass
 
 
+def atomic_write_bytes(path, content):
+    """Replace `path` with the bytes `content`, atomically, as atomic_write_text does with text: a sibling
+    temporary file, forced to disk, renamed over the target; skipped when the file already holds them."""
+    path = str(path)
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+
+    try:
+        with open(path, "rb") as existing:
+            if existing.read() == content:
+                return
+    except OSError:
+        pass
+
+    fd, tmp = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 def atomic_write_json(path, data, **dump_kwargs):
     """Serialise `data` to `path` atomically.
 

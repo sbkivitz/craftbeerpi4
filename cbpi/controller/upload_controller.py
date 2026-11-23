@@ -17,6 +17,7 @@ import aiohttp
 import yaml
 from aiohttp import web
 from cbpi.api import *
+from cbpi.api import beerxml, kettle_measures
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import (Actor, Kettle, NotificationAction,
@@ -79,6 +80,13 @@ class UploadController:
     #: and the Recipe Book.
     MASH_NUMBERS_KEY = "mash_numbers"
 
+    #: The BeerXML file the Recipe Book keeps for a recipe imported from one (_kept_recipe,
+    #: RecipeController.keep_import): its one RECIPE, in UTF-8, at most this many bytes. Plugins that read it
+    #: refuse a bigger file, or one with a DOCTYPE or an ENTITY, which this never writes.
+    KEPT_XML_MAX_BYTES = 2 * 1024 * 1024
+    KEPT_XML_HEAD = b'<?xml version="1.0" encoding="UTF-8"?>\n<RECIPES>\n'
+    KEPT_XML_TAIL = b"\n</RECIPES>\n"
+
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.logger = logging.getLogger(__name__)
@@ -125,7 +133,9 @@ class UploadController:
         adds nothing, and is reported to the caller. The boil additions the
         boil step had no reminder for go in the same write, with the recipe's
         name (StepController.NO_REMINDER_KEY), and so do a BeerXML recipe's
-        mash numbers (MASH_NUMBERS_KEY).
+        mash numbers (MASH_NUMBERS_KEY) and the BeerXML file kept for it
+        (_kept_recipe, RecipeController.keep_import). A recipe that needs more
+        than a vessel holds is imported with a warning for it (too_full).
 
         Refused before anything is read when the settings would put the boil
         on the wrong vessel - see _import_problem. Never for a running step:
@@ -163,11 +173,13 @@ class UploadController:
                 basic[StepController.NO_REMINDER_KEY] = staged["without_reminder"]
             if staged.get("mash_numbers"):
                 basic[self.MASH_NUMBERS_KEY] = staged["mash_numbers"]
+            held.extend(self.too_full(staged.get("mash_numbers")))
             # As the book keeps a recipe: each step's name, kind, settings, and waiting.
             steps = [dict(name=s.get("name"), type=s.get("type"), status="I", props=s.get("props") or {})
                      for s in staged["steps"]]
             try:
-                file_id, replaced = await self.cbpi.recipe.keep_import(dict(basic=basic, steps=steps), label)
+                file_id, replaced = await self.cbpi.recipe.keep_import(dict(basic=basic, steps=steps), label,
+                                                                       source_xml=staged.get("source_xml"))
             except Exception as e:  # noqa: BLE001
                 logging.exception("could not keep the imported recipe in the Recipe Book")
                 return self._not_imported(
@@ -245,6 +257,111 @@ class UploadController:
         self.cbpi.notify(title, text, NotificationType.WARNING,
                          action=[NotificationAction("OK")], keep=True)
 
+    #: Litres in a US gallon, kilograms in a pound.
+    GAL_L, LB_KG = 3.785411784, 0.45359237
+    #: The room grain takes up in the mash tun, beside its water: gal/lb on a F brewery, L/kg on a C one.
+    GRAIN_VOLUME = {"F": 0.08, "C": 0.67}
+
+    @staticmethod
+    def _figure(value):
+        """A setting or a recipe figure as a number, or None: blank, not a number, or not finite."""
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            found = float(value.strip().replace(",", ".")) if isinstance(value, str) else float(value)
+        except (TypeError, ValueError):
+            return None
+        return found if math.isfinite(found) else None
+
+    def hlt_water(self, numbers):
+        """The water a recipe needs in the HLT, worked out as the recipe pages work it out (recipeWater): its volume
+        before the boil (mash_numbers' boil_l, less top_up_kettle_l), what the grain keeps (grain_kg by
+        GRAIN_ABSORPTION, in gal/lb on F, L/kg on C) and the lauter dead space (lauter_dead_l). In the brewery's
+        volume unit: {"total", "before", "kept", "lost", "unit"}, unit "gal" on F and "L" on C. None without a volume
+        before the boil, a grain weight or GRAIN_ABSORPTION."""
+        numbers = numbers if isinstance(numbers, dict) else {}
+        absorption = self._figure(self.cbpi.config.get("GRAIN_ABSORPTION", None))
+        boil, grain = self._figure(numbers.get("boil_l")), self._figure(numbers.get("grain_kg"))
+        if boil is None or grain is None or absorption is None:
+            return None
+        gallons = str(self.cbpi.config.get("TEMP_UNIT", "C")).upper() == "F"
+        per_kg = absorption * self.GAL_L / self.LB_KG if gallons else absorption
+        before = boil - (self._figure(numbers.get("top_up_kettle_l")) or 0)
+        kept = grain * per_kg
+        lost = self._figure(numbers.get("lauter_dead_l")) or 0
+        to_unit = self.GAL_L if gallons else 1.0
+        return dict(total=(before + kept + lost) / to_unit, before=before / to_unit, kept=kept / to_unit,
+                    lost=lost / to_unit, unit="gal" if gallons else "L")
+
+    def mash_volume(self, numbers):
+        """What the mash tun holds at its fullest: the water the mash steps add (mash_numbers' infusions_l, every
+        infusion added up, else infuse_l, the strike water) and the grain's own volume, GRAIN_VOLUME. In the
+        brewery's volume unit: {"total", "water", "grain", "unit"}. None without the water or a grain weight."""
+        numbers = numbers if isinstance(numbers, dict) else {}
+        water = self._figure(numbers.get("infusions_l"))
+        if water is None:
+            water = self._figure(numbers.get("infuse_l"))
+        grain = self._figure(numbers.get("grain_kg"))
+        if water is None or grain is None:
+            return None
+        if str(self.cbpi.config.get("TEMP_UNIT", "C")).upper() == "F":
+            water, grain, unit = water / self.GAL_L, grain / self.LB_KG * self.GRAIN_VOLUME["F"], "gal"
+        else:
+            grain, unit = grain * self.GRAIN_VOLUME["C"], "L"
+        return dict(total=water + grain, water=water, grain=grain, unit=unit)
+
+    def boil_volume(self, numbers):
+        """The recipe's volume before the boil (mash_numbers' boil_l) in the brewery's volume unit:
+        {"total", "unit"}, or None without one."""
+        boil = self._figure((numbers if isinstance(numbers, dict) else {}).get("boil_l"))
+        if boil is None:
+            return None
+        if str(self.cbpi.config.get("TEMP_UNIT", "C")).upper() == "F":
+            return dict(total=boil / self.GAL_L, unit="gal")
+        return dict(total=boil, unit="L")
+
+    def too_full(self, numbers):
+        """The import's warnings, [(title, text)], for each vessel the recipe with these mash_numbers needs more of
+        than its capacity, to 0.1 in the brewery's volume unit: the HLT its water (hlt_water), the mash tun its mash
+        (mash_volume), the boil kettle its boil (boil_volume). The vessels are found as the brew-day screen and the
+        strike water helper find them (hltpump.kettle_roles); one that can't be told, a capacity that is blank or
+        can't be right (kettle_measures.usable), or a figure the recipe doesn't give, is no warning. Only a BeerXML
+        import gives the figures. Never raises: the import goes on without warnings."""
+        try:
+            from cbpi.extension.hltpump import kettle_roles
+
+            roles = kettle_roles(self.cbpi)
+            found = []
+            for role, word, need in (("hlt", "HLT", self.hlt_water), ("mt", "mash tun", self.mash_volume),
+                                     ("bk", "boil kettle", self.boil_volume)):
+                kettle = roles.get(role)
+                capacity = kettle_measures.usable(getattr(kettle, "capacity", None)) if kettle is not None else None
+                needed = need(numbers) if capacity is not None else None
+                if needed is None or round(needed["total"], 1) <= capacity:
+                    continue
+                name = "the {}".format(str(getattr(kettle, "name", "") or "").strip() or word)
+                holds = "{} holds {:.1f} {}".format(name, capacity, needed["unit"])
+                if role == "hlt":
+                    parts = ["{:.1f} before the boil".format(needed["before"]),
+                             "{:.1f} the grain keeps".format(needed["kept"])]
+                    if round(needed["lost"], 1) > 0:
+                        parts.append("{:.1f} left under the mash tun's false bottom".format(needed["lost"]))
+                    text = ("This recipe needs about {:.1f} {} of water ({}), and {}. Check the batch size in "
+                            "BeerSmith, or plan to add water during the sparge.".format(
+                                needed["total"], needed["unit"], ", ".join(parts[:-1]) + " and " + parts[-1], holds))
+                elif role == "mt":
+                    text = ("This recipe mashes about {:.1f} {} ({:.1f} of water and {:.1f} of grain), and {}. Check "
+                            "the batch size in BeerSmith.".format(needed["total"], needed["unit"], needed["water"],
+                                                                  needed["grain"], holds))
+                else:
+                    text = "This recipe boils {:.1f} {}, and {}. Check the batch size in BeerSmith.".format(
+                        needed["total"], needed["unit"], holds)
+                found.append(("More than {} holds".format(name), text))
+            return found
+        except Exception as e:  # noqa: BLE001 - the recipe is imported all the same
+            logging.warning("Could not check the recipe against the vessels' capacities: %s", e)
+            return []
+
     @staticmethod
     def _reminder_minutes(minutes):
         """An addition's minutes before the end of the boil, or None when the
@@ -312,7 +429,7 @@ class UploadController:
     async def get_xml_recipes(self):
         try:
             path = self.cbpi.config_folder.get_upload_file("beer.xml")
-            e = xml.etree.ElementTree.parse(path).getroot()
+            e = self._xml_file_root(path)
             result = []
             counter = 1
             for idx, val in enumerate(e.findall("RECIPE")):
@@ -461,18 +578,42 @@ class UploadController:
         says ISO-8859-1 - so a raw degree sign in one would come back as a
         replacement character.
 
-        A file that cannot be read as sent - XML that does not parse, JSON that
-        is not UTF-8 - is still decoded leniently, so it imports with odd
-        characters rather than not at all.
+        BeerXML that does not parse as sent is read as beerxml.read reads it -
+        in its declared encoding, UTF-8, Windows-1252 or Latin-1, or else made
+        plain English letters - and kept as UTF-8 under a UTF-8 declaration, so
+        it parses: a Latin-1 o-umlaut under a UTF-8 declaration stays an
+        o-umlaut, a NUL byte goes. The log says how it was read. JSON that is
+        not UTF-8, and a file not even that makes XML, are still decoded
+        leniently, so they import with odd characters rather than not at all.
         """
-        try:
-            if kind == "xml":
+        if kind == "xml":
+            declared = beerxml.declared_encoding(content) or "UTF-8 (none declared)"
+            try:
                 xml.etree.ElementTree.fromstring(content)
+                logging.info("BeerXML upload: read in its declared encoding, %s", declared)
+                return content
+            except Exception:  # noqa: BLE001 - ParseError, or LookupError for an encoding Python doesn't know
+                pass
+            try:
+                found = beerxml.read(content)
+            except Exception as e:  # noqa: BLE001
+                logging.warning("BeerXML upload: not XML in any encoding (%s); kept with stand-in characters", e)
             else:
+                if found.plain:
+                    logging.warning("BeerXML upload: doesn't parse as %s in any of %s; read as %s, made plain "
+                                    "English letters, and kept as UTF-8", declared,
+                                    ", ".join(beerxml.decode_order(content)), found.encoding)
+                else:
+                    logging.warning("BeerXML upload: doesn't parse as its declared %s; read as %s, and kept as "
+                                    "UTF-8", declared, found.encoding)
+                return beerxml.utf8_document(found.text)
+        else:
+            try:
                 content.decode("utf-8-sig")
-            return content
-        except (xml.etree.ElementTree.ParseError, UnicodeDecodeError):
-            return content.decode("utf-8", "replace").encode("utf-8")
+                return content
+            except UnicodeDecodeError:
+                pass
+        return content.decode("utf-8", "replace").encode("utf-8")
 
     async def FileUpload(self, data):
         """Keep an uploaded recipe file. Returns True if it was kept.
@@ -1122,6 +1263,60 @@ class UploadController:
         except Exception as e:
             self._creation_failed("MMuM-JSON Recipe creation failure", e, name)
 
+    @staticmethod
+    def _xml_root(content):
+        """The BeerXML bytes `content`, parsed: as sent, in the encoding they declare, or else as beerxml.read reads
+        them, which the log then says. An upload is kept so that it parses as sent (_kept_bytes); a beer.xml an
+        older CraftBeerPi kept may not."""
+        try:
+            return xml.etree.ElementTree.fromstring(content)
+        except Exception:  # noqa: BLE001 - ParseError, or LookupError for an encoding Python doesn't know
+            found = beerxml.read(content)
+            logging.warning("BeerXML: the uploaded file doesn't parse as it declares; read as %s%s", found.encoding,
+                            ", made plain English letters" if found.plain else "")
+            return found.root
+
+    def _xml_file_root(self, path):
+        with open(path, "rb") as file:
+            return self._xml_root(file.read())
+
+    def _kept_recipe(self, path, recipe_id, name):
+        """The BeerXML file the Recipe Book keeps for the recipe being imported: the RECIPE `recipe_id` (its place
+        among the file's RECIPEs, from 1) of the uploaded file at `path`, named `name`. (bytes, the NAME in them), or
+        None, with the reason in the log, when it is to have none.
+
+        Only that RECIPE, in a RECIPES of its own, as the upload has it: an export can hold many recipes, and a
+        plugin reads the file whole. The upload is read in the encoding it declares - BeerSmith's says ISO-8859-1,
+        and writes a degree sign or the o of Kölsch as one byte, which isn't UTF-8 - and the kept file is written
+        as UTF-8 under a UTF-8 declaration. ElementTree writes no DOCTYPE, ENTITY, comment or CDATA, so an
+        upload's DOCTYPE is gone and the entities it declared are written out. The NAME given back is the one the
+        kept file has, exactly. None when the recipe alone would be more than KEPT_XML_MAX_BYTES, or when the kept
+        file, read back, wouldn't give a recipe of that name (beerxml.name_key).
+        """
+        def none(why):
+            logging.warning("BeerXML import: %s is kept in the Recipe Book without a BeerXML file of its own: %s",
+                            name, why)
+            return None
+
+        try:
+            with open(path, "rb") as file:
+                content = file.read()
+            recipe = self._xml_root(content).find("./RECIPE[%s]" % recipe_id)
+            if recipe is None or beerxml.name_key(recipe.findtext("NAME")) != beerxml.name_key(name):
+                return none("recipe {} of the uploaded file isn't it".format(recipe_id))
+            recipe.tail = None
+            kept = (self.KEPT_XML_HEAD + xml.etree.ElementTree.tostring(recipe, encoding="unicode").encode("utf-8")
+                    + self.KEPT_XML_TAIL)
+            if len(kept) > self.KEPT_XML_MAX_BYTES:
+                return none("the recipe alone is {} bytes, more than {}".format(len(kept), self.KEPT_XML_MAX_BYTES))
+            again = xml.etree.ElementTree.fromstring(kept).find("RECIPE")
+            found = None if again is None else again.findtext("NAME")
+            if not found or beerxml.name_key(found) != beerxml.name_key(name):
+                return none("its file, read back, names the recipe {!r}".format(found))
+        except Exception as e:  # noqa: BLE001 - the recipe is imported all the same
+            return none("its file could not be made: {}".format(e))
+        return kept, found
+
     async def xml_recipe_creation(self, Recipe_ID):
         config = self.get_config_values()
         name = ""
@@ -1136,7 +1331,7 @@ class UploadController:
                         NotificationType.ERROR,
                     )
 
-                e = xml.etree.ElementTree.parse(self.path).getroot()
+                e = self._xml_file_root(self.path)
                 recipe = e.find("./RECIPE[%s]" % (str(Recipe_ID)))
                 hops = recipe.findall("./HOPS/HOP")
                 miscs = recipe.findall('MISCS/MISC[USE="Boil"]')
@@ -1150,6 +1345,7 @@ class UploadController:
                 await self.create_recipe(name)
                 if self._staging and self._staged is not None:
                     self._staged["mash_numbers"] = self.getMashNumbers(recipe)
+                    self._staged["source_xml"] = self._kept_recipe(self.path, Recipe_ID, name)
                 # Mash Steps -> first step is different as it heats up to defined temp and stops with notification to add malt
                 # AutoMode is yes to start and stop automatic mode or each step
                 MashIn_Flag = True
@@ -1385,7 +1581,7 @@ class UploadController:
     def getSteps(self, id, recipe_type):
         steps = []
         if recipe_type == "xml":
-            e = xml.etree.ElementTree.parse(self.path).getroot()
+            e = self._xml_file_root(self.path)
             for e in e.findall("./RECIPE[%s]/MASH/MASH_STEPS/MASH_STEP" % (str(id))):
                 if self.cbpi.config.get("TEMP_UNIT", "C") == "C":
                     temp = float(e.find("STEP_TEMP").text)
