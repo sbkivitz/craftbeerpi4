@@ -4,7 +4,8 @@ import logging
 from aiohttp import web
 from cbpi.api import *
 from cbpi.api.dataclasses import Props, Step
-from cbpi.controller.step_controller import BookRefused, OrderRefused, StartRefused, StepController, StepRunning
+from cbpi.controller.step_controller import (ActionRefused, BookRefused, OrderRefused, StartRefused, StepController,
+                                             StepRunning)
 from cbpi.http_endpoints.http_strike import StrikeHttpEndpoints
 
 
@@ -486,14 +487,24 @@ class StepHttpEndpoints(StrikeHttpEndpoints):
         responses:
             "200":
                 description: successful operation
+            "400":
+                description: >-
+                    the action didn't run. error "action refused": the step said no, and detail is its own reason,
+                    in the brewer's language (4.7.7.post61). error "action not run": no step has that id, it doesn't
+                    declare that action, or the action failed.
         """
         data = await request.json()
 
         id = request.match_info["id"]
         action = data.get("action", data.get("name"))
-        ok = await self.controller.call_action(
-            id, action, data.get("parameter", [])
-        )
+        try:
+            ok = await self.controller.run_action(
+                id, action, data.get("parameter", [])
+            )
+        except ActionRefused as refused:
+            # The step's own words for why not, so a page can show them. A page tells this core by the error: an
+            # older one answers every 400 here as "action not run".
+            return web.json_response({"error": "action refused", "detail": refused.reason}, status=400)
         if ok is False:
             return web.json_response(
                 {

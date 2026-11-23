@@ -99,6 +99,18 @@ class BookRefused(OrderRefused):
     """
 
 
+class ActionRefused(Exception):
+    """A step's declared action said no, with its own reason (StepController.run_action).
+
+    A step refuses by raising ValueError with the reason in its words, in the brewer's language. reason: those
+    words. POST /step2/action/{id} answers them, from 4.7.7.post61.
+    """
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class StepController:
 
     # Carrying on by itself after a restart (allow_resume). Real seconds: the
@@ -1728,9 +1740,22 @@ class StepController:
         """Run a declared action on a step. True if it ran; False if it didn't.
 
         False when no step has that id, the step doesn't declare that action,
-        or the action raised. POST /step2/action/{id} answers 400 on False, as
-        the actor, sensor and kettle endpoints do with
-        BasicController.call_action.
+        or the action raised, a refusal included. POST /step2/action/{id}
+        answers 400 on False, as the actor, sensor and kettle endpoints do with
+        BasicController.call_action. It runs the action through run_action,
+        which tells a refusal from the rest.
+        """
+        try:
+            return await self.run_action(id, action, parameter)
+        except ActionRefused:
+            return False
+
+    async def run_action(self, id, action, parameter) -> bool:
+        """call_action, with a refusal told apart: True if it ran; False if it didn't, as call_action.
+
+        Raises ActionRefused when the action says no with a reason: it raised ValueError, and the reason is its
+        words. That is an answer for the brewer, not a fault, so it is logged as information. A ValueError with no
+        words gives no reason, and is False like any other exception.
         """
         logging.info("Step Controller - call all Action {} {}".format(id, action))
         try:
@@ -1749,6 +1774,17 @@ class StepController:
                 return False
             await method(**normalize_action_parameters(parameter))
             return True
+        except ValueError as e:
+            reason = str(e).strip()
+            if reason:
+                logging.info("Step Controller - %r on %s refused: %s", action, id, reason)
+                raise ActionRefused(reason) from None
+            logging.error(
+                "Step Controller -Failed to call action on {} {} {!r}".format(
+                    id, action, e
+                )
+            )
+            return False
         except Exception as e:
             logging.error(
                 "Step Controller -Failed to call action on {} {} {}".format(

@@ -514,6 +514,32 @@ class StrikeController:
             return model.f_of(value) if to_unit == "F" else model.c_of(value)
         return value * model.L_PER_GAL if to_unit == "L" else value / model.L_PER_GAL
 
+    #: BrewStart's mark that it has begun heating its kettle itself (its HEATING_PROP, 1.3.0 on), for a BrewStart
+    #: whose class doesn't say.
+    BREWSTART_HEATING = "_brewstart_heating"
+
+    @staticmethod
+    def _heats_the_hlt(bs, hlt):
+        """Whether BrewStart `bs` heats the HLT itself, holds the water and asks for it to be moved - a Ready by
+        BrewStart on the HLT from 1.3.0, which has change_target for USE and BACK TO. With no strike water step on
+        the HLT before the Mash Tun's MashIn, it is the strike water step then, its Ready_Temp the strike water's
+        temperature."""
+        if bs is None or hlt is None:
+            return False
+        if str(_prop(bs, "Timing") or "") != "Ready by" or _prop(bs, "Heat_Kettle") != hlt.id:
+            return False
+        return callable(getattr(getattr(bs, "instance", None), "change_target", None))
+
+    def _heating(self, step):
+        """Whether BrewStart `step` has begun heating its kettle itself: its mark, kept with the step."""
+        key = getattr(type(getattr(step, "instance", None)), "HEATING_PROP", None) or self.BREWSTART_HEATING
+        return bool(_prop(step, key))
+
+    @staticmethod
+    def _strike_prop(si, bs):
+        """Where strike water step `si` keeps the strike water's temperature: Temp, or a BrewStart's Ready_Temp."""
+        return "Ready_Temp" if si is not None and si is bs else "Temp"
+
     def _campden(self, bs, unit):
         """The Campden tablets BrewStart gives for its water volume, rounded as its own message rounds them (up to a
         quarter tablet), or None when its Campden reminder is off or its volume isn't usable."""
@@ -578,16 +604,23 @@ class StrikeController:
                     before = profile[:at]
                     L.si = next((s for s in before if s.type == "MashInStep" and _prop(s, "Kettle") == L.hlt.id), None)
                     L.bs = next((s for s in before if s.type == "BrewStart"), None)
+                    if L.si is None and self._heats_the_hlt(L.bs, L.hlt):
+                        L.si = L.bs
                     if L.mi.status == StepState.DONE:
                         L.off = "malt_in"
         if L.bs is None and profile:
             L.bs = next((s for s in profile if s.type == "BrewStart"), None)
+        # Where the strike water step keeps the strike water's temperature: a BrewStart that heats the HLT itself in
+        # its Ready_Temp.
+        L.strike_prop = self._strike_prop(L.si, L.bs)
         L.by = None if L.off else ("step" if L.si is not None else "hand")
         if L.off is None:
             started = (StepState.ACTIVE, StepState.STOP, StepState.ERROR)
+            # A BrewStart heats once its heating has begun: before that it waits for its time.
+            heats = L.si is not None and (L.si is not L.bs or self._heating(L.si))
             if L.mi.status in started or (L.si is not None and L.si.status == StepState.DONE):
                 L.phase = "moved"
-            elif L.si is not None and L.si.status in started:
+            elif heats and L.si.status in started:
                 L.phase = "heat"
             else:
                 L.phase = "plan"
@@ -625,7 +658,7 @@ class StrikeController:
         # The numbers now.
         rest = _number(_prop(L.mi, "Temp")) if L.mi is not None else None
         if L.si is not None:
-            planned = _number(_prop(L.si, "Temp"))
+            planned = _number(_prop(L.si, L.strike_prop))
         elif L.hlt is not None and L.off is None:
             planned = _number(getattr(L.hlt, "target_temp", None))
             planned = planned if planned is not None and planned > 0 else None
@@ -1159,20 +1192,28 @@ class StrikeController:
         changed = []
         wrote = []
         if si is not None:
-            si.props["Temp"] = to
-            wrote.append((si.id, "Temp"))
+            prop = self._strike_prop(si, bs)
+            si.props[prop] = to
+            wrote.append((si.id, prop))
             changed.append("step")
             instance = getattr(si, "instance", None)
             change = getattr(instance, "change_target", None)
             if si.status == StepState.ACTIVE and callable(change):
                 if await change(to):
                     changed.append("question")
-                changed.append("hlt")
+                # A BrewStart moves the HLT's target only once it heats it: waiting, it plans from the new temperature.
+                if si is not bs or getattr(instance, "heating", False):
+                    changed.append("hlt")
+            elif si is bs:
+                forget = getattr(instance, "forget_wait", None)
+                if callable(forget) and forget():
+                    changed.append("question")
             elif self._forget_wait(si):
                 changed.append("question")
             if bs is not None and bs.status != StepState.DONE and str(_prop(bs, "Timing") or "") == "Ready by":
-                bs.props["Ready_Temp"] = to
-                wrote.append((bs.id, "Ready_Temp"))
+                if bs is not si:
+                    bs.props["Ready_Temp"] = to
+                    wrote.append((bs.id, "Ready_Temp"))
                 changed.append("brewstart")
             await self.cbpi.step.save()
         else:

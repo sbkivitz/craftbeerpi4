@@ -52,7 +52,7 @@ class StrikeHttpEndpoints:
     async def http_strike_use(self, request):
         """
         ---
-        description: USE or BACK TO. USE sets the strike water step's Temp, BrewStart's Ready_Temp while it hasn't handed on, and the HLT's target while the strike water step runs - by hand, the HLT's target - and keeps the strike water before the first USE for BACK TO, which puts it back.
+        description: USE or BACK TO. USE sets the strike water step's Temp, BrewStart's Ready_Temp while it hasn't handed on, and the HLT's target while the strike water step heats it - by hand, the HLT's target - and keeps the strike water before the first USE for BACK TO, which puts it back. A Ready by BrewStart that heats the HLT itself (BrewStart 1.3.0 on) is the strike water step when the recipe has no other, its Ready_Temp the strike water's temperature.
         tags:
         - Step
         parameters:
