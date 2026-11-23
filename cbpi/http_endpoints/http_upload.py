@@ -57,7 +57,7 @@ class UploadHttpEndpoints:
         """
 
         ---
-        description: Create Recipe from KBH database with selected ID
+        description: Keep the recipe with this id from the uploaded Kleiner Brauhelfer database in the Recipe Book. The brew steps are left as they are
         tags:
         - Upload
         parameters:
@@ -68,23 +68,26 @@ class UploadHttpEndpoints:
           type: "string"
         responses:
             "200":
-                description: successful operation
+                description: "kept in the Recipe Book: {name, file, replaced, warnings: [{title, text}]}"
+            "400":
+                description: "not imported, nothing added to the Recipe Book: {error: recipe not imported, detail}"
         """
 
         kbh_id = await request.json()
-        ok, message = await self.controller.import_recipe("kbh", kbh_id.get("id"))
-        return self._import_result(ok, message)
+        ok, result = await self.controller.import_recipe("kbh", kbh_id.get("id"))
+        return self._import_result(ok, result)
 
     @staticmethod
-    def _import_result(ok, message):
-        """200 and the recipe's name, or 400 and why nothing was imported.
+    def _import_result(ok, result):
+        """200 and {"name", "file", "replaced", "warnings"} - the recipe kept in the Recipe Book, the brew steps
+        left as they are - or 400 {"error": "recipe not imported", "detail"}: why nothing was added to the book.
 
         Answering 200 whatever happened would report a recipe that could not
-        be read as created.
+        be read as imported.
         """
         if ok:
-            return web.json_response({"name": message}, status=200)
-        return web.json_response({"error": "recipe not imported", "detail": message},
+            return web.json_response(result, status=200)
+        return web.json_response({"error": "recipe not imported", "detail": result},
                                  status=400)
 
     @request_mapping(path="/xml", method="GET", auth_required=False)
@@ -109,7 +112,7 @@ class UploadHttpEndpoints:
         """
 
         ---
-        description: Create recipe from xml file with selected id
+        description: Keep the recipe with this id from the uploaded BeerXML file in the Recipe Book. The brew steps are left as they are
         tags:
         - Upload
         parameters:
@@ -121,12 +124,14 @@ class UploadHttpEndpoints:
 
         responses:
             "200":
-                description: successful operation
+                description: "kept in the Recipe Book: {name, file, replaced, warnings: [{title, text}]}"
+            "400":
+                description: "not imported, nothing added to the Recipe Book: {error: recipe not imported, detail}"
         """
 
         xml_id = await request.json()
-        ok, message = await self.controller.import_recipe("xml", xml_id.get("id"))
-        return self._import_result(ok, message)
+        ok, result = await self.controller.import_recipe("xml", xml_id.get("id"))
+        return self._import_result(ok, result)
 
     @request_mapping(path="/json", method="GET", auth_required=False)
     async def get_json_list(self, request):
@@ -150,7 +155,7 @@ class UploadHttpEndpoints:
         """
 
         ---
-        description: Create recipe from json file with selected id
+        description: Keep the recipe with this id from the uploaded MMuM-JSON file in the Recipe Book. The brew steps are left as they are
         tags:
         - Upload
         parameters:
@@ -162,12 +167,14 @@ class UploadHttpEndpoints:
 
         responses:
             "200":
-                description: successful operation
+                description: "kept in the Recipe Book: {name, file, replaced, warnings: [{title, text}]}"
+            "400":
+                description: "not imported, nothing added to the Recipe Book: {error: recipe not imported, detail}"
         """
 
         json_id = await request.json()
-        ok, message = await self.controller.import_recipe("json", json_id.get("id"))
-        return self._import_result(ok, message)
+        ok, result = await self.controller.import_recipe("json", json_id.get("id"))
+        return self._import_result(ok, result)
 
     @request_mapping(path="/bf/{offset}/", method="POST", auth_required=False)
     async def get_bf_list(self, request):
@@ -215,7 +222,7 @@ class UploadHttpEndpoints:
         """
 
         ---
-        description: Create recipe from Brewfather Web App with selected id
+        description: Keep the Brewfather recipe with this id in the Recipe Book. The brew steps are left as they are
         tags:
         - Upload
         parameters:
@@ -227,12 +234,14 @@ class UploadHttpEndpoints:
 
         responses:
             "200":
-                description: successful operation
+                description: "kept in the Recipe Book: {name, file, replaced, warnings: [{title, text}]}"
+            "400":
+                description: "not imported, nothing added to the Recipe Book: {error: recipe not imported, detail}"
         """
 
         bf_id = await request.json()
-        ok, message = await self.controller.import_recipe("bf", bf_id.get("id"))
-        return self._import_result(ok, message)
+        ok, result = await self.controller.import_recipe("bf", bf_id.get("id"))
+        return self._import_result(ok, result)
 
     @request_mapping(path="/getpath", auth_required=False)
     async def http_getpath(self, request):

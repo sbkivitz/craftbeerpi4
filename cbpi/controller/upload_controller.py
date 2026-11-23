@@ -74,14 +74,15 @@ class UploadController:
     MASH_OUT_TEMP = {"C": 76, "F": 168}
     MASH_OUT_MINUTES = 10
 
-    #: In the basic data of a BeerXML recipe imported: what a strike water forecast needs from it (getMashNumbers).
-    #: Part of the recipe, like its name: kept through a reset, a restart and the Recipe Book.
+    #: In the basic data of a BeerXML recipe imported: what a strike water forecast, and the HLT's water for a new
+    #: BrewStart, need from it (getMashNumbers). Part of the recipe, like its name: kept through a reset, a restart
+    #: and the Recipe Book.
     MASH_NUMBERS_KEY = "mash_numbers"
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
         self.logger = logging.getLogger(__name__)
-        # One import at a time, gathered before it replaces the mash profile.
+        # One import at a time, gathered before it is kept in the Recipe Book.
         # See import_recipe.
         self._import_lock = asyncio.Lock()
         self._staging = False
@@ -91,11 +92,6 @@ class UploadController:
 
     #: How many addition reminders the boil step holds: Hop_1 to Hop_6.
     BOIL_REMINDERS = 6
-
-    #: Why an import is refused while a step runs, with the step's name: an
-    #: import replaces the brew steps.
-    IMPORT_WHILE_RUNNING = ("{} is running. Stop it before importing a recipe: "
-                            "an import replaces the brew steps.")
 
     #: The importers, by the kind the upload endpoints name, and the word the
     #: brewer is told.
@@ -107,38 +103,38 @@ class UploadController:
     }
 
     async def import_recipe(self, kind, recipe_id):
-        """Make one recipe the mash profile: all of it, or none of it.
+        """Keep one recipe in the Recipe Book: all of it, or none of it. The
+        brew steps are left as they are; LOAD makes a book recipe the brew
+        steps (POST /recipe/{file}/brew).
 
-        Returns (True, the recipe's name) or (False, why not).
+        Returns (True, {"name", "file", "replaced", "warnings"}) - the book
+        file's id, whether it replaced an earlier import of the same name
+        (RecipeController.keep_import), and the import's warnings as
+        [{"title", "text"}], each also kept on every screen until OK - or
+        (False, why not).
 
-        Building the profile while reading the recipe - emptying the mash
-        profile first, then adding its steps one at a time - would go wrong two
-        ways:
+        Writing the recipe while reading it would go wrong two ways:
         - a recipe that cannot be read, such as one with a temperature of
-          "not-a-number", would leave the mash profile empty;
-        - two imports at once - Create clicked twice - would each empty the
-          profile, then both add their steps: every rest and the boil twice.
+          "not-a-number", would leave half a recipe behind;
+        - two imports at once - IMPORT pressed twice - would each add their
+          steps to the same recipe: every rest and the boil twice.
 
         So one import runs at a time. Its steps are gathered as the recipe is
-        read (create_recipe, create_step) and replace the mash profile in one
+        read (create_recipe, create_step) and written to the book in one
         write, only once the whole recipe has been read. A failure says so,
-        leaves the profile as it was, and is reported to the caller. The boil
-        additions the boil step had no reminder for go in the same write, with
-        the recipe's name (StepController.NO_REMINDER_KEY).
+        adds nothing, and is reported to the caller. The boil additions the
+        boil step had no reminder for go in the same write, with the recipe's
+        name (StepController.NO_REMINDER_KEY), and so do a BeerXML recipe's
+        mash numbers (MASH_NUMBERS_KEY).
 
-        Refused before anything is read or changed when the settings would put
-        the boil on the wrong vessel - see _import_problem - and while a step
-        runs: loading the new steps would stop it, ending a mash rest and
-        switching its kettle's logic off.
+        Refused before anything is read when the settings would put the boil
+        on the wrong vessel - see _import_problem. Never for a running step:
+        the brew steps aren't touched.
         """
         method_name, label = self.IMPORTERS[kind]
         if recipe_id is None or recipe_id == "" or recipe_id == []:
             return self._not_imported("Choose a recipe to import first.")
         async with self._import_lock:
-            running = self.cbpi.step.running_step()
-            if running is not None:
-                return self._not_imported(self.IMPORT_WHILE_RUNNING.format(running.name or "A step"),
-                                          NotificationType.INFO)
             self.get_config_values()
             problem = self._import_problem()
             if problem is not None:
@@ -167,49 +163,28 @@ class UploadController:
                 basic[StepController.NO_REMINDER_KEY] = staged["without_reminder"]
             if staged.get("mash_numbers"):
                 basic[self.MASH_NUMBERS_KEY] = staged["mash_numbers"]
+            # As the book keeps a recipe: each step's name, kind, settings, and waiting.
+            steps = [dict(name=s.get("name"), type=s.get("type"), status="I", props=s.get("props") or {})
+                     for s in staged["steps"]]
             try:
-                await self.cbpi.step.load_recipe({"basic": basic, "steps": staged["steps"]})
+                file_id, replaced = await self.cbpi.recipe.keep_import(dict(basic=basic, steps=steps), label)
             except Exception as e:  # noqa: BLE001
-                logging.exception("could not write the imported recipe")
+                logging.exception("could not keep the imported recipe in the Recipe Book")
                 return self._not_imported(
-                    "The {} recipe could not be saved: {}.".format(label, e))
-            kept = await self._keep_in_book(label, staged["name"])
+                    "The {} recipe could not be kept in the Recipe Book: {}.".format(label, e))
+            kept = ("Its earlier copy in your Recipe Book was replaced." if replaced
+                    else "Kept in your Recipe Book.")
             self.cbpi.notify("{} recipe imported".format(label),
-                             "{}. {}".format(staged["name"], kept) if kept else staged["name"],
-                             NotificationType.INFO)
+                             "{}. {}".format(staged["name"], kept), NotificationType.INFO)
             for title, text in held:
                 self._warn_brewer(title, text)
-            return True, staged["name"]
-
-    async def _keep_in_book(self, label, name):
-        """Keep the recipe just imported in the Recipe Book, and say so in a sentence.
-
-        See RecipeController.keep_import. The import has already succeeded -
-        the brew steps are the recipe - so a book that cannot be written is a
-        warning, not a failed import.
-        """
-        keep = getattr(getattr(self.cbpi, "recipe", None), "keep_import", None)
-        book_data = getattr(self.cbpi.step, "book_data", None)
-        if keep is None or book_data is None:
-            return ""
-        try:
-            _, replaced = await keep(book_data(), label)
-        except Exception as e:  # noqa: BLE001
-            logging.exception("could not keep the imported recipe in the recipe book")
-            self.cbpi.notify(
-                "Recipe not kept",
-                "'{}' is now your brew steps, but could not be kept in your Recipe "
-                "Book: {}".format(name, e),
-                NotificationType.WARNING,
-            )
-            return ""
-        return ("Its earlier copy in your Recipe Book was replaced." if replaced
-                else "Kept in your Recipe Book.")
+            return True, dict(name=staged["name"], file=file_id, replaced=bool(replaced),
+                              warnings=[dict(title=title, text=text) for title, text in held])
 
     def _not_imported(self, why, kind=NotificationType.ERROR):
-        """(False, why, saying the brew steps are unchanged), after telling every screen: an error, unless `kind`
-        says otherwise - an info for a refusal that needs nothing from the brewer."""
-        message = "{} The brew steps are unchanged.".format(why)
+        """(False, why, saying nothing was added to the Recipe Book), after telling every screen: an error, unless
+        `kind` says otherwise - an info for a refusal that needs nothing from the brewer."""
+        message = "{} Nothing was added to the Recipe Book.".format(why)
         logging.warning("Recipe not imported: %s", message)
         self.cbpi.notify("Recipe not imported", message, kind)
         return False, message
@@ -242,7 +217,7 @@ class UploadController:
 
     def _creation_failed(self, label, error, name=""):
         """An importer could not finish. Inside import_recipe that is reported
-        once, there, with what it means for the mash profile."""
+        once, there, saying nothing was added to the Recipe Book."""
         logging.error("%s: %s", label, error)
         if self._staging:
             if self._import_error is None:
@@ -252,7 +227,7 @@ class UploadController:
 
     def _creation_done(self, title, name):
         """An importer finished. Inside import_recipe the brewer is told once
-        the mash profile has been replaced, not before."""
+        the recipe is in the Recipe Book, not before."""
         if not self._staging:
             self.cbpi.notify(title, name, NotificationType.INFO)
 
@@ -2062,20 +2037,25 @@ class UploadController:
         return (number - 32.0) / 1.8 if unit.startswith("F") else number
 
     def getMashNumbers(self, recipe):
-        """What a strike water forecast needs from a BeerXML recipe, kept with the mash profile in its basic data as
-        mash_numbers, in SI units and C as BeerXML has them (StrikeController reads them):
+        """What a strike water forecast, and the HLT's water for a new BrewStart, need from a BeerXML recipe, kept
+        with the recipe in its basic data as mash_numbers, in SI units and C as BeerXML has them (StrikeController
+        reads them):
 
         - grain_kg: the grain bill, as getGrainMass counts it, unrounded;
         - infuse_l: all the water of the first infusion as BeerSmith shows it (DISPLAY_INFUSE_AMT), the recoverable
           dead space it adds included; INFUSE_AMOUNT without it;
         - for_grain_l: INFUSE_AMOUNT, the part for the grain;
+        - infusions_l: every infusion as BeerSmith shows it, added up: the strike water and any water added later,
+          such as BeerSmith's at 168 F to mash out, whatever the step's TYPE;
+        - boil_l: the volume before the boil (the recipe's BOIL_SIZE, else the equipment profile's);
+        - top_up_kettle_l and lauter_dead_l: the equipment profile's TOP_UP_KETTLE and LAUTER_DEADSPACE, 0 kept;
         - tun_kg and tun_cal_g_c: the equipment profile's TUN_WEIGHT and TUN_SPECIFIC_HEAT, else the mash section's -
           its DISPLAY_TUN_WEIGHT, or its TUN_WEIGHT, which BeerSmith writes in ounces;
         - infuse_temp_c, grain_temp_c, tun_temp_c: BeerSmith's own strike (INFUSE_TEMP) and the grain and tun
           temperatures it was worked out for (GRAIN_TEMP, TUN_TEMP);
         - lacks: those the recipe doesn't have, of grain, water, tun, infuse_temp, grain_temp and tun_temp.
 
-        Never raises: a recipe that can't be read lacks them all.
+        A figure the file doesn't have is left out. Never raises: a recipe that can't be read lacks them all.
         """
         found = {}
         try:
@@ -2091,9 +2071,17 @@ class UploadController:
                 found["grain_kg"] = round(total, 6)
             mash = recipe.find("MASH")
             infusion = None
+            infusions = 0.0
             if mash is not None:
                 infusion = next((s for s in mash.iter("MASH_STEP")
                                  if (s.findtext("TYPE") or "").strip().lower() == "infusion"), None)
+                for step in mash.iter("MASH_STEP"):
+                    added = (self._display_quantity(step.findtext("DISPLAY_INFUSE_AMT"), self._LITRES)
+                             or self._xml_number(step, "INFUSE_AMOUNT"))
+                    if added and added > 0:
+                        infusions += added
+            if infusions > 0:
+                found["infusions_l"] = round(infusions, 6)
             if infusion is not None:
                 for_grain = self._xml_number(infusion, "INFUSE_AMOUNT")
                 shown = self._display_quantity(infusion.findtext("DISPLAY_INFUSE_AMT"), self._LITRES)
@@ -2106,6 +2094,13 @@ class UploadController:
                 if infuse is not None:
                     found["infuse_temp_c"] = round(infuse, 4)
             equipment = recipe.find("EQUIPMENT")
+            boil = self._xml_number(recipe, "BOIL_SIZE") or self._xml_number(equipment, "BOIL_SIZE")
+            if boil and boil > 0:
+                found["boil_l"] = round(boil, 6)
+            for key, path in (("top_up_kettle_l", "TOP_UP_KETTLE"), ("lauter_dead_l", "LAUTER_DEADSPACE")):
+                value = self._xml_number(equipment, path)
+                if value is not None and value >= 0:
+                    found[key] = round(value, 6)
             tun = self._xml_number(equipment, "TUN_WEIGHT")
             if not tun and mash is not None:
                 tun = self._display_quantity(mash.findtext("DISPLAY_TUN_WEIGHT"), self._KILOGRAMS)
@@ -2298,8 +2293,9 @@ class UploadController:
         """Start the recipe being imported.
 
         Inside import_recipe nothing is changed yet: the steps that follow are
-        gathered, and replace the mash profile only once the whole recipe has
-        been read.
+        gathered, and kept in the Recipe Book only once the whole recipe has
+        been read. An importer called on its own builds the brew steps as it
+        reads, as it always has.
         """
         if self._staging:
             self._staged = {"name": name, "steps": []}

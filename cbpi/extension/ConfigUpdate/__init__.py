@@ -84,6 +84,7 @@ class ConfigUpdate(CBPiExtension):
         AutoMode = self.cbpi.config.get("AutoMode", None)
         AddMashIn = self.cbpi.config.get("AddMashInStep", None)
         AddMashOut = self.cbpi.config.get("AddMashOutStep", None)
+        GrainAbsorption = self.cbpi.config.get("GRAIN_ABSORPTION", None)
         bfuserid = self.cbpi.config.get("brewfather_user_id", None)
         bfapikey = self.cbpi.config.get("brewfather_api_key", None)
         bflistlength = self.cbpi.config.get("brewfather_list_length", None)
@@ -536,6 +537,36 @@ class ConfigUpdate(CBPiExtension):
                         {"label": "Yes", "value": "Yes"},
                         {"label": "No", "value": "No"},
                     ],
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Unable to update config: %s", e)
+
+        # What the grain keeps of the water, which a BeerXML file has no field
+        # for: with a recipe's volume before the boil, the HLT's water for a new
+        # BrewStart (the recipe pages work it out). In the brewery's units. The
+        # description is refreshed with each version; a saved value is kept.
+        if TEMP_UNIT == "F":
+            default_grain_absorption = 0.12
+            grain_absorption_description = (
+                "Water the grain keeps, in gallons per pound of grain: 0.12 to start with. With a recipe's "
+                "volume before the boil, from its BeerSmith file, it gives the HLT's water for a new BrewStart. "
+                "BeerSmith keeps yours in its equipment profile, as Grain Absorption in fl oz per oz: divide "
+                "that by 8.")
+        else:
+            default_grain_absorption = 1.0
+            grain_absorption_description = (
+                "Water the grain keeps, in litres per kilogram of grain: 1.0 to start with. With a recipe's "
+                "volume before the boil, from its BeerSmith file, it gives the HLT's water for a new BrewStart.")
+        if GrainAbsorption is None or CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+            if GrainAbsorption is None:
+                logger.info("INIT GRAIN_ABSORPTION")
+            try:
+                await self.cbpi.config.add(
+                    "GRAIN_ABSORPTION",
+                    GrainAbsorption if GrainAbsorption is not None else default_grain_absorption,
+                    type=ConfigType.NUMBER,
+                    description=grain_absorption_description,
+                    source="steps",
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("Unable to update config: %s", e)

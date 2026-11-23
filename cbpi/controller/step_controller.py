@@ -10,7 +10,7 @@ import re
 import time
 from datetime import datetime
 
-from cbpi.api.persist import atomic_write_json, quarantine
+from cbpi.api.persist import atomic_write_json, atomic_write_text, quarantine
 from cbpi.api.system_clock import ask_timedatectl
 from os import listdir
 from os.path import isfile, join
@@ -90,6 +90,13 @@ class OrderRefused(Exception):
 
     def body(self):
         return dict(error=self.error, **self.more)
+
+
+class BookRefused(OrderRefused):
+    """SAVE TO BOOK refused with nothing changed (StepController.savetobook).
+
+    error: bad_body, or not_in_book for a book recipe to replace that isn't there.
+    """
 
 
 class StepController:
@@ -1747,8 +1754,14 @@ class StepController:
             )
             return False
 
-    async def load_recipe(self, data):
-        """Make `data` the brew steps, every step waiting. Raises StepRunning, changing nothing, while a step runs."""
+    async def load_recipe(self, data, book_file=None, book_modified=None):
+        """Make `data` the brew steps, every step waiting. Raises StepRunning, changing nothing, while a step runs.
+
+        From the Recipe Book (RecipeController.brew), `book_file` is the book recipe's file, and `book_modified` its
+        modified time as it was read: both kept in the basic data, with when it was loaded (BOOK_FILE_KEY,
+        LOADED_AT_KEY, BOOK_MODIFIED_KEY). Whatever `data` holds of another brew (BREW_KEYS) goes, so a new brew
+        starts with nothing answered.
+        """
         self._refuse_while_running("Recipe not loaded", self.LOAD_WHILE_RUNNING)
         try:
             await self.shutdown()
@@ -1769,8 +1782,16 @@ class StepController:
                     del props[key]
 
         list(map(lambda item: add_runtime_data(item), data.get("steps")))
-        data.get("basic", {}).pop(self.MASH_PH_REMINDER_KEY, None)
-        # In one write: an import or the recipe book replaces the whole profile,
+        basic = data.setdefault("basic", {})
+        basic.pop(self.MASH_PH_REMINDER_KEY, None)
+        for key in self.BREW_KEYS:
+            basic.pop(key, None)
+        if book_file is not None:
+            basic[self.BOOK_FILE_KEY] = book_file
+            basic[self.LOADED_AT_KEY] = clock.now()
+            if book_modified is not None:
+                basic[self.BOOK_MODIFIED_KEY] = book_modified
+        # In one write: a recipe from the book replaces the whole profile,
         # and a write broken part-way would leave an unreadable file, which
         # load() would then set aside for an empty profile.
         atomic_write_json(self.path, data, indent=4, sort_keys=True)
@@ -1834,28 +1855,145 @@ class StepController:
     #: RecipeController.IMPORTED_FROM. Not part of a recipe the brewer saves.
     IMPORTED_FROM_KEY = "imported_from"
 
+    #: In the brew steps' basic data, from LOAD (load_recipe) and SAVE TO BOOK (savetobook): the Recipe Book file
+    #: the steps are a copy of; when they were loaded, on CraftBeerPi's clock (cbpi.api.clock); and that book
+    #: file's modified time when it was read or written, on the file system's clock, as GET /recipe/'s modified
+    #: is, so a page can tell the book's copy has been changed since. The steps' own, not a recipe's: book_data()
+    #: leaves them out, and loading another recipe or clearing the steps drops them.
+    BOOK_FILE_KEY = "book_file"
+    LOADED_AT_KEY = "loaded_at"
+    BOOK_MODIFIED_KEY = "book_modified"
+    BOOK_KEYS = (BOOK_FILE_KEY, LOADED_AT_KEY, BOOK_MODIFIED_KEY)
+
+    #: In the brew steps' basic data: Brew Day's answer to where the grain spent the night, for this brew - "garage",
+    #: so the boil kettle's probe stands for it, or "indoors", at the temperature given - absent while it hasn't been
+    #: asked (StrikeController.set_grain). This brew's, as BOOK_KEYS are: a load or unload drops it, and book_data()
+    #: leaves it out.
+    GRAIN_PLACE_KEY = "grain_place"
+    GRAIN_PLACES = ("garage", "indoors")
+    #: What belongs to this brew of the steps rather than to the recipe.
+    BREW_KEYS = BOOK_KEYS + (GRAIN_PLACE_KEY,)
+
+    #: A BrewStart, and how Brew Day gives its day for one brew: as a date (Mode Date; DateTime in older forms). The
+    #: Recipe Book gets it as Tomorrow, at the same time (book_data).
+    BREWSTART_TYPE = "BrewStart"
+    BREWSTART_DATE_MODES = ("Date", "DateTime")
+    BREWSTART_RECIPE_MODE = "Tomorrow"
+
     def book_data(self):
         """The brew steps as the recipe book keeps them: the recipe, not this run.
 
-        What Save writes, and what an import keeps in the book. Not the mash pH
-        reminder, which belongs to this brew; and not where an import came
-        from: a copy the brewer saves is the brewer's own, and an import of the
-        same name never replaces it (RecipeController.keep_import).
+        What SAVE TO BOOK writes. Not the mash pH reminder, which belongs to
+        this brew; not which book recipe the steps are a copy of, or when they
+        were loaded, or where tonight's grain spent the night (BREW_KEYS); and
+        not where an import came from: a copy the brewer saves is the
+        brewer's own, and an import of the same name never replaces it
+        (RecipeController.keep_import).
+
+        Nor three things Brew Day sets in the steps for one brew, which go in
+        as the recipe had them, while the brew steps keep them as they are:
+        - a BrewStart's day given as a date is Tomorrow, at the same time,
+          with no StartDate: by the next brew the date has passed;
+        - the strike water step's Temp and BrewStart's Ready_Temp, while they
+          hold the figure USE wrote, are what they were before the first USE
+          (StrikeController.recipe_temps): USE is worked out for each brew;
+        - a BrewStart's Grain_Temp is blank: Brew Day asks where the grain is
+          every brew.
         """
         basic = copy.deepcopy(self.basic_data)
         basic.pop(self.MASH_PH_REMINDER_KEY, None)
         basic.pop(self.IMPORTED_FROM_KEY, None)
-        return dict(
-            basic=basic,
-            steps=list(map(lambda item: item.to_dict(), self.profile)),
-        )
+        for key in self.BREW_KEYS:
+            basic.pop(key, None)
+        steps = list(map(lambda item: item.to_dict(), self.profile))
+        before_use = self._strike_before_use()
+        for step in steps:
+            props = step.get("props")
+            if not isinstance(props, dict):
+                continue
+            props.update(before_use.get(step.get("id")) or {})
+            if step.get("type") != self.BREWSTART_TYPE:
+                continue
+            if str(props.get("Mode") or "").strip() in self.BREWSTART_DATE_MODES:
+                props["Mode"] = self.BREWSTART_RECIPE_MODE
+                props["StartDate"] = ""
+            if "Grain_Temp" in props:
+                props["Grain_Temp"] = ""
+        return dict(basic=basic, steps=steps)
 
-    async def savetobook(self):
-        name = shortuuid.uuid()
-        path = os.path.join(
-            self.cbpi.config_folder.get_file_path("recipes"), "{}.yaml".format(name)
-        )
+    def _strike_before_use(self):
+        """{step id: {prop: temperature}}: the strike water before the first USE, from the strike water helper
+        (StrikeController.recipe_temps); {} without one, or when it can't say."""
+        temps = getattr(getattr(self.cbpi, "strike", None), "recipe_temps", None)
+        if not callable(temps):
+            return {}
+        try:
+            found = temps(self.profile)
+        except Exception:  # noqa: BLE001 - the book then gets the strike water as the steps have it
+            logging.exception("SAVE TO BOOK: could not tell what the strike water was before USE")
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    #: Why SAVE TO BOOK can't replace a book recipe: it isn't there.
+    NOT_IN_BOOK = ("That recipe is no longer in the Recipe Book: it may have been deleted on another screen. "
+                   "Nothing was saved.")
+    #: Why a new book recipe needs a name, in the page's words.
+    NEEDS_A_NAME = "Give it a name first: the Recipe Book lists recipes by name."
+
+    @staticmethod
+    def _book_file_id(file):
+        """Whether `file` can be a Recipe Book file's id: a plain name, never a path."""
+        return (isinstance(file, str) and file.strip() == file and file not in ("", ".", "..")
+                and not file.startswith(".") and os.path.basename(file) == file
+                and "/" not in file and "\\" not in file)
+
+    async def savetobook(self, file=None, name=None):
+        """Keep the brew steps in the Recipe Book (book_data). -> the book file's id.
+
+        - `file`: in place of that book recipe, named as the steps are;
+        - `name`: as a new book recipe of that name, which the steps are then called too;
+        - neither: as a new book recipe named as the steps are, as SAVE TO BOOK always did.
+
+        With `file` or `name`, the steps then know which book recipe they are a copy of (BOOK_FILE_KEY,
+        BOOK_MODIFIED_KEY), saved and sent to every page on mash_profile_update. Raises BookRefused, changing
+        nothing: 400 bad_body for both, a `file` that can't be a book file's id, or a `name` that is blank or not
+        text; 404 not_in_book for a `file` the book doesn't have.
+        """
+        if file is None and name is None:
+            book_id = shortuuid.uuid()
+            path = os.path.join(
+                self.cbpi.config_folder.get_file_path("recipes"), "{}.yaml".format(book_id)
+            )
+            data = self.book_data()
+            with open(path, "w") as out:
+                yaml.dump(data, out)
+            self.push_udpate()
+            return book_id
+        if file is not None and name is not None:
+            raise BookRefused(400, "bad_body", detail="Send file to replace a book recipe, or name to save the "
+                                                      "steps as a new one, not both.")
         data = self.book_data()
-        with open(path, "w") as file:
-            yaml.dump(data, file)
-        self.push_udpate()
+        if file is not None:
+            if not self._book_file_id(file):
+                raise BookRefused(400, "bad_body", detail="file is the id of a recipe in the Recipe Book, as "
+                                                          "GET /recipe/ lists it.")
+            book_id = file
+            path = self.cbpi.config_folder.get_recipe_file_by_id(book_id)
+            if not os.path.isfile(path):
+                raise BookRefused(404, "not_in_book", detail=self.NOT_IN_BOOK, file=book_id)
+        else:
+            if not isinstance(name, str) or not name.strip():
+                raise BookRefused(400, "bad_body", detail=self.NEEDS_A_NAME)
+            name = name.strip()
+            data["basic"]["name"] = name
+            book_id = shortuuid.uuid()
+            path = self.cbpi.config_folder.get_recipe_file_by_id(book_id)
+        atomic_write_text(path, yaml.dump(data, indent=4, sort_keys=True))
+        if name is not None:
+            self.basic_data["name"] = name
+        self.basic_data[self.BOOK_FILE_KEY] = book_id
+        self.basic_data[self.BOOK_MODIFIED_KEY] = os.path.getmtime(path)
+        await self.save()
+        # The name and the book recipe are basic data, which pages are sent only on mash_profile_update.
+        self.cbpi.ws.send(dict(topic="mash_profile_update", data=self.get_state()))
+        return book_id

@@ -105,18 +105,30 @@ def test_a_running_step_without_a_name_is_called_a_step(tmp_path):
     assert refused.value.detail == "A step is running. Stop it before loading another recipe."
 
 
-def test_an_import_while_a_step_runs_is_refused_before_the_recipe_is_read(tmp_path):
+def test_an_import_while_a_step_runs_goes_into_the_book_and_leaves_the_steps_alone(tmp_path):
     steps = brewing(tmp_path)
     upload = UploadController.__new__(UploadController)
     upload.cbpi = steps.cbpi
     upload._import_lock = asyncio.Lock()
+    upload._staging, upload._staged, upload._import_error, upload._import_warnings = False, None, None, []
     upload.get_config_values = mock.Mock()
-    upload.xml_recipe_creation = mock.AsyncMock()
-    ok, message = asyncio.run(upload.import_recipe("xml", "1"))
-    assert ok is False
-    assert message == ("Protein Rest is running. Stop it before importing a recipe: an import replaces the brew "
-                       "steps. The brew steps are unchanged.")
-    upload.get_config_values.assert_not_called()
-    upload.xml_recipe_creation.assert_not_called()
+    upload._import_problem = mock.Mock(return_value=None)
+    upload._with_mash_out = lambda found: found
+
+    async def read(recipe_id):
+        upload._staged = {"name": "Other", "steps": [
+            {"name": "Rest", "type": "MashStep", "props": {"Temp": 152}, "status": "I", "status_text": ""}]}
+
+    upload.xml_recipe_creation = read
+    steps.cbpi.config.get.side_effect = lambda key, default=None: default
+    steps.cbpi.recipe.keep_import = mock.AsyncMock(return_value=("book-1", False))
+    ok, answer = asyncio.run(upload.import_recipe("xml", "1"))
+    assert ok is True
+    assert answer == {"name": "Other", "file": "book-1", "replaced": False, "warnings": []}
+    kept, source = steps.cbpi.recipe.keep_import.await_args.args
+    assert source == "BeerXML"
+    assert kept["basic"]["name"] == "Other"
+    assert kept["steps"] == [{"name": "Rest", "type": "MashStep", "status": "I", "props": {"Temp": 152}}]
     unchanged(steps, tmp_path)
-    steps.cbpi.notify.assert_called_once_with("Recipe not imported", message, NotificationType.INFO)
+    steps.cbpi.notify.assert_called_once_with("BeerXML recipe imported", "Other. Kept in your Recipe Book.",
+                                              NotificationType.INFO)

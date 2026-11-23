@@ -82,11 +82,10 @@ class RecipeController:
     async def keep_import(self, data, source):
         """Keep an imported recipe in the book. Returns (file id, replaced an earlier copy?).
 
-        An import replaces the brew steps, and the Upload page keeps one file,
-        so without this a recipe would be gone once another was uploaded: the
-        book would hold only what the brewer saved by hand.
+        The book is where an import goes (UploadController.import_recipe): the
+        brew steps are left as they are until the brewer loads it.
 
-        So every import is kept, marked with where it came from. Importing a
+        Every import is kept, marked with where it came from. Importing a
         recipe of the same name again - changed in BeerSmith and exported again
         - replaces the copy the earlier import made, and never a recipe the
         brewer saved, edited or cloned, which carries no mark. Written in one
@@ -144,11 +143,12 @@ class RecipeController:
         os.remove(path)
 
     async def brew(self, name):
-
+        """LOAD: make the book recipe `name` the brew steps, which then know they are its copy, and when it was
+        loaded (StepController.load_recipe). Raises StepRunning, changing nothing, while a step runs."""
         recipe_path = self.cbpi.config_folder.get_recipe_file_by_id(name)
         with open(recipe_path) as file:
             data = yaml.load(file, Loader=yaml.FullLoader)
-            await self.cbpi.step.load_recipe(data)
+        await self.cbpi.step.load_recipe(data, book_file=name, book_modified=os.path.getmtime(recipe_path))
 
     async def clone(self, id, new_name):
         recipe_path = self.cbpi.config_folder.get_recipe_file_by_id(id)

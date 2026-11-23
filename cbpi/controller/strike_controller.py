@@ -12,8 +12,8 @@ Every temperature the screen sees and sends is in the brewery's unit (TEMP_UNIT)
 Volume_Unit, masses in lb or kg. The model works in F, gallons and kg; this controller converts at its edges.
 
 The brew day's own figures (the HLT's water and the grain's temperature by hand, the strike water before the first
-USE) and the last answer are kept in config/strike_day.json with the recipe's step ids: loading a recipe, the same one
-included, starts a new brew day.
+USE, and where each USE wrote its figure) and the last answer are kept in config/strike_day.json with the recipe's
+step ids: loading a recipe, the same one included, starts a new brew day.
 """
 
 import asyncio
@@ -34,6 +34,7 @@ import types
 from cbpi.api import clock, readings
 from cbpi.api.persist import atomic_write_json
 from cbpi.api.step import StepState
+from cbpi.controller.step_controller import StepController
 from cbpi.extension.hltpump import kettle_roles
 from cbpi.strike import model
 
@@ -69,6 +70,13 @@ def _id_list(steps):
 
 def _blank(value):
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _written(entry):
+    """Whether `entry` is a USE's record of a figure it wrote: {"step", "prop", "value", "unit"}."""
+    return (isinstance(entry, dict) and isinstance(entry.get("step"), str)
+            and entry.get("prop") in ("Temp", "Ready_Temp") and _number(entry.get("value")) is not None
+            and entry.get("unit") in ("F", "C"))
 
 
 class StrikeRefused(Exception):
@@ -284,7 +292,7 @@ class StrikeController:
     def __init__(self, cbpi, watch=True):
         self.cbpi = cbpi
         self.watch = watch
-        self.day = {"steps": None, "vol": None, "grain": None, "was": None}
+        self.day = {"steps": None, "vol": None, "grain": None, "was": None, "used": None}
         self.answer = None
         self.job = None
         self.failed = None
@@ -350,6 +358,9 @@ class StrikeController:
         for key in ("vol", "grain", "was"):
             value = data.get(key)
             self.day[key] = value if isinstance(value, dict) and _number(value.get("value")) is not None else None
+        used = data.get("used")
+        used = [u for u in used if _written(u)] if isinstance(used, list) else []
+        self.day["used"] = used or None
         answer = data.get("answer")
         if isinstance(answer, dict) and isinstance(answer.get("plan"), str) and isinstance(answer.get("_job"), dict):
             if answer.get("levers_status") == "working":
@@ -362,6 +373,33 @@ class StrikeController:
             atomic_write_json(self._day_path(), data)
         except Exception as e:  # noqa: BLE001 - kept in memory either way
             logger.warning("Strike water: could not save %s: %s", self.DAY_FILE, e)
+
+    def recipe_temps(self, profile):
+        """The strike water as the Recipe Book keeps it (StepController.book_data), the recipe, not this brew:
+        {step id: {prop: temperature}}, the brewery's unit, for each of the strike water step's Temp and BrewStart's
+        Ready_Temp that still holds the figure USE wrote there - what it was before the first USE (the day's was).
+
+        Empty when the brew day isn't the steps' in `profile`, there was no USE, or BACK TO since. A temperature typed
+        over USE's is the brewer's own, so it isn't given: the book keeps it as typed.
+        """
+        ids = [getattr(s, "id", None) for s in profile]
+        was, used = self.day.get("was"), self.day.get("used")
+        if not ids or self.day.get("steps") != ids or not was or not used:
+            return {}
+        unit = readings.temp_unit(self.cbpi)
+        back = self._to_unit(_number(was.get("value")), was.get("unit"), unit, "temp")
+        if back is None:
+            return {}
+        steps = dict(zip(ids, profile))
+        found = {}
+        for entry in used:
+            step = steps.get(entry["step"])
+            held = _number(_prop(step, entry["prop"])) if step is not None else None
+            wrote = self._to_unit(_number(entry["value"]), entry["unit"], unit, "temp")
+            # USE writes its figure to the tenth, so one within half of that is still its own.
+            if held is not None and abs(held - wrote) < 0.05:
+                found.setdefault(entry["step"], {})[entry["prop"]] = round(back, 1)
+        return found
 
     # -- the rig's file ------------------------------------------------------------------------------------------
 
@@ -616,11 +654,13 @@ class StrikeController:
         left = None if vol is None or strike_vol is None else round(vol - strike_vol, 2)
         plant, setup = self._plant()
         L.plant, L.setup = plant, setup
+        place = basic.get(StepController.GRAIN_PLACE_KEY)
         L.inputs = dict(rest=rest, planned=None if planned is None else round(planned, 1),
                         vol=None if vol is None else round(vol, 2), vol_from=vol_from, left=left,
                         campden=self._campden(L.bs, unit) if L.bs is not None and vol is not None else None,
                         room=room, room_why=room_why, typed=None if typed_bad else typed, grain=grain,
-                        grain_from="you" if typed is not None and not typed_bad else "probe", probe=setup["probe"])
+                        grain_from="you" if typed is not None and not typed_bad else "probe", probe=setup["probe"],
+                        grain_place=place if place in StepController.GRAIN_PLACES else None)
         if grain_kg is None or infuse_l is None or rest is None:
             L.miss = "recipe"
         elif L.sample_time is not None and model.step_for(L.sample_time) is None:
@@ -741,7 +781,7 @@ class StrikeController:
 
     def _new_day(self, ids):
         self._stop_job()
-        self.day = {"steps": list(ids), "vol": None, "grain": None, "was": None}
+        self.day = {"steps": list(ids), "vol": None, "grain": None, "was": None, "used": None}
         self.answer = None
         self.failed = None
         self._save_day()
@@ -1117,8 +1157,10 @@ class StrikeController:
         unit, si, bs = look.unit, look.si, look.bs
         before = look.inputs["planned"]
         changed = []
+        wrote = []
         if si is not None:
             si.props["Temp"] = to
+            wrote.append((si.id, "Temp"))
             changed.append("step")
             instance = getattr(si, "instance", None)
             change = getattr(instance, "change_target", None)
@@ -1130,6 +1172,7 @@ class StrikeController:
                 changed.append("question")
             if bs is not None and bs.status != StepState.DONE and str(_prop(bs, "Timing") or "") == "Ready by":
                 bs.props["Ready_Temp"] = to
+                wrote.append((bs.id, "Ready_Temp"))
                 changed.append("brewstart")
             await self.cbpi.step.save()
         else:
@@ -1138,8 +1181,13 @@ class StrikeController:
         if do == "use":
             if self.day.get("was") is None:
                 self.day["was"] = None if before is None else {"value": before, "unit": unit}
+            # Where this USE wrote its figure, and the figure, so the Recipe Book can tell it from one typed over it
+            # (recipe_temps). A figure an earlier USE wrote where this one didn't stays recorded.
+            kept = [u for u in self.day.get("used") or [] if (u["step"], u["prop"]) not in wrote]
+            self.day["used"] = kept + [dict(step=sid, prop=prop, value=to, unit=unit) for sid, prop in wrote] or None
         else:
             self.day["was"] = None
+            self.day["used"] = None
         self._save_day()
         u = "°" + unit
         if si is not None:
@@ -1185,7 +1233,13 @@ class StrikeController:
 
     async def set_grain(self, body):
         """The grain's temperature (POST /step2/strike/grain): BrewStart's Grain_Temp, or by hand the brew day's
-        figure; null blanks it, so the boil kettle's probe stands for it."""
+        figure; null blanks it, so the boil kettle's probe stands for it.
+
+        Also Brew Day's answer to where the grain spent the night, which it asks every brew: kept for this brew in
+        the brew steps' basic data (StepController.GRAIN_PLACE_KEY), and shown as inputs.grain_place. A figure is
+        "indoors"; null with place "garage" is the garage, the probe's. Null without a place answers nothing: an
+        earlier "garage" stays, as it still holds, and an earlier "indoors" goes with its figure.
+        """
         if not isinstance(body, dict) or not _id_list(body.get("steps")) or "grain" not in body:
             raise StrikeRefused(400, "bad_body", detail="Send {\"grain\": number or null, \"steps\": [...]}.")
         grain = body.get("grain")
@@ -1193,6 +1247,12 @@ class StrikeController:
             grain = _number(grain)
             if grain is None:
                 raise StrikeRefused(400, "bad_body", detail="grain must be a number, or null for the probe.")
+        place = body.get("place")
+        if place is not None and place not in StepController.GRAIN_PLACES:
+            raise StrikeRefused(400, "bad_body", detail="place must be \"garage\" or \"indoors\".")
+        if (place == "garage" and grain is not None) or (place == "indoors" and grain is None):
+            raise StrikeRefused(400, "bad_body", detail="Grain indoors has its temperature; in the garage, null: the "
+                                                        "boil kettle's probe stands for it.")
         look = self.update()
         self._same_recipe(look, body["steps"])
         if not look.ids:
@@ -1202,14 +1262,23 @@ class StrikeController:
             raise StrikeRefused(400, "out_of_range", low=low, high=high)
         to = None if grain is None else round(grain, 1)
         before = look.inputs["typed"]
+        was_place = look.inputs["grain_place"]
+        answer = "indoors" if to is not None else "garage" if place == "garage" or was_place == "garage" else None
+        stepper = self.cbpi.step
         if look.bs is not None:
             look.bs.props["Grain_Temp"] = "" if to is None else to
-            await self.cbpi.step.save()
             by = "brewstart"
         else:
             self.day["grain"] = None if to is None else {"value": to, "unit": look.unit}
             self._save_day()
             by = "brewday"
+        basic = stepper.basic_data
+        if answer is None:
+            basic.pop(StepController.GRAIN_PLACE_KEY, None)
+        else:
+            basic[StepController.GRAIN_PLACE_KEY] = answer
+        if look.bs is not None or answer != was_place:
+            await stepper.save()
         u = "°" + look.unit
         if to is None:
             logger.info("Grain temperature from the boil kettle's probe%s",
@@ -1217,7 +1286,7 @@ class StrikeController:
         else:
             logger.info("Grain temperature set to %.1f %s, was %s", to, u,
                         "the boil kettle's probe" if before is None else "%.1f %s" % (before, u))
-        return dict(applied=dict(what="grain", to=to, **{"from": before}, by=by),
+        return dict(applied=dict(what="grain", to=to, **{"from": before}, by=by, place=answer),
                     strike=self.get_state(self.update()))
 
     async def forecast(self, temp_text):

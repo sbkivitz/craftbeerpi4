@@ -118,7 +118,7 @@ class StrikeHttpEndpoints:
     async def http_strike_grain(self, request):
         """
         ---
-        description: The grain's temperature - BrewStart's Grain_Temp, or by hand the brew day's figure. null blanks it, and the boil kettle's probe stands for it again.
+        description: The grain's temperature - BrewStart's Grain_Temp, or by hand the brew day's figure. null blanks it, and the boil kettle's probe stands for it again. place keeps Brew Day's answer to where the grain spent the night for this brew, as inputs.grain_place shows it - a figure is indoors, and null with place garage the garage; null without place answers nothing, an earlier garage staying and an earlier indoors going.
         tags:
         - Step
         parameters:
@@ -130,6 +130,9 @@ class StrikeHttpEndpoints:
             properties:
               grain:
                 type: number
+              place:
+                type: string
+                enum: [garage, indoors]
               steps:
                 type: array
                 items:
@@ -138,7 +141,7 @@ class StrikeHttpEndpoints:
             "200":
                 description: what was applied, and the state
             "400":
-                description: bad_body or out_of_range
+                description: bad_body (a place that isn't garage or indoors, garage with a figure, indoors without one) or out_of_range
             "409":
                 description: recipe_changed, or off with nothing loaded
         """

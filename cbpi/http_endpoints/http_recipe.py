@@ -128,7 +128,9 @@ class RecipeHttpEndpoints:
     async def http_brew(self, request):
         """
         ---
-        description: Brew recipe with given file name from the craftbeerpi recipe book
+        description: "LOAD: make the recipe with this file name in the Recipe Book the brew steps. Their basic data
+          then has book_file (this file), loaded_at (when, on CraftBeerPi's clock) and book_modified (the file's
+          modified time as GET /recipe/ gives it)"
         tags:
         - Recipe
         parameters:

@@ -4,7 +4,7 @@ import logging
 from aiohttp import web
 from cbpi.api import *
 from cbpi.api.dataclasses import Props, Step
-from cbpi.controller.step_controller import OrderRefused, StartRefused, StepController, StepRunning
+from cbpi.controller.step_controller import BookRefused, OrderRefused, StartRefused, StepController, StepRunning
 from cbpi.http_endpoints.http_strike import StrikeHttpEndpoints
 
 
@@ -532,14 +532,58 @@ class StepHttpEndpoints(StrikeHttpEndpoints):
     @request_mapping(path="/savetobook", method="POST", auth_required=False)
     async def http_savetobook(self, request):
         """
-
         ---
-        description: Save Active Recipe to Recipe Book
+        description: |
+          Keep the brew steps in the Recipe Book, and answer {"file": the book file's id}.
+          - {"file": id}: in place of that book recipe, named as the steps are;
+          - {"name": "..."}: as a new book recipe of that name, which the steps are then called too;
+          - no body, or {}: as a new book recipe named as the steps are, as before.
+          With file or name the brew steps then know the book recipe: their basic data's book_file, and
+          book_modified, the file's modified time as GET /recipe/ gives it. With no body they don't.
+          What is written is the recipe, not this brew: a BrewStart's day given as a date goes in as Tomorrow at
+          the same time, the strike water as it was before the first USE, and BrewStart's grain temperature blank,
+          while the brew steps keep all three.
+          Refused, with nothing changed:
+          - 400 {"error": "bad_body", "detail"}: not a JSON object, a key other than file and name, both, a file that
+            can't be a book recipe's id, or a name that is blank or not text;
+          - 404 {"error": "not_in_book", "detail", "file"}: the book has no recipe with that file.
         tags:
         - Step
+        parameters:
+        - in: body
+          name: body
+          description: the book recipe to replace, or the name of a new one; none for a new one named as the steps
+          required: false
+          schema:
+            type: object
+            properties:
+              file:
+                type: string
+              name:
+                type: string
+            example:
+                file: "YhweWUoDCyYKB887DJ9EXd"
         responses:
             "200":
-                description: successful operation
+                description: '{"file": the book file''s id}'
+            "400":
+                description: the body can't be used - error bad_body
+            "404":
+                description: the book has no recipe with that file - error not_in_book
         """
-        await self.controller.savetobook()
-        return web.Response(status=200)
+        data = {}
+        raw = await request.read() if request.body_exists else b""
+        if raw.strip():
+            try:
+                data = json.loads(raw)
+            except ValueError:  # not JSON, or not UTF-8
+                data = None
+            if not isinstance(data, dict) or set(data) - {"file", "name"}:
+                return web.json_response(status=400, data=dict(
+                    error="bad_body", detail='Send {"file": id} to replace a book recipe, {"name": "..."} to save '
+                                             'the steps as a new one, or nothing.'))
+        try:
+            book_id = await self.controller.savetobook(file=data.get("file"), name=data.get("name"))
+        except BookRefused as refused:
+            return web.json_response(status=refused.status, data=refused.body())
+        return web.json_response(data=dict(file=book_id))
