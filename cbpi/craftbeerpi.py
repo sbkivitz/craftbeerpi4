@@ -26,6 +26,7 @@ from cbpi.controller.actor_controller import ActorController
 from cbpi.controller.config_controller import ConfigController
 from cbpi.controller.dashboard_controller import DashboardController
 from cbpi.controller.fermentation_controller import FermentationController
+from cbpi.controller.figures_controller import FiguresController
 from cbpi.controller.fermenter_recipe_controller import \
     FermenterRecipeController
 from cbpi.controller.job_controller import JobController
@@ -48,6 +49,7 @@ from cbpi.http_endpoints.http_actor import ActorHttpEndpoints
 from cbpi.http_endpoints.http_config import ConfigHttpEndpoints
 from cbpi.http_endpoints.http_dashboard import DashBoardHttpEndpoints
 from cbpi.http_endpoints.http_fermentation import FermentationHttpEndpoints
+from cbpi.http_endpoints.http_figures import FiguresHttpEndpoints
 from cbpi.http_endpoints.http_fermenterrecipe import \
     FermenterRecipeHttpEndpoints
 from cbpi.http_endpoints.http_kettle import KettleHttpEndpoints
@@ -223,6 +225,8 @@ class CraftBeerPi:
         self.precheck : PrecheckController = PrecheckController(self)
         # The strike water helper: USE for the loaded recipe, worked out in a process of its own (GET /step2/strike).
         self.strike : StrikeController = StrikeController(self)
+        # Figures from past brews: the brews in the logs and BrewScribe, and USE for what they measured (GET /figures).
+        self.figures : FiguresController = FiguresController(self)
         self.satellite = None
         if str(self.static_config.get("mqtt", False)).lower() == "true":
             self.satellite: SatelliteController = SatelliteController(self)
@@ -244,6 +248,7 @@ class CraftBeerPi:
         self.http_fermenter = FermentationHttpEndpoints(self)
         self.http_resttimer = RestTimerHttpEndpoints(self)
         self.http_timers = TimersHttpEndpoints(self)
+        self.http_figures = FiguresHttpEndpoints(self)
 
         self.login = Login(self)
 
@@ -424,6 +429,8 @@ class CraftBeerPi:
         await self.timers.init()
         # The strike water helper's brew day and last answer, then its look at the numbers once a second.
         await self.strike.init()
+        # Figures hears the recipe finish, to tell the screens a brew ended.
+        await self.figures.init()
         await self.call_initializer(self.app)
         await self.dashboard.init()
 

@@ -1509,6 +1509,7 @@ class StepController:
         return next((i for i, item in enumerate(self.profile) if item.id == id), None)
 
     def push_udpate(self, complete=False):
+        self._log_active_step()
         if complete is True:
             self.cbpi.ws.send(dict(topic="mash_profile_update", data=self.get_state()))
             for item in self.profile:
@@ -1528,6 +1529,21 @@ class StepController:
                 self.cbpi.push_update(
                     topic="cbpi/stepupdate/{}".format(step.id), data=(step.to_dict())
                 )
+
+    def _log_active_step(self):
+        """Log the number of the step now active - 1 for the first, 0 for none - as "steps.active" each time it
+        changes, beside every step_update: a past brew's graph on Figures draws its numbered step marks from it, as
+        Brew Day's graphs do from the steps they see. log_change writes it through log_control_data, only when it
+        differs from the last number logged."""
+        try:
+            log = getattr(self.cbpi, "log", None)
+            if log is None or not hasattr(log, "log_change"):
+                return
+            active = next((i + 1 for i, item in enumerate(self.profile or [])
+                           if item.status == StepState.ACTIVE), 0)
+            log.log_change("steps.active", active)
+        except Exception as e:  # noqa: BLE001 - a step mark never stops the brew
+            logging.warning("Could not log the active step: %s", e)
 
     def add_listener(self, fn):
         """Tell `fn` about the brew steps as they change: fn(event, snapshot).
