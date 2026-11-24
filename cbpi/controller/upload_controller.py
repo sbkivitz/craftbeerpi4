@@ -582,18 +582,23 @@ class UploadController:
         in its declared encoding, UTF-8, Windows-1252 or Latin-1, or else made
         plain English letters - and kept as UTF-8 under a UTF-8 declaration, so
         it parses: a Latin-1 o-umlaut under a UTF-8 declaration stays an
-        o-umlaut, a NUL byte goes. The log says how it was read. JSON that is
+        o-umlaut, a NUL byte goes. So is BeerXML declaring ISO-8859-1 with a
+        byte from 0x80 to 0x9F, which beerxml.read takes as Windows-1252, as
+        browsers do: BeerSmith's 0x92 is an apostrophe, not a control
+        character. The log says how it was read. JSON that is
         not UTF-8, and a file not even that makes XML, are still decoded
         leniently, so they import with odd characters rather than not at all.
         """
         if kind == "xml":
             declared = beerxml.declared_encoding(content) or "UTF-8 (none declared)"
-            try:
-                xml.etree.ElementTree.fromstring(content)
-                logging.info("BeerXML upload: read in its declared encoding, %s", declared)
-                return content
-            except Exception:  # noqa: BLE001 - ParseError, or LookupError for an encoding Python doesn't know
-                pass
+            as_declared = beerxml.read_as_declared(content)
+            if as_declared:
+                try:
+                    xml.etree.ElementTree.fromstring(content)
+                    logging.info("BeerXML upload: read in its declared encoding, %s", declared)
+                    return content
+                except Exception:  # noqa: BLE001 - ParseError, or LookupError for an encoding Python doesn't know
+                    pass
             try:
                 found = beerxml.read(content)
             except Exception as e:  # noqa: BLE001
@@ -603,6 +608,13 @@ class UploadController:
                     logging.warning("BeerXML upload: doesn't parse as %s in any of %s; read as %s, made plain "
                                     "English letters, and kept as UTF-8", declared,
                                     ", ".join(beerxml.decode_order(content)), found.encoding)
+                elif not as_declared and found.encoding == "cp1252":
+                    logging.info("BeerXML upload: its declared %s read as Windows-1252, as browsers read it, and "
+                                 "kept as UTF-8", declared)
+                elif not as_declared:
+                    logging.warning("BeerXML upload: its declared %s is read as Windows-1252, as browsers read it, "
+                                    "but has a byte Windows-1252 leaves undefined; read as %s, and kept as UTF-8",
+                                    declared, found.encoding)
                 else:
                     logging.warning("BeerXML upload: doesn't parse as its declared %s; read as %s, and kept as "
                                     "UTF-8", declared, found.encoding)
@@ -1265,16 +1277,22 @@ class UploadController:
 
     @staticmethod
     def _xml_root(content):
-        """The BeerXML bytes `content`, parsed: as sent, in the encoding they declare, or else as beerxml.read reads
-        them, which the log then says. An upload is kept so that it parses as sent (_kept_bytes); a beer.xml an
-        older CraftBeerPi kept may not."""
-        try:
-            return xml.etree.ElementTree.fromstring(content)
-        except Exception:  # noqa: BLE001 - ParseError, or LookupError for an encoding Python doesn't know
-            found = beerxml.read(content)
-            logging.warning("BeerXML: the uploaded file doesn't parse as it declares; read as %s%s", found.encoding,
-                            ", made plain English letters" if found.plain else "")
-            return found.root
+        """The BeerXML bytes `content`, parsed: as sent, in the encoding they declare, unless beerxml.read reads them
+        otherwise (a declared ISO-8859-1 with a byte from 0x80 to 0x9F, read as Windows-1252) or they don't parse
+        that way; then as beerxml.read reads them, which the log says. An upload is kept so that it parses as sent
+        (_kept_bytes); a beer.xml an older CraftBeerPi kept may not."""
+        as_declared = beerxml.read_as_declared(content)
+        if as_declared:
+            try:
+                return xml.etree.ElementTree.fromstring(content)
+            except Exception:  # noqa: BLE001 - ParseError, or LookupError for an encoding Python doesn't know
+                pass
+        found = beerxml.read(content)
+        windows_1252 = not as_declared and found.encoding == "cp1252" and not found.plain
+        (logging.info if windows_1252 else logging.warning)(
+            "BeerXML: the uploaded file read as %s%s", found.encoding,
+            ", made plain English letters" if found.plain else "")
+        return found.root
 
     def _xml_file_root(self, path):
         with open(path, "rb") as file:

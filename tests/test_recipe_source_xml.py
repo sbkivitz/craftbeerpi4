@@ -7,8 +7,10 @@ source_xml, relative to the config folder, and source_xml_recipe, the NAME of th
 
 Odd text never loses a recipe: an upload that doesn't parse as it declares is read in UTF-8, Windows-1252 or
 Latin-1, or else made plain English letters (cbpi.api.beerxml), and kept as UTF-8; names compare by their letters.
+A declared ISO-8859-1 is read as strict Windows-1252 first, as browsers read it (post67); a declared US-ASCII as
+strict ASCII, as before, so UTF-8 under it reads as UTF-8.
 
-Each test fails on a core before post65.
+Each test fails on a core before post65; the Windows-1252 reading's on one before post67.
 """
 
 import asyncio
@@ -131,44 +133,73 @@ def doc(declared, name, extra=b""):
 
 
 ODD = [
-    # (what, bytes, the name read, the encoding it was read in, made plain)
-    ("Latin-1 under a UTF-8 declaration", doc(b"UTF-8", b"K\xf6lsch"), "Kölsch", "cp1252", False),
-    ("UTF-8 under an ISO-8859-1 declaration", doc(b"ISO-8859-1", "Kölsch".encode()), "KÃ¶lsch", "iso8859-1", False),
-    ("no declaration, Latin-1", doc(None, b"K\xf6lsch"), "Kölsch", "cp1252", False),
-    ("a UTF-8 byte-order mark", b"\xef\xbb\xbf" + doc(b"UTF-8", "Kölsch".encode()), "Kölsch", "utf-8", False),
-    ("a byte-order mark before Latin-1", b"\xef\xbb\xbf" + doc(None, b"K\xf6lsch"), "Kölsch", "cp1252", False),
-    ("Windows-1252 quote and dash", doc(None, b"Brewer\x92s \x96 K\xf6lsch"), "Brewer’s – Kölsch", "cp1252", False),
-    ("UTF-8 under a US-ASCII declaration", doc(b"US-ASCII", "Kölsch".encode()), "Kölsch", "utf-8", False),
-    ("a declared encoding Python doesn't know", doc(b"x-beersmith", b"K\xf6lsch"), "Kölsch", "cp1252", False),
-    ("a byte Windows-1252 hasn't", doc(None, b"K\xf6lsch", b"<NOTES>\x81</NOTES>"), "Kölsch", "iso8859-1", False),
-    ("NUL bytes and control characters", doc(b"ISO-8859-1", b"K\xf6lsch\x00\x01\x1b"), "Kolsch", "iso8859-1", True),
+    # (what, bytes, the name read, the encoding it was read in, made plain, how it is kept: "as sent" unchanged,
+    #  "as browsers" read as Windows-1252 for its ISO-8859-1 declaration, or "read" some other way)
+    ("Latin-1 under a UTF-8 declaration", doc(b"UTF-8", b"K\xf6lsch"), "Kölsch", "cp1252", False, "read"),
+    ("UTF-8 under an ISO-8859-1 declaration", doc(b"ISO-8859-1", "Kölsch".encode()), "KÃ¶lsch", "cp1252", False,
+     "as sent"),
+    ("no declaration, Latin-1", doc(None, b"K\xf6lsch"), "Kölsch", "cp1252", False, "read"),
+    ("a UTF-8 byte-order mark", b"\xef\xbb\xbf" + doc(b"UTF-8", "Kölsch".encode()), "Kölsch", "utf-8", False,
+     "as sent"),
+    ("a byte-order mark before Latin-1", b"\xef\xbb\xbf" + doc(None, b"K\xf6lsch"), "Kölsch", "cp1252", False, "read"),
+    ("Windows-1252 quote and dash", doc(None, b"Brewer\x92s \x96 K\xf6lsch"), "Brewer’s – Kölsch", "cp1252", False,
+     "read"),
+    ("BeerSmith's 0x92 under its ISO-8859-1 declaration", doc(b"ISO-8859-1", b"Brewer\x92s \x96 K\xf6lsch"),
+     "Brewer’s – Kölsch", "cp1252", False, "as browsers"),
+    ("a 0x92 under a US-ASCII declaration: not ASCII, not UTF-8, so Windows-1252", doc(b"US-ASCII", b"It\x92s"),
+     "It’s", "cp1252", False, "read"),
+    ("a byte Windows-1252 leaves undefined, under ISO-8859-1",
+     doc(b"ISO-8859-1", b"K\xf6lsch", b"<NOTES>\x81</NOTES>"), "Kölsch", "iso8859-1", False, "read"),
+    ("ISO-8859-1 with no byte from 0x80 to 0x9F", doc(b"ISO-8859-1", b"K\xf6lsch 10\xb0"), "Kölsch 10°", "cp1252",
+     False, "as sent"),
+    ("UTF-8 under a US-ASCII declaration", doc(b"US-ASCII", "Kölsch".encode()), "Kölsch", "utf-8", False, "read"),
+    ("a declared encoding Python doesn't know", doc(b"x-beersmith", b"K\xf6lsch"), "Kölsch", "cp1252", False, "read"),
+    ("a byte Windows-1252 leaves undefined", doc(None, b"K\xf6lsch", b"<NOTES>\x81</NOTES>"), "Kölsch", "iso8859-1",
+     False, "read"),
+    ("NUL bytes and control characters", doc(b"ISO-8859-1", b"K\xf6lsch\x00\x01\x1b"), "Kolsch", "cp1252", True,
+     "read"),
 ]
+IDS = [c[0] for c in ODD]
 
 
-@pytest.mark.parametrize("what, content, name, encoding, made_plain", ODD, ids=[c[0] for c in ODD])
+@pytest.mark.parametrize("what, content, name, encoding, made_plain, how", ODD, ids=IDS)
 def test_odd_bytes_are_read_declared_then_utf8_then_windows_1252_then_latin1_then_plain(
-        what, content, name, encoding, made_plain):
+        what, content, name, encoding, made_plain, how):
     found = beerxml.read(content)
     assert (found.root.findtext("RECIPE/NAME"), found.encoding, found.plain) == (name, encoding, made_plain)
 
 
-@pytest.mark.parametrize("what, content, name, encoding, made_plain", ODD, ids=[c[0] for c in ODD])
+@pytest.mark.parametrize("what, content, name, encoding, made_plain, how", ODD, ids=IDS)
 def test_an_upload_is_kept_so_a_standard_parser_reads_it_and_the_log_says_how(
-        what, content, name, encoding, made_plain, caplog):
+        what, content, name, encoding, made_plain, how, caplog):
     with caplog.at_level(logging.INFO):
         kept = UploadController._kept_bytes("xml", content)
     assert ET.fromstring(kept).findtext("RECIPE/NAME") == name
-    try:
-        ET.fromstring(content)
-        as_sent = True
-    except Exception:  # noqa: BLE001
-        as_sent = False
-    if as_sent:
+    assert UploadController._xml_root(content).findtext("RECIPE/NAME") == name
+    if how == "as sent":
         assert kept == content and "read in its declared encoding" in caplog.text
     else:
         assert kept.startswith(b'<?xml version="1.0" encoding="UTF-8"?>\n')
-        assert "read as {}".format(encoding) in caplog.text
+        if how == "as browsers":
+            assert "read as Windows-1252, as browsers read it, and kept as UTF-8" in caplog.text
+        else:
+            assert "read as {}".format(encoding) in caplog.text
         assert ("made plain English letters" in caplog.text) == made_plain
+
+
+def test_a_declared_iso_8859_1_is_decoded_as_strict_windows_1252_then_utf8_then_latin1():
+    for label in (b"ISO-8859-1", b"latin1", b"ISO_8859-1", b"L1"):
+        assert beerxml.decode_order(doc(label, b"x")) == ["cp1252", "utf-8", "iso8859-1"]
+    assert beerxml.decode_order(doc(b"UTF-8", b"x")) == ["utf-8", "cp1252", "iso8859-1"]
+    # A declared US-ASCII stays strict ASCII: a byte above 0x7F fails it, and UTF-8 is next.
+    assert beerxml.decode_order(doc(b"US-ASCII", b"x")) == ["ascii", "utf-8", "cp1252", "iso8859-1"]
+    # The five bytes strict Windows-1252 leaves undefined fail that try; UTF-8 is next, then Latin-1.
+    for undefined in b"\x81\x8d\x8f\x90\x9d":
+        found = beerxml.read(doc(b"ISO-8859-1", b"Brewer\x92s K\xf6lsch" + bytes([undefined])))
+        assert (found.encoding, found.root.findtext("RECIPE/NAME")) == (
+            "iso8859-1", "Brewer\x92s Kölsch" + chr(undefined))
+    found = beerxml.read(doc(b"ISO-8859-1", "Ácido Kölsch".encode()))
+    assert (found.encoding, found.root.findtext("RECIPE/NAME")) == ("utf-8", "Ácido Kölsch")
 
 
 def test_plain_gives_plain_english_letters_and_drops_what_xml_forbids():

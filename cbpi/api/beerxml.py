@@ -4,9 +4,11 @@ An upload's bytes don't always fit the encoding it declares: BeerSmith declares 
 quotes and dashes (0x92, 0x96); an editor may save UTF-8 under that declaration, or Latin-1 under a UTF-8 one, add a
 byte-order mark, or leave NUL bytes and other control characters XML forbids. None of that may lose a recipe:
 
-- read() tries, in order: the encoding the file declares (UTF-8 when it declares none), UTF-8, Windows-1252 and
-  Latin-1, which reads any bytes. The first that decodes and parses as XML is the one. A UTF-8 byte-order mark is
-  dropped first.
+- read() tries, in order: the encoding the file declares (UTF-8 when it declares none; ISO-8859-1 read as
+  Windows-1252, as web browsers read it), UTF-8, Windows-1252 and Latin-1, which reads any bytes. Each is
+  Python's strict codec, so Windows-1252 fails on the five bytes it leaves undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D)
+  and the next is tried; a declared US-ASCII fails on any byte above 0x7F, so UTF-8 text under it reads as UTF-8.
+  The first that decodes and parses as XML is the one. A UTF-8 byte-order mark is dropped first.
 - When none of them parses, the text the first of them decoded is made plain (plain()): what XML forbids is dropped,
   and every character outside plain ASCII becomes its plain English letters or goes. Then it is parsed again.
 
@@ -26,6 +28,13 @@ UTF8_BOM = codecs.BOM_UTF8
 DECLARED = re.compile(rb"""\A\s*<\?xml\s[^>]*?\bencoding\s*=\s*["']([A-Za-z][A-Za-z0-9._-]*)["']""")
 #: After the declared encoding, in this order.
 FALLBACKS = ("utf-8", "cp1252", "latin-1")
+#: Declared encodings read as Windows-1252 (Python's strict cp1252), as web browsers read them (the WHATWG Encoding
+#: Standard gives these labels windows-1252): ISO-8859-1 (Latin-1), by Python's codec name, under any of its aliases.
+#: Windows-1252 differs from Latin-1 only at 0x80 to 0x9F, control characters in Latin-1 and never text, so this only
+#: gains characters: BeerSmith's 0x92, under its ISO-8859-1 declaration, is the apostrophe it meant. US-ASCII is not
+#: here: strict ASCII fails on any byte above 0x7F, so UTF-8 text under that declaration is read as UTF-8, next.
+AS_WINDOWS_1252 = ("iso8859-1",)
+C1_BYTES = re.compile(rb"[\x80-\x9f]")
 
 #: read()'s answer: the parsed document, its text, the encoding it was read in, and whether it had to be made plain.
 Read = namedtuple("Read", "root text encoding plain")
@@ -48,17 +57,31 @@ def declared_encoding(content):
 
 
 def decode_order(content):
-    """The encodings read() tries for `content`, in order: the declared one (UTF-8 when there is none), then
-    FALLBACKS, each once, leaving out a declared one Python doesn't know."""
+    """The encodings read() tries for `content`, in order: the declared one (UTF-8 when there is none; ISO-8859-1 as
+    Windows-1252, AS_WINDOWS_1252), then FALLBACKS, each once, leaving out a declared one Python doesn't know."""
     order = []
-    for name in (declared_encoding(content) or "utf-8",) + FALLBACKS:
+    names = [declared_encoding(content) or "utf-8"] + list(FALLBACKS)
+    for i, name in enumerate(names):
         try:
             codec = codecs.lookup(name).name
         except LookupError:
             continue
+        if i == 0 and codec in AS_WINDOWS_1252:
+            codec = "cp1252"
         if codec not in order:
             order.append(codec)
     return order
+
+
+def read_as_declared(content):
+    """Whether a standard XML parser, reading `content` in the encoding it declares, reads what read() reads: not
+    when it declares ISO-8859-1 and has a byte from 0x80 to 0x9F, which read() takes as Windows-1252."""
+    name = declared_encoding(content)
+    try:
+        codec = codecs.lookup(name).name if name else "utf-8"
+    except LookupError:
+        return True
+    return not (codec in AS_WINDOWS_1252 and C1_BYTES.search(content))
 
 
 def plain(text):
