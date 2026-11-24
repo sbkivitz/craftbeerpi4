@@ -114,12 +114,16 @@ def forecast_out(fc, roles):
             "high_f": fc.high_f, "highest_f": fc.highest_f, "reads_f": _number(fc.reads_f), "sims": fc.sims}
 
 
-def landing_curves(record, tick=None):
+def landing_curves(record, tick=None, tun=None):
     """For one landing, at each value of landings.GRID for the tun's steel, every other number at its central guess:
     what the mash probe reads over landings.WINDOW_MIN after Next ("mid"), and the forecast's lowest and highest as the
     malt goes in, from its central case and corners ("lo0", "hi0"), in the landing's unit. The model's Next is
-    next_min, at its central guess, after the malt."""
-    brew, rig, _, _ = job_from(record["job"])
+    next_min, at its central guess, after the malt. `tun`, [kg, cal/g C]: the tun to count in place of the landing's
+    own (the Mash Tun's figures from the Hardware page)."""
+    job = record["job"]
+    if tun:
+        job = dict(job, brew=dict(job["brew"], tun_kg=float(tun[0]), tun_cal_g_c=float(tun[1])))
+    brew, rig, _, _ = job_from(job)
     dt = step_of(rig)
     box = model.ranges(brew, rig.plant)
     unit = record["unit"]
@@ -143,10 +147,10 @@ def landing_curves(record, tick=None):
     return {"mid": mid, "lo0": lo0, "hi0": hi0, "next_min": next_min}
 
 
-def fit_landing(record, logs, curves=True, tick=None):
+def fit_landing(record, logs, curves=True, tick=None, tun=None):
     """One landing for the fit: {"id", "landed", "readings"} - the mash probe's average over its window from the
-    logs, None without enough readings - and, when wanted, "curves" (landing_curves), or "error" when its model
-    can't be run."""
+    logs, None without enough readings - and, when wanted, "curves" (landing_curves, with `tun`), or "error" when its
+    model can't be run."""
     out = {"id": landings.landing_id(record if isinstance(record, dict) else {})}
     if not landings.usable_record(record):
         out["error"] = "not a landing the fit can use"
@@ -158,7 +162,7 @@ def fit_landing(record, logs, curves=True, tick=None):
     out["landed"] = None if landed is None else round(landed, 3)
     if curves:
         try:
-            out["curves"] = landing_curves(record, tick)
+            out["curves"] = landing_curves(record, tick, tun)
         except Superseded:
             raise
         except Exception as e:  # noqa: BLE001 - this landing has no curves; the others still count
@@ -214,7 +218,7 @@ class Worker:
             item = item if isinstance(item, dict) else {}
             self.tick()
             found.append(fit_landing(item.get("record"), message.get("logs"), curves=item.get("curves", True),
-                                     tick=self.tick))
+                                     tick=self.tick, tun=item.get("tun")))
         self.send({"id": message.get("id"), "fit": found})
 
     def answer_forecast(self, message):

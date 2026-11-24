@@ -370,7 +370,7 @@ def test_the_fit_has_a_worker_of_its_own(tmp_path, monkeypatch):
 def test_fit_landing_reads_the_probe_and_runs_the_model(tmp_path, monkeypatch):
     logs = tmp_path / "logs"
     write_log(logs / "sensor_mt-probe.log", NEXT_AT + 240, NEXT_AT + 960, 124.5)
-    monkeypatch.setattr(worker, "landing_curves", lambda record, tick=None: {"mid": [1.0], "lo0": [], "hi0": []})
+    monkeypatch.setattr(worker, "landing_curves", lambda record, tick=None, tun=None: {"mid": [1.0], "lo0": [], "hi0": []})
     out = worker.fit_landing(landing_record(), str(logs))
     assert (out["landed"], out["readings"], out["curves"]["mid"]) == (124.5, 301, [1.0])
     assert "curves" not in worker.fit_landing(landing_record(), str(logs), curves=False)

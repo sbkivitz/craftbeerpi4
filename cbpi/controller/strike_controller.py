@@ -43,7 +43,7 @@ from cbpi.api.persist import atomic_write_json
 from cbpi.api.step import StepState
 from cbpi.controller.step_controller import StepController
 from cbpi.extension.hltpump import kettle_roles
-from cbpi.strike import landings, model
+from cbpi.strike import landings, model, vessels
 
 logger = logging.getLogger(__name__)
 
@@ -608,7 +608,7 @@ class StrikeController:
         L = types.SimpleNamespace(unit=unit, mass_unit="lb" if unit == "F" else "kg", ids=[s.id for s in profile],
                                   off=None, phase=None, by=None, bs=None, si=None, mi=None, hlt=None, mt=None, bk=None,
                                   herms=None, pid=None, sample_time=None, model=None, key=None, numbers=None,
-                                  measured=None)
+                                  measured=None, vessels=None, tun_now=None)
         name = basic.get("name")
         L.name = name if profile and isinstance(name, str) and name.strip() else None
         try:
@@ -690,6 +690,14 @@ class StrikeController:
                 strike=temp_of_c(infuse_c), grain=temp_of_c(_number(numbers.get("grain_temp_c"))),
                 tun=temp_of_c(_number(numbers.get("tun_temp_c")))),
             lacks=lacks)
+        # The tun's steel as the model counts it: the Mash Tun's own figures from the Hardware page when it has
+        # them, else the recipe's (BeerSmith's TUN_WEIGHT and TUN_SPECIFIC_HEAT), else none.
+        beersmith_tun = (tun_kg, tun_heat) if tun_kg and tun_kg > 0 and tun_heat else None
+        mt_figure, hlt_figure = vessels.figure(L.mt, unit), vessels.figure(L.hlt, unit)
+        if mt_figure is not None:
+            L.tun_now = (mt_figure["kg"], mt_figure["specific_heat"])
+        else:
+            L.tun_now = beersmith_tun
 
         # The numbers now.
         rest = _number(_prop(L.mi, "Temp")) if L.mi is not None else None
@@ -722,6 +730,8 @@ class StrikeController:
         grain = typed if typed is not None and not typed_bad else room
         left = None if vol is None or strike_vol is None else round(vol - strike_vol, 2)
         plant, setup = self._plant()
+        plant, hlt_from = vessels.with_hlt(plant, hlt_figure)
+        L.vessels = vessels.shown(mt_figure, hlt_figure, hlt_from, beersmith_tun, unit)
         L.plant, L.setup = plant, setup
         place = basic.get(StepController.GRAIN_PLACE_KEY)
         L.inputs = dict(rest=rest, planned=None if planned is None else round(planned, 1),
@@ -753,8 +763,8 @@ class StrikeController:
             gal = (lambda v: v) if L.vol_unit == "gal" else (lambda v: v / model.L_PER_GAL)
             brew = dict(grain_kg=grain_kg, strike_gal=infuse_l / model.L_PER_GAL, rest_f=to_f(rest),
                         hlt_total_gal=max(gal(vol), infuse_l / model.L_PER_GAL),
-                        tun_kg=tun_kg if tun_kg and tun_kg > 0 and tun_heat else 0.0,
-                        tun_cal_g_c=tun_heat if tun_kg and tun_kg > 0 and tun_heat else 0.0,
+                        tun_kg=L.tun_now[0] if L.tun_now else 0.0,
+                        tun_cal_g_c=L.tun_now[1] if L.tun_now else 0.0,
                         garage_f=to_f(room), grain_given_f=None if typed is None else to_f(typed),
                         probe=setup["probe"])
             flow = dict(stop_pump_at_strike=str(_prop(L.mi, "Stop_Pump_At_Strike") or "Yes") != "No",
@@ -1154,6 +1164,7 @@ class StrikeController:
             inputs=look.inputs, rig=look.rig, sample_time=look.sample_time,
             guesses=look.guesses if miss in (None, "far") else None,
             measured=look.measured if miss in (None, "far") else None,
+            vessels=look.vessels,
             miss=miss, was=was, working=working,
             failed=None if self.failed is None else dict(at=self.failed["at"], detail=self.failed["detail"]),
             answer=self._answer_shown(look, was))
@@ -1493,7 +1504,8 @@ class StrikeController:
             strike=round(strike, 1), rest=look.inputs["rest"], lands=[fc["lo"][0], fc["hi"][0]], lo=list(fc["lo"]),
             hi=list(fc["hi"]), searched=bool(fc.get("searched")),
             numbers={k: v for k, v in answer["numbers"].items() if k != "key"}, plant=self._plant_data(),
-            plan=answer["plan"], sensor=getattr(look.mt, "sensor", None) or None, job=answer["_job"]), None
+            plan=answer["plan"], sensor=getattr(look.mt, "sensor", None) or None, job=answer["_job"],
+            vessels=look.vessels), None
 
     def _malt_in_at(self, look):
         """When the malt went in, as CraftBeerPi knows it: the brewer's Next on MashIn, when the step after it started
@@ -1543,7 +1555,9 @@ class StrikeController:
         if key is None:
             return
         fit = self.fit or {}
-        if fit.get("key") == key and (self._fit_recheck is None or time.monotonic() < self._fit_recheck):
+        tun = self._fit_tun()
+        if fit.get("key") == key and fit.get("tun") == tun and (
+                self._fit_recheck is None or time.monotonic() < self._fit_recheck):
             return
         self._fit_recheck = None
         records = [r for r in landings.read_landings(path) if landings.usable_record(r)]
@@ -1553,15 +1567,17 @@ class StrikeController:
             entry = kept.get(landings.landing_id(record)) or {}
             # A probe at the coil's outlet can't tell the steel: no curves for it, only its readings.
             curves = landings.probe_of(record) != "coil" and not (
-                isinstance(entry.get("mid"), list) and len(entry["mid"]) == len(landings.GRID))
+                isinstance(entry.get("mid"), list) and len(entry["mid"]) == len(landings.GRID)
+                and entry.get("tun") == tun)
             if curves or entry.get("landed") is None:
-                todo.append(dict(record=record, curves=curves))
+                todo.append(dict(record=record, curves=curves, tun=tun))
         if not todo:
-            self._fit_take(records, key, [])
+            self._fit_take(records, key, [], tun)
             return
         loop = asyncio.get_running_loop()
         self._ids += 1
-        self._fitting = dict(id=self._ids, key=key, since=clock.now(), started=time.monotonic(), records=records)
+        self._fitting = dict(id=self._ids, key=key, since=clock.now(), started=time.monotonic(), records=records,
+                             tun=tun)
         sensors = {t["record"].get("sensor") for t in todo if t["record"].get("sensor")}
         message = {"kind": "fit", "id": self._ids, "landings": todo, "logs": self._logs_folder()}
         loop.create_task(self._send_fit(sensors, message))
@@ -1595,11 +1611,22 @@ class StrikeController:
         if job is None or message.get("id") != job["id"]:
             return
         self._fitting = None
-        self._fit_take(job["records"], job["key"], message.get("fit") or [])
+        self._fit_take(job["records"], job["key"], message.get("fit") or [], job.get("tun"))
 
-    def _fit_take(self, records, key, found):
+    def _fit_tun(self):
+        """The tun every landing is fitted with: the Mash Tun's own figures from the Hardware page, [kg, cal/g C],
+        the starting point for all of them; or None, each landing fitted with the tun its forecast was worked out
+        with, the recipe's."""
+        try:
+            mt = kettle_roles(self.cbpi).get("mt")
+            found = vessels.figure(mt, readings.temp_unit(self.cbpi))
+        except Exception:  # noqa: BLE001 - the landings' own then
+            return None
+        return None if found is None else [round(found["kg"], 4), found["specific_heat"]]
+
+    def _fit_take(self, records, key, found, tun=None):
         """The landings' entries, kept ones with what the worker found added, and the fit across them, into
-        strike_fit.json."""
+        strike_fit.json. `tun`: the tun the curves were worked out with (_fit_tun)."""
         kept = {e.get("id"): e for e in (self.fit or {}).get("landings") or [] if isinstance(e, dict)}
         got = {f.get("id"): f for f in found if isinstance(f, dict)}
         now = clock.now()
@@ -1615,7 +1642,7 @@ class StrikeController:
             curves = new.get("curves")
             if isinstance(curves, dict):
                 entry.update(mid=curves["mid"], lo0=curves["lo0"], hi0=curves["hi0"],
-                             next_min=curves.get("next_min"))
+                             next_min=curves.get("next_min"), tun=tun)
             if new.get("error"):
                 entry["error"] = new["error"]
             # A landing found once is kept: its probe's log rotates away within days.
@@ -1647,7 +1674,7 @@ class StrikeController:
         for entry in entries:
             entry.update(result["landings"].get(entry["id"]) or dict(fit_mid=None, fit_lo=None, fit_hi=None,
                                                                      off=None))
-        self.fit = dict(version=landings.VERSION, key=key, at=round(now, 3), grid=list(landings.GRID),
+        self.fit = dict(version=landings.VERSION, key=key, tun=tun, at=round(now, 3), grid=list(landings.GRID),
                         window_min=list(landings.WINDOW_MIN), guess=landings.FIT_GUESS, value=result["value"],
                         why=result["why"], brews=result["brews"], rms_f=result["rms_f"], edge=result["edge"],
                         landings=entries)
