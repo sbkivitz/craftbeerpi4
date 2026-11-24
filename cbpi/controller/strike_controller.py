@@ -740,21 +740,16 @@ class StrikeController:
                         room=room, room_why=room_why, typed=None if typed_bad else typed, grain=grain,
                         grain_from="you" if typed is not None and not typed_bad else "probe", probe=setup["probe"],
                         grain_place=place if place in StepController.GRAIN_PLACES else None)
-        if grain_kg is None or infuse_l is None or rest is None:
-            L.miss = "recipe"
-        elif L.sample_time is not None and model.step_for(L.sample_time) is None:
+        # Every number missing, in the order the box names them; the first is the state's miss, which older screens read
+        L.misses = [name for name, missing in (
+            ("recipe", grain_kg is None or infuse_l is None or rest is None),
             # A SampleTime that isn't a whole number of seconds: no step of the replay divides it.
-            L.miss = "sample_time"
-        elif room is None:
-            L.miss = "probe"
-        elif not low <= room <= high:
-            L.miss = "room"
-        elif typed_bad:
-            L.miss = "grain"
-        elif vol is None or vol < strike_vol - 1e-9:
-            L.miss = "vol"
-        else:
-            L.miss = None
+            ("sample_time", L.sample_time is not None and model.step_for(L.sample_time) is None),
+            ("probe", room is None),
+            ("room", room is not None and not low <= room <= high),
+            ("grain", typed_bad),
+            ("vol", vol is None or (strike_vol is not None and vol < strike_vol - 1e-9))) if missing]
+        L.miss = L.misses[0] if L.misses else None
 
         L.rig = dict(through_coil=setup["through_coil"], still_probe=setup["still_probe"])
         L.guesses = None
@@ -1165,7 +1160,7 @@ class StrikeController:
             guesses=look.guesses if miss in (None, "far") else None,
             measured=look.measured if miss in (None, "far") else None,
             vessels=look.vessels,
-            miss=miss, was=was, working=working,
+            miss=miss, misses=list(look.misses) or ([miss] if miss else []), was=was, working=working,
             failed=None if self.failed is None else dict(at=self.failed["at"], detail=self.failed["detail"]),
             answer=self._answer_shown(look, was))
         return state
