@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import time
 from collections import OrderedDict
 from datetime import datetime
 from email import message
@@ -76,11 +75,16 @@ class NotificationController:
         except Exception as e:
             pass
 
-    # Seconds before the same log message raises a notification again. With
-    # NOTIFY_ON_ERROR on, a fault that logs every control pass would otherwise
-    # send a notification every second - to the phone, through any listener -
-    # for as long as it lasted.
+    # With NOTIFY_ON_ERROR on, a fault that logs every control pass would send
+    # a notification every second - to the phone, through any listener - for
+    # as long as it lasted. So a line logged again and again is notified once
+    # every LOG_NOTIFY_REPEAT_EVERY seconds. A line that has not been logged
+    # for LOG_NOTIFY_QUIET seconds has cleared, and is notified at once when
+    # it comes back: the window cbpi.api.log_repeats holds a repeating line
+    # back for. The lines are remembered LOG_NOTIFY_REMEMBERED at most, the
+    # one logged longest ago forgotten first.
     LOG_NOTIFY_REPEAT_EVERY = 3600
+    LOG_NOTIFY_QUIET = 300
     LOG_NOTIFY_REMEMBERED = 200
 
     def notify_log_event(self, record):
@@ -106,17 +110,32 @@ class NotificationController:
         return True
 
     def _log_notification_due(self, level, message):
-        sent = self.__dict__.setdefault("_log_notified", OrderedDict())
+        """Whether this log line raises a notification: the first time it is
+        logged, when it comes back after LOG_NOTIFY_QUIET seconds unlogged, and
+        once every LOG_NOTIFY_REPEAT_EVERY seconds while it keeps being logged.
+
+        Timed on CraftBeerPi's clock, so a simulator at 60x notifies as a rig
+        would, 60 times as fast. A gap that comes out negative - the clock
+        replaced by one that is behind - counts as the line coming back: it is
+        notified once, and timed from then.
+        """
+        lines = self.__dict__.setdefault("_log_lines", OrderedDict())
         key = (level, message)
-        now = time.monotonic()
-        last = sent.get(key)
-        if last is not None and now - last < self.LOG_NOTIFY_REPEAT_EVERY:
-            return False
-        sent[key] = now
-        sent.move_to_end(key)
-        while len(sent) > self.LOG_NOTIFY_REMEMBERED:
-            sent.popitem(last=False)
-        return True
+        now = clock.monotonic()
+        times = lines.get(key)  # [when last notified, when last logged]
+        due = (
+            times is None
+            or not 0 <= now - times[1] < self.LOG_NOTIFY_QUIET
+            or not 0 <= now - times[0] < self.LOG_NOTIFY_REPEAT_EVERY
+        )
+        if due:
+            lines[key] = [now, now]
+        else:
+            times[1] = now
+        lines.move_to_end(key)
+        while len(lines) > self.LOG_NOTIFY_REMEMBERED:
+            lines.popitem(last=False)
+        return due
 
     def get_state(self):
         result = self.notifications
