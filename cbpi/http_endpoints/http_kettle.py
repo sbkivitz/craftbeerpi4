@@ -132,9 +132,10 @@ class KettleHttpEndpoints:
     async def http_vessel(self, request):
         """
         ---
-        description: "Save only what a kettle measures: capacity, min_water, empty_weight, material and specific_heat. Each
-          field the body has is saved, null clearing it; one it leaves out stays. Nothing else changes, and the
-          kettle's AUTO goes on as it was, unlike PUT /kettle/{id}, which stops it."
+        description: "Save only what a kettle measures and has fitted: capacity, min_water, empty_weight, material,
+          specific_heat, condenser and condenser_name. Each field the body has is saved, null clearing it; one it
+          leaves out stays. Nothing else changes, and the kettle's AUTO goes on as it was, unlike PUT /kettle/{id},
+          which stops it."
         tags:
         - Kettle
         parameters:
@@ -159,6 +160,10 @@ class KettleHttpEndpoints:
                 type: string
               specific_heat:
                 type: number
+              condenser:
+                type: string
+              condenser_name:
+                type: string
         responses:
             "200":
                 description: the kettle, as GET /kettle/ lists it
@@ -176,7 +181,7 @@ class KettleHttpEndpoints:
             return web.json_response(status=400, data={
                 "error": "bad_body",
                 "detail": "Send the measurements to save: {\"capacity\", \"min_water\", \"empty_weight\", \"material\", "
-                          "\"specific_heat\"}, any of them."})
+                          "\"specific_heat\", \"condenser\", \"condenser_name\"}, any of them."})
         item = await self.controller.save_measures(id, data)
         if item is None:
             return _no_kettle(id)
@@ -224,6 +229,12 @@ class KettleHttpEndpoints:
               specific_heat:
                 type: number
                 description: "With other, cal/g.C, as BeerSmith's TUN_SPECIFIC_HEAT. Null for unknown; left out, kept"
+              condenser:
+                type: string
+                description: "fitted: a steam condenser on its lid (a boil kettle's). Null for none; left out, kept"
+              condenser_name:
+                type: string
+                description: "The condenser's name, as Brew Day says it. Null for steam condenser; left out, kept"
         responses:
             "200":
                 description: successful operation

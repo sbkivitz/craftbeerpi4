@@ -25,7 +25,7 @@ from cbpi.controller.upload_controller import UploadController
 from tests.cbpi_config_fixture import CraftBeerPiTestCase
 from tests.test_recipe_pages import uploader
 
-FIELDS = ("capacity", "min_water", "empty_weight", "material", "specific_heat")
+FIELDS = ("capacity", "min_water", "empty_weight", "material", "specific_heat", "condenser", "condenser_name")
 #: Test Recipe v5's figures, as its BeerSmith export gives them: 23.0 gal before the boil, 20 lb of grain, 10.8 gal
 #: of mash water.
 V5 = {"boil_l": 87.064973, "grain_kg": 9.07184, "infusions_l": 40.731031, "infuse_l": 31.267501,
@@ -73,13 +73,26 @@ def test_a_material_is_one_of_three_or_unknown():
         ["aluminium", "stainless_steel", "copper"]
 
 
+def test_a_condenser_on_the_lid_is_fitted_or_not_and_called_steam_condenser_when_its_name_is_blank():
+    assert [kettle_measures.stored("condenser", v) for v in ("fitted", " Fitted ", "  ", None, "no", True)] == \
+        ["fitted", "fitted", None, None, "no", None]
+    assert [kettle_measures.condenser_fitted(Kettle("bk", "Boil Kettle", condenser=v))
+            for v in ("fitted", "FITTED", "no", None, True)] == [True, True, False, False, False]
+    assert [kettle_measures.condenser_name(Kettle("bk", "Boil Kettle", condenser_name=v))
+            for v in (" Steam Slayer ", "", None, 3)] == ["Steam Slayer", "steam condenser", "steam condenser",
+                                                          "steam condenser"]
+    assert kettle_measures.condenser_fitted(None) is False
+
+
 def test_a_save_without_the_measurements_keeps_the_kettles_own_and_null_clears_one():
     kept = Kettle("hlt", "HLT", capacity=20, min_water=3.5, empty_weight=31.5, material="stainless_steel")
     assert KettleController.measures({"name": "HLT"}, kept=kept) == {
-        "capacity": 20, "min_water": 3.5, "empty_weight": 31.5, "material": "stainless_steel", "specific_heat": None}
+        "capacity": 20, "min_water": 3.5, "empty_weight": 31.5, "material": "stainless_steel", "specific_heat": None,
+        "condenser": None, "condenser_name": None}
     assert KettleController.measures({"capacity": None, "material": "other", "specific_heat": "0.2",
                                       "min_water": "4,5"}, kept=kept) == {
-        "capacity": None, "min_water": 4.5, "empty_weight": 31.5, "material": "other", "specific_heat": 0.2}
+        "capacity": None, "min_water": 4.5, "empty_weight": 31.5, "material": "other", "specific_heat": 0.2,
+        "condenser": None, "condenser_name": None}
     assert KettleController.measures({"name": "New"}) == dict.fromkeys(FIELDS)
     assert KettleController.measures(None) == dict.fromkeys(FIELDS)
 
@@ -101,7 +114,8 @@ class KettleMeasuresHttpTestCase(CraftBeerPiTestCase):
             listed = await (await self.client.get("/kettle/")).json()
             seen = next(k for k in listed["data"] if k["id"] == kettle_id)
             assert {k: seen[k] for k in FIELDS} == {"capacity": 20, "min_water": None, "empty_weight": 31.5,
-                                                    "material": "stainless_steel", "specific_heat": None}
+                                                    "material": "stainless_steel", "specific_heat": None,
+                                                    "condenser": None, "condenser_name": None}
             resp = await self.client.put(path="/kettle/%s" % kettle_id, json={"name": "Measured", "capacity": -1,
                                                                               "material": None})
             assert resp.status == 200
@@ -123,6 +137,13 @@ class KettleMeasuresHttpTestCase(CraftBeerPiTestCase):
             resp = await self.client.put(path="/kettle/%s/vessel" % kettle_id, json={"material": "aluminium"})
             seen = await resp.json()
             assert (seen["capacity"], seen["material"]) == (20.0, "aluminium")
+            resp = await self.client.put(path="/kettle/%s/vessel" % kettle_id,
+                                         json={"condenser": "Fitted", "condenser_name": " Steam Slayer "})
+            seen = await resp.json()
+            assert (seen["condenser"], seen["condenser_name"], seen["capacity"]) == ("fitted", "Steam Slayer", 20.0)
+            resp = await self.client.put(path="/kettle/%s/vessel" % kettle_id, json={"condenser": None})
+            seen = await resp.json()
+            assert (seen["condenser"], seen["condenser_name"]) == (None, "Steam Slayer")
             assert (await self.client.put(path="/kettle/%s/vessel" % kettle_id, json=[20])).status == 400
             assert (await self.client.put(path="/kettle/no-such/vessel", json={"capacity": 20})).status == 404
         finally:
@@ -186,6 +207,13 @@ def test_a_kettles_measurements_go_in_its_file_and_load_from_it():
     controller.update = mock.AsyncMock(side_effect=lambda kettle: kettle)
     loaded, _ = asyncio.run(controller.load_file("hlt", json.dumps(data), plan["token"]))
     assert (loaded.capacity, loaded.empty_weight, loaded.material) == (20, 31.5, "aluminium")
+
+
+def test_a_condenser_goes_in_the_kettles_file_and_loads_from_it():
+    data = kettle_file.export(a_kettle(condenser="fitted", condenser_name="Steam Slayer"), {}, {}, "4.7.7.post77")
+    assert data["measurements"] == {"condenser": "fitted", "condenser_name": "Steam Slayer"}
+    plan = kettle_file.plan(a_kettle(), kettle_file.parse(json.dumps(data)), {}, {})
+    assert plan["after"]["measurements"] == {"condenser": "fitted", "condenser_name": "Steam Slayer"}
 
 
 def test_odd_measurements_in_a_file_never_refuse_it():

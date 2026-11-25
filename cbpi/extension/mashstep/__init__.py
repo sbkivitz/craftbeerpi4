@@ -12,6 +12,7 @@ import numpy as np
 from cbpi.api import *
 from cbpi.api import Property, action, parameters
 from cbpi.api import clock, timefmt
+from cbpi.api import condenser, kettle_measures
 from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import Kettle, NotificationAction, NotificationType, Props
@@ -1440,6 +1441,15 @@ def _keep(cbpi):
         return {}
 
 
+def _kind(cbpi, kind):
+    """kind=`kind` for a prompt a page tells by it (NotificationController.notify), where CraftBeerPi sends one;
+    nothing where it cannot."""
+    try:
+        return {"kind": kind} if "kind" in inspect.signature(cbpi.notify).parameters else {}
+    except (TypeError, ValueError):
+        return {}
+
+
 def _kept_for(step, notification_id, kind, while_paused=False):
     """Hand a kept prompt to the step controller, which takes it down once it
     no longer applies (StepController.keep_step_prompt). Nothing to do where
@@ -1657,6 +1667,29 @@ class BoilStep(CBPiStep):
     #: pump the brewer has since started.
     RUNOFF_OFF_PROP = "_runoff_pumps_off"
 
+    def _condenser_fitted(self):
+        """Has the boil kettle a steam condenser fitted on its lid (cbpi.api.condenser)? Without one, the lid
+        reminder and steps_boil_actor are as they always were."""
+        return kettle_measures.condenser_fitted(getattr(self, "kettle", None))
+
+    async def _lid_answered(self):
+        """The lid reminder's Done, with a condenser fitted: its mister, set by hand, was asked on this brew, so it is
+        to be turned off once the wort has cooled after the boil (cbpi.extension.condenser)."""
+        await self.record(condenser.LID_ANSWERED_PROP, True)
+
+    async def _after_boil(self):
+        """The boil has ended as done: hand it to the condenser's watch (cbpi.extension.condenser). True if the watch
+        keeps steps_boil_actor on, to switch it off once the wort has cooled; False - nothing fitted, or no watch -
+        and the step switches it off as it always has."""
+        after = getattr(getattr(self.cbpi, "condenser", None), "after_boil", None)
+        if not callable(after):
+            return False
+        try:
+            return await after(self) is True
+        except Exception as e:  # noqa: BLE001 - the boil ends whatever this does
+            logging.error("%s: could not hand the steam condenser over: %s", self.name, e)
+            return False
+
     def _hops_done(self):
         done = self.props.get(self.HOPS_DONE_PROP, None) or []
         try:
@@ -1856,7 +1889,7 @@ class BoilStep(CBPiStep):
 
     async def on_start(self):
 
-        self.lid_temp = 95 if self.get_config_value("TEMP_UNIT", "C") == "C" else 203
+        self.lid_temp = condenser.lid_temp(self.get_config_value("TEMP_UNIT", "C"))
         lid_on = self.props.get("LidAlert", "No") == "Yes"
         # The lid actor follows the setting; the alert is given once a brew.
         self.lid_actor_flag = lid_on
@@ -2007,7 +2040,13 @@ class BoilStep(CBPiStep):
             self.kettle.target_temp = 0
         if self.AutoMode == True:
             await self.setAutoMode(False)
-        if self.lid_actor is not None:
+        # Ended as done - its time up, or NEXT - the boil hands a steam condenser to its watch, which keeps a mister
+        # CraftBeerPi switches on until the wort has cooled below the lid's temperature. Stopped (STOP, ALL OFF, the
+        # server's end), or with no condenser fitted, steps_boil_actor goes off now, as it always has.
+        kept = False
+        if getattr(self, "cancel_reason", None) in (StepResult.NEXT, StepResult.DONE):
+            kept = await self._after_boil()
+        if self.lid_actor is not None and not kept:
             try:
                 await self.actor_off(self.lid_actor) 
             except:
@@ -2123,12 +2162,16 @@ class BoilStep(CBPiStep):
                 # the floor, and it fires exactly once. Its words are a setting
                 # (steps_boil_lid_alert), so its button says only that it is done.
                 # Kept like the hop alerts, through a pause: it is not given again.
+                # With a steam condenser fitted it asks for its mister: its Done
+                # is kept with the step, and a page tells it by its kind.
+                fitted = self._condenser_fitted()
                 _kept_for(self, self.cbpi.notify(
                     self.lid_alert_text,
                     "Reached temp close to boiling",
                     NotificationType.WARNING,
-                    action=[NotificationAction("Done")],
+                    action=[NotificationAction("Done", self._lid_answered if fitted else None)],
                     **_keep(self.cbpi),
+                    **(_kind(self.cbpi, condenser.KIND_ON) if fitted else {}),
                 ), "lid", while_paused=True)
                 self.lid_flag = False
                 await self.record(self.LID_ALERT_DONE_PROP, True)
@@ -2136,6 +2179,11 @@ class BoilStep(CBPiStep):
             if self.lid_actor is not None and sensor_value >= self.lid_temp and self.lid_actor_flag:
                 if self.get_actor_state(self.lid_actor) is False:
                     await self.actor_on(self.lid_actor)
+                # A condenser's mister on as the boil asks, this brew: switched off once the wort has cooled after
+                # the boil, not as the boil ends (cbpi.extension.condenser).
+                if (self._condenser_fitted() and not self.props.get(condenser.ACTOR_ON_PROP, False)
+                        and self.get_actor_state(self.lid_actor) is True):
+                    await self.record(condenser.ACTOR_ON_PROP, True)
 
             if self.timer.is_running is not True:
                 self.note_heat_progress(sensor_value, self.props.get("Temp", 0))

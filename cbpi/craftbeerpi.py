@@ -352,9 +352,12 @@ class CraftBeerPi:
                       contact="avollkopf@web.de")
 
 
-    def notify(self, title: str, message: str, type: NotificationType = NotificationType.INFO, action=[], keep=False):
+    def notify(self, title: str, message: str, type: NotificationType = NotificationType.INFO, action=[], keep=False,
+               kind=None):
         """Send a notification; see NotificationController.notify. Returns its id."""
-        return self.notification.notify(title, message, type, action, keep=keep)
+        if kind is None:
+            return self.notification.notify(title, message, type, action, keep=keep)
+        return self.notification.notify(title, message, type, action, keep=keep, kind=kind)
         
     def push_update(self, topic, data, retain=False) -> None:
 

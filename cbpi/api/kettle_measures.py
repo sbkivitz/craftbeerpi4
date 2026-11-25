@@ -7,16 +7,24 @@
 - specific_heat: with "other", its specific heat in cal/g.C, as BeerSmith's TUN_SPECIFIC_HEAT (stainless steel is
   0.12, aluminium 0.22).
 
+And what is fitted to it, kept the same way:
+- condenser: "fitted" when a steam condenser (a Steam Slayer, say) sits on its lid; blank when there is none. Only a
+  boil kettle's means anything (cbpi.extension.condenser);
+- condenser_name: what the condenser is called, as Brew Day and its reminders say it; blank means "steam condenser".
+
 Each may be blank, meaning unknown, and a kettle without them works as one always has: nothing is refused for a
 missing or odd value. A value is kept as it was given, for the Hardware page to show and flag, and every use reads
-it through usable() or material(), so a value that can't be right - zero, negative, not a number - counts as blank.
+it through usable(), material(), condenser_fitted() or condenser_name(), so a value that can't be right - zero,
+negative, not a number, a condenser that isn't "fitted" - counts as blank.
 """
 
 import math
 
-FIELDS = ("capacity", "min_water", "empty_weight", "material", "specific_heat")
+FIELDS = ("capacity", "min_water", "empty_weight", "material", "specific_heat", "condenser", "condenser_name")
 NUMBERS = ("capacity", "min_water", "empty_weight", "specific_heat")
 MATERIALS = ("stainless_steel", "aluminium", "other")
+FITTED = "fitted"
+CONDENSER_NAME = "steam condenser"
 
 
 def stored(field, value):
@@ -41,6 +49,8 @@ def stored(field, value):
         return number if math.isfinite(number) else text
     if field == "material":
         return material(text) or text
+    if field == "condenser":
+        return FITTED if text.lower() == FITTED else text
     return text
 
 
@@ -62,6 +72,19 @@ def material(value):
         return None
     word = "_".join(value.strip().lower().replace("-", " ").split())
     return word if word in MATERIALS else None
+
+
+def condenser_fitted(item):
+    """Has `item` (a Kettle, or anything with its condenser) a steam condenser fitted on its lid?"""
+    value = getattr(item, "condenser", None)
+    return isinstance(value, str) and value.strip().lower() == FITTED
+
+
+def condenser_name(item):
+    """What `item`'s condenser is called: its condenser_name, or "steam condenser" when that is blank."""
+    value = getattr(item, "condenser_name", None)
+    text = value.strip() if isinstance(value, str) else ""
+    return text or CONDENSER_NAME
 
 
 def of(item):

@@ -162,6 +162,9 @@ class Kettle:
     empty_weight: object = None
     material: object = None
     specific_heat: object = None
+    # What is fitted to it, each None when nothing is: a steam condenser on its lid ("fitted"), and its name.
+    condenser: object = None
+    condenser_name: object = None
 
     def __str__(self):
         return "name={} props={} temp={}".format(
@@ -196,6 +199,8 @@ class Kettle:
             empty_weight=self.empty_weight,
             material=self.material,
             specific_heat=self.specific_heat,
+            condenser=self.condenser,
+            condenser_name=self.condenser_name,
         )
 
 

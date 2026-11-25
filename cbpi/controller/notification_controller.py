@@ -214,6 +214,7 @@ class NotificationController:
         action=[],
         timeout: int = 5000,
         keep: bool = False,
+        kind: str = None,
     ):
         """
         This is a convinience method to send notification to the client
@@ -226,6 +227,10 @@ class NotificationController:
             that opens meanwhile. Otherwise a prompt reaches only the pages
             open when it is sent: one sent while the server starts reaches
             none.
+        :param kind: a word a page can tell the notification by, whatever its
+            words say, sent with it as "kind": "condenser_on" for the boil's
+            lid reminder where a steam condenser is fitted, "condenser_off" for
+            the reminder to turn its mister off after the boil. None sends none.
         :return: the notification's id
 
         A listener (add_listener) that takes a log_line keyword is told, for a
@@ -261,6 +266,8 @@ class NotificationController:
             action=actions,
             timeout=timeout,
         )
+        if kind is not None:
+            shown["kind"] = str(kind)
         if keep and action:
             self._open()[notifcation_id] = dict(shown)
         if not action and type in (NotificationType.WARNING, NotificationType.ERROR):
