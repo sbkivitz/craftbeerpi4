@@ -1285,9 +1285,10 @@ class StepController:
         picks it - holds the water too, on a vessel other than the mash tun: a BrewStart handing over at its time to
         the MashIn on the HLT right after it (the rig page's step 9b), which heats the same water, holds it and asks.
         Moving on so keeps the brew at the water, so it may happen by itself; it doesn't say the water is in."""
-        nxt = next((s for s in self.profile or [] if s is not entry and s.status == StepState.STOP), None)
+        profile = getattr(self, "profile", None) or []
+        nxt = next((s for s in profile if s is not entry and s.status == StepState.STOP), None)
         if nxt is None:
-            nxt = next((s for s in self.profile or [] if s is not entry and s.status == StepState.INITIAL), None)
+            nxt = next((s for s in profile if s is not entry and s.status == StepState.INITIAL), None)
         if nxt is None or self._on_mash_tun(nxt) or not self.holds_water_for_brewer(nxt):
             return False
         logging.info("'%s' hands over by itself to '%s', which holds the water too", entry.name, nxt.name)
@@ -1334,15 +1335,15 @@ class StepController:
 
     def strike_move_confirmed(self):
         """Whether the brewer has said the strike water is in the mash tun, for this brew (STRIKE_MOVED_KEY)."""
-        basic = self.basic_data if isinstance(self.basic_data, dict) else {}
-        return isinstance(basic.get(self.STRIKE_MOVED_KEY), dict)
+        basic = getattr(self, "basic_data", None)
+        return isinstance(basic, dict) and isinstance(basic.get(self.STRIKE_MOVED_KEY), dict)
 
     def _strike_steps_left(self, but=None):
         """The steps holding the water before the mash tun's first step (all of them, with none on the mash tun),
         not yet done, `but` that one."""
         mt = self._kettle_roles().get("mt")
         left = []
-        for item in self.profile or []:
+        for item in getattr(self, "profile", None) or []:
             if mt is not None and self._kettle_of(item) == mt.id:
                 break
             if item is not but and item.status != StepState.DONE and self.holds_water_for_brewer(item):
@@ -1354,7 +1355,7 @@ class StepController:
         news. Saved by the caller."""
         if self.strike_move_confirmed():
             return False
-        if not isinstance(self.basic_data, dict):
+        if not isinstance(getattr(self, "basic_data", None), dict):
             self.basic_data = {}
         self.basic_data[self.STRIKE_MOVED_KEY] = dict(at=round(clock.now(), 3), by=str(by))
         logging.info("The strike water is in the mash tun, the brewer says (%s): the wort pump may run", by)
@@ -1431,8 +1432,9 @@ class StepController:
 
     def _forget_strike_move(self):
         """Starting over, or another brew: the strike water isn't in the mash tun until the brewer says so again."""
-        if isinstance(self.basic_data, dict):
-            self.basic_data.pop(self.STRIKE_MOVED_KEY, None)
+        basic = getattr(self, "basic_data", None)
+        if isinstance(basic, dict):
+            basic.pop(self.STRIKE_MOVED_KEY, None)
         self.__dict__["_self_next_refused"] = {}
         self._retire_wort_prompt()
     # whatever is loaded starts, as it always has.
