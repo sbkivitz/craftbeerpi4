@@ -87,7 +87,7 @@ class StrikeHttpEndpoints:
     async def http_strike_water(self, request):
         """
         ---
-        description: All the water in the HLT, strike and sparge - BrewStart's Volume, in its Volume_Unit, or by hand the brew day's figure. At least the strike water.
+        description: All the water in the HLT, strike and sparge - BrewStart's Volume, in its Volume_Unit, or by hand the brew day's figure. At least the strike water and, once it has gone, the least that covers the HLT's element and coil (the state's inputs.least).
         tags:
         - Step
         parameters:
@@ -107,7 +107,7 @@ class StrikeHttpEndpoints:
             "200":
                 description: what was applied, with the Campden tablets BrewStart gives for it, and the state
             "400":
-                description: bad_body or too_little
+                description: bad_body, or too_little (with min, the least HLT water; mash, the mash water; left, what this would leave in the HLT; least and least_from)
             "409":
                 description: recipe_changed, or off with nothing loaded
         """
@@ -174,7 +174,7 @@ class StrikeHttpEndpoints:
             "200":
                 description: what was applied, and the state
             "400":
-                description: bad_body or out_of_range (with what, low and high)
+                description: bad_body, out_of_range (with what, low and high), or too_much - mash water that would leave the HLT less than the least that covers its element and coil (with what, hlt, left, least, least_from and most, the most mash water the HLT's water allows)
             "409":
                 description: recipe_changed, off with nothing loaded, or beersmith - the recipe has BeerSmith's own figure for it
         """

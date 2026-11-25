@@ -23,8 +23,8 @@ listed in the plan's "blank", with the value the logic uses for it when it is
 empty (CBPiKettleLogic.blank_defaults). Planned with fill, those values are
 filled in instead: they show as changes, and loading saves them.
 
-What the kettle measures (cbpi.api.kettle_measures: capacity, empty weight,
-material, specific heat) goes in the file's "measurements" when the kettle has
+What the kettle measures (cbpi.api.kettle_measures: capacity, least water,
+empty weight, material, specific heat) goes in the file's "measurements" when the kettle has
 any. Loading a file with them sets each one it has; one it leaves out stays as
 it is. A file without them - every file saved before they existed - plans and
 loads exactly as it did, and an odd value in one never refuses the file.

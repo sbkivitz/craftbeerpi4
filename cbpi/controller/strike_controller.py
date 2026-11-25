@@ -766,6 +766,8 @@ class StrikeController:
         room, room_from = (room_given, "you") if not probe_usable and room_given is not None else (probe_room, "probe")
         grain = typed if typed is not None and not typed_bad else room
         left = None if vol is None or strike_vol is None else round(vol - strike_vol, 2)
+        # The least the HLT keeps over its element and coil: the strike water may never take it lower.
+        L.least = vessels.least_water(L.hlt, unit, L.vol_unit)
         plant, setup = self._plant()
         plant, hlt_from = vessels.with_hlt(plant, hlt_figure)
         L.vessels = vessels.shown(mt_figure, hlt_figure, hlt_from, beersmith_tun, unit)
@@ -773,6 +775,7 @@ class StrikeController:
         place = basic.get(StepController.GRAIN_PLACE_KEY)
         L.inputs = dict(rest=rest, planned=None if planned is None else round(planned, 1),
                         vol=None if vol is None else round(vol, 2), vol_from=vol_from, left=left,
+                        least=L.least["value"], least_from=L.least["from"],
                         campden=self._campden(L.bs, unit) if L.bs is not None and vol is not None else None,
                         room=room, room_why=room_why, room_from=room_from, room_given=room_given,
                         room_probe=probe_room, typed=None if typed_bad else typed, grain=grain,
@@ -788,6 +791,9 @@ class StrikeController:
             ("grain", typed_bad),
             ("vol", vol is None or (strike_vol is not None and vol < strike_vol - 1e-9))) if missing]
         L.miss = L.misses[0] if L.misses else None
+        # What the figures would do that they shouldn't, blocking nothing: the mash water leaving less in the HLT than
+        # covers its element and coil.
+        L.warnings = ["hlt_low"] if left is not None and left < L.least["value"] - 1e-9 else []
 
         L.rig = dict(through_coil=setup["through_coil"], still_probe=setup["still_probe"])
         L.guesses = None
@@ -1199,7 +1205,8 @@ class StrikeController:
             guesses=look.guesses if miss in (None, "far") else None,
             measured=look.measured if miss in (None, "far") else None,
             vessels=look.vessels,
-            miss=miss, misses=list(look.misses) or ([miss] if miss else []), was=was, working=working,
+            miss=miss, misses=list(look.misses) or ([miss] if miss else []), warnings=list(look.warnings),
+            was=was, working=working,
             failed=None if self.failed is None else dict(at=self.failed["at"], detail=self.failed["detail"]),
             answer=self._answer_shown(look, was))
         return state
@@ -1368,7 +1375,9 @@ class StrikeController:
         return dict(do=do, to=to, **{"from": before}, by=look.by, changed=changed)
 
     async def set_water(self, body):
-        """The HLT's water (POST /step2/strike/water): BrewStart's Volume, or by hand the brew day's figure."""
+        """The HLT's water (POST /step2/strike/water): BrewStart's Volume, or by hand the brew day's figure. Refused
+        (400 too_little) where it would leave the HLT less than the least that covers its element and coil once the
+        mash water has gone."""
         if not isinstance(body, dict) or not _id_list(body.get("steps")):
             raise StrikeRefused(400, "bad_body", detail="Send {\"vol\": number, \"steps\": [...]}.")
         vol = _number(body.get("vol"))
@@ -1379,8 +1388,11 @@ class StrikeController:
         if not look.ids:
             raise StrikeRefused(409, "off", why="no_recipe", strike=self.get_state(look))
         strike = (look.recipe or {}).get("strike_vol")
-        if strike is not None and vol < strike - 1e-9:
-            raise StrikeRefused(400, "too_little", min=strike)
+        least = look.least["value"]
+        if strike is not None and vol - strike < least - 1e-9:
+            # The HLT keeps the mash water and, after it has gone, the least that covers its element and coil.
+            raise StrikeRefused(400, "too_little", min=round(strike + least, 2), mash=strike,
+                                left=round(vol - strike, 2), least=least, least_from=look.least["from"])
         to = round(vol, 2)
         before = look.inputs["vol"]
         if look.bs is not None:
@@ -1455,12 +1467,24 @@ class StrikeController:
         return dict(applied=dict(what="grain", to=to, **{"from": before}, by=by, place=answer),
                     strike=self.get_state(self.update()))
 
+    @staticmethod
+    def refuse_mash_water(look, strike_vol):
+        """Raise 400 too_much where mash water `strike_vol` (in look.vol_unit) would leave the HLT less than the least
+        that covers its element and coil (look.least): {"what": "strike_vol", "hlt", "left", "least", "least_from",
+        "most"}, most being the most mash water the HLT's water allows. Nothing to check while the HLT's water isn't
+        known. `look` is a _look()."""
+        hlt, least = look.inputs["vol"], look.least["value"]
+        if hlt is not None and hlt - strike_vol < least - 1e-9:
+            raise StrikeRefused(400, "too_much", what="strike_vol", hlt=hlt, left=round(hlt - strike_vol, 2),
+                                least=least, least_from=look.least["from"], most=round(hlt - least, 2))
+
     async def set_recipe(self, body):
         """The recipe's figures given on Brew Day where BeerSmith's are missing (POST /step2/strike/recipe): the grain
         weight in the state's mass_unit, the strike water to the mash tun in its vol_unit, either or both. Kept with the
         loaded recipe, in its basic data's mash_numbers (grain_kg, infuse_l), taken out of its lacks and named in its
         typed, so they're never taken for BeerSmith's; USE is worked out from them at once. A figure BeerSmith gave is
-        refused (409 beersmith): the recipe's own stays. One given here can be given again."""
+        refused (409 beersmith): the recipe's own stays. One given here can be given again. Mash water that would leave
+        the HLT less than the least that covers its element and coil is refused (refuse_mash_water)."""
         if not isinstance(body, dict) or not _id_list(body.get("steps")) or not set(self.TYPED_FIELDS) & set(body):
             raise StrikeRefused(400, "bad_body", detail="Send {\"grain\": number, \"strike_vol\": number, "
                                                         "\"steps\": [...]}, with either or both figures.")
@@ -1490,6 +1514,8 @@ class StrikeController:
             figure = _number(numbers.get(self.TYPED_FIELDS[key]))
             if figure is not None and figure > 0 and self.TYPED_NAMES[key] not in typed:
                 raise StrikeRefused(409, "beersmith", what=key, strike=self.get_state(look))
+        if "strike_vol" in given:
+            self.refuse_mash_water(look, given["strike_vol"])
         before = {key: (look.recipe or {}).get(key) for key in given}
         for key, value in given.items():
             per = (model.LB if units[key] == "lb" else 1.0) if key == "grain" \

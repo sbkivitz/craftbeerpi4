@@ -1,6 +1,7 @@
 """What a kettle measures, kept with the kettle (kettle.json, GET and PUT /kettle, its settings file).
 
 - capacity: how much it holds, in the brewery's volume unit, gallons on a F brewery, litres on a C one;
+- min_water: the least water that keeps its element, and its coil if it has one, covered, in that volume unit too;
 - empty_weight: what it weighs empty, in pounds on a F brewery, kilograms on a C one;
 - material: "stainless_steel", "aluminium" or "other";
 - specific_heat: with "other", its specific heat in cal/g.C, as BeerSmith's TUN_SPECIFIC_HEAT (stainless steel is
@@ -13,8 +14,8 @@ it through usable() or material(), so a value that can't be right - zero, negati
 
 import math
 
-FIELDS = ("capacity", "empty_weight", "material", "specific_heat")
-NUMBERS = ("capacity", "empty_weight", "specific_heat")
+FIELDS = ("capacity", "min_water", "empty_weight", "material", "specific_heat")
+NUMBERS = ("capacity", "min_water", "empty_weight", "specific_heat")
 MATERIALS = ("stainless_steel", "aluminium", "other")
 
 

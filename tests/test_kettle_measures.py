@@ -1,6 +1,7 @@
 """What a kettle measures, and an import's warnings when a recipe needs more than a vessel holds (4.7.7.post65).
 
-Each kettle may say how much it holds (capacity), what it weighs empty (empty_weight), what it's made of (material)
+Each kettle may say how much it holds (capacity), the least water that keeps its element covered (min_water), what it
+weighs empty (empty_weight), what it's made of (material)
 and, for "other", its specific heat (specific_heat): kept in kettle.json, served by GET /kettle, saved by PUT
 /kettle/{id}, and carried by the kettle's settings file. Blank, missing or a value that can't be right, each counts
 as unknown, and nothing is refused for it. An import warns for each of the HLT, the mash tun and the boil kettle
@@ -24,7 +25,7 @@ from cbpi.controller.upload_controller import UploadController
 from tests.cbpi_config_fixture import CraftBeerPiTestCase
 from tests.test_recipe_pages import uploader
 
-FIELDS = ("capacity", "empty_weight", "material", "specific_heat")
+FIELDS = ("capacity", "min_water", "empty_weight", "material", "specific_heat")
 #: Test Recipe v5's figures, as its BeerSmith export gives them: 23.0 gal before the boil, 20 lb of grain, 10.8 gal
 #: of mash water.
 V5 = {"boil_l": 87.064973, "grain_kg": 9.07184, "infusions_l": 40.731031, "infuse_l": 31.267501,
@@ -73,11 +74,12 @@ def test_a_material_is_one_of_three_or_unknown():
 
 
 def test_a_save_without_the_measurements_keeps_the_kettles_own_and_null_clears_one():
-    kept = Kettle("hlt", "HLT", capacity=20, empty_weight=31.5, material="stainless_steel")
+    kept = Kettle("hlt", "HLT", capacity=20, min_water=3.5, empty_weight=31.5, material="stainless_steel")
     assert KettleController.measures({"name": "HLT"}, kept=kept) == {
-        "capacity": 20, "empty_weight": 31.5, "material": "stainless_steel", "specific_heat": None}
-    assert KettleController.measures({"capacity": None, "material": "other", "specific_heat": "0.2"}, kept=kept) == {
-        "capacity": None, "empty_weight": 31.5, "material": "other", "specific_heat": 0.2}
+        "capacity": 20, "min_water": 3.5, "empty_weight": 31.5, "material": "stainless_steel", "specific_heat": None}
+    assert KettleController.measures({"capacity": None, "material": "other", "specific_heat": "0.2",
+                                      "min_water": "4,5"}, kept=kept) == {
+        "capacity": None, "min_water": 4.5, "empty_weight": 31.5, "material": "other", "specific_heat": 0.2}
     assert KettleController.measures({"name": "New"}) == dict.fromkeys(FIELDS)
     assert KettleController.measures(None) == dict.fromkeys(FIELDS)
 
@@ -98,7 +100,7 @@ class KettleMeasuresHttpTestCase(CraftBeerPiTestCase):
             assert resp.status == 200
             listed = await (await self.client.get("/kettle/")).json()
             seen = next(k for k in listed["data"] if k["id"] == kettle_id)
-            assert {k: seen[k] for k in FIELDS} == {"capacity": 20, "empty_weight": 31.5,
+            assert {k: seen[k] for k in FIELDS} == {"capacity": 20, "min_water": None, "empty_weight": 31.5,
                                                     "material": "stainless_steel", "specific_heat": None}
             resp = await self.client.put(path="/kettle/%s" % kettle_id, json={"name": "Measured", "capacity": -1,
                                                                               "material": None})

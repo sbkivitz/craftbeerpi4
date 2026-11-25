@@ -155,9 +155,10 @@ class Kettle:
     # The settings each OTHER logic last had on this kettle, by logic name.
     # The active logic's settings are `props`. See KettleController.update.
     props_by_type: dict = field(default_factory=dict)
-    # What the kettle measures, each None while unknown (cbpi.api.kettle_measures): how much it holds, what it
-    # weighs empty, what it's made of, and with "other", its specific heat.
+    # What the kettle measures, each None while unknown (cbpi.api.kettle_measures): how much it holds, the least water
+    # that covers its element, what it weighs empty, what it's made of, and with "other", its specific heat.
     capacity: object = None
+    min_water: object = None
     empty_weight: object = None
     material: object = None
     specific_heat: object = None
@@ -191,6 +192,7 @@ class Kettle:
                 if isinstance(settings, dict)
             },
             capacity=self.capacity,
+            min_water=self.min_water,
             empty_weight=self.empty_weight,
             material=self.material,
             specific_heat=self.specific_heat,

@@ -1,5 +1,6 @@
 """What the strike water model takes from a vessel's own figures, kept with its kettle on the Hardware page
-(cbpi.api.kettle_measures): what it weighs empty, and what it's made of.
+(cbpi.api.kettle_measures): what it weighs empty, and what it's made of; and the least water the HLT keeps over its
+element and coil (least_water), which the strike water may never go below.
 
 The rule is the brewer's: a vessel's figure only narrows a guess or replaces BeerSmith's. A weight or material that
 is blank, missing, 0 or less, or can't be read gives nothing, and the model is exactly as it is without it.
@@ -28,6 +29,10 @@ except ImportError:  # a core without the kettles' figures: no vessel gives one
 SPECIFIC_HEAT = {"stainless_steel": 0.12, "aluminium": 0.22}
 #: Water's: more, for what a kettle is made of, is a figure mistyped.
 MAX_SPECIFIC_HEAT = 1.0
+#: The least water an HLT keeps over its element and coil where Hardware gives no min_water: this share of its capacity,
+#: else this much, by volume unit.
+LEAST_SHARE = 0.15
+LEAST_DEFAULT = {"gal": 3.0, "L": 11.4}
 
 
 def figure(kettle, unit):
@@ -55,6 +60,44 @@ def figure(kettle, unit):
         return None
     return dict(empty_weight=weight, kg=weight * model.LB if unit == "F" else weight, material=material,
                 specific_heat=heat)
+
+
+def least_water(kettle, unit, vol_unit):
+    """{"value": the least water the kettle keeps, in vol_unit ("gal" or "L"), to 2 places, "from": "hardware",
+    "capacity" or "default", "capacity": its capacity in vol_unit, or None}: the water that keeps its element, and its
+    coil if it has one, covered. Never None, never raises.
+
+    - "hardware": the kettle's own min_water on the Hardware page, when it is a number above 0;
+    - "capacity": else LEAST_SHARE of its capacity on the Hardware page: an element sits low in a kettle, so that
+      share covers it in any common kettle (3 gal of a 20 gal HLT);
+    - "default": else LEAST_DEFAULT, a cautious figure for the common 15-20 gal HLT, used only where Hardware gives
+      neither.
+
+    Both figures are kept in the brewery's volume unit (gal on a F brewery, L on a C one)."""
+    kept = "gal" if unit == "F" else "L"
+
+    def to_vol(value):
+        if value is None:
+            return None
+        if kept == vol_unit:
+            return value
+        return value * model.L_PER_GAL if vol_unit == "L" else value / model.L_PER_GAL
+
+    own = capacity = None
+    if kettle is not None and kettle_measures is not None:
+        try:
+            own = kettle_measures.usable(getattr(kettle, "min_water", None))
+            capacity = kettle_measures.usable(getattr(kettle, "capacity", None))
+        except Exception:  # noqa: BLE001 - a figure that can't be read is no figure
+            own = capacity = None
+    capacity = to_vol(capacity)
+    if own is not None:
+        value, source = to_vol(own), "hardware"
+    elif capacity is not None:
+        value, source = capacity * LEAST_SHARE, "capacity"
+    else:
+        value, source = LEAST_DEFAULT[vol_unit if vol_unit in LEAST_DEFAULT else kept], "default"
+    return {"value": round(value, 2), "from": source, "capacity": None if capacity is None else round(capacity, 2)}
 
 
 def with_hlt(plant, found):

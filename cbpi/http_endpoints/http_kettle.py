@@ -132,7 +132,7 @@ class KettleHttpEndpoints:
     async def http_vessel(self, request):
         """
         ---
-        description: "Save only what a kettle measures: capacity, empty_weight, material and specific_heat. Each
+        description: "Save only what a kettle measures: capacity, min_water, empty_weight, material and specific_heat. Each
           field the body has is saved, null clearing it; one it leaves out stays. Nothing else changes, and the
           kettle's AUTO goes on as it was, unlike PUT /kettle/{id}, which stops it."
         tags:
@@ -150,6 +150,8 @@ class KettleHttpEndpoints:
             type: object
             properties:
               capacity:
+                type: number
+              min_water:
                 type: number
               empty_weight:
                 type: number
@@ -173,7 +175,7 @@ class KettleHttpEndpoints:
         if not isinstance(data, dict):
             return web.json_response(status=400, data={
                 "error": "bad_body",
-                "detail": "Send the measurements to save: {\"capacity\", \"empty_weight\", \"material\", "
+                "detail": "Send the measurements to save: {\"capacity\", \"min_water\", \"empty_weight\", \"material\", "
                           "\"specific_heat\"}, any of them."})
         item = await self.controller.save_measures(id, data)
         if item is None:
@@ -210,6 +212,9 @@ class KettleHttpEndpoints:
               capacity:
                 type: number
                 description: "How much it holds: gal on a F brewery, L on a C one. Null for unknown; left out, kept"
+              min_water:
+                type: number
+                description: "The least water that keeps its element and coil covered, in the same unit. Null for unknown; left out, kept"
               empty_weight:
                 type: number
                 description: "What it weighs empty: lb on a F brewery, kg on a C one. Null for unknown; left out, kept"
