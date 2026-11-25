@@ -1148,6 +1148,8 @@ class UploadController:
                         else:
                             step_type = self.mash if self.mash != "" else "MashStep"
                             Notification = ""
+                            # Only the first rest can be the mash-in: a later one of 0 minutes stays a rest.
+                            MashIn_Flag = False
 
                     else:
                         step_type = self.mash if self.mash != "" else "MashStep"
@@ -1514,6 +1516,9 @@ class UploadController:
                         else:
                             step_type = self.mash if self.mash != "" else "MashStep"
                             Notification = ""
+                            # Only the first step can be the mash-in: a later one of 0 minutes, such as BeerSmith's
+                            # Mash Out, is a rest, never a question for the malt.
+                            MashIn_Flag = False
 
                     else:
                         step_type = self.mash if self.mash != "" else "MashStep"
@@ -1866,6 +1871,9 @@ class UploadController:
                         else:
                             step_type = self.mash if self.mash != "" else "MashStep"
                             Notification = ""
+                            # Only the first mash step can be the mash-in: a later one of 0 minutes, such as a Mash
+                            # Out, is a rest.
+                            MashIn_Flag = False
 
                     else:
                         step_type = self.mash if self.mash != "" else "MashStep"

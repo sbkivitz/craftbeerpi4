@@ -173,6 +173,12 @@ class MashInStep(CBPiStep):
     #: that wait: pump held, no second heat to strike.
     WAITING_FOR_MALT_PROP = "_waiting_for_malt"
 
+    #: Kept with the step once it has asked for the malt. Asked again - after a
+    #: Stop and Start, a restart, or a new strike temperature - the recipe's
+    #: mash additions may be in already, so the question says "If you haven't
+    #: yet, add to the mash: ..." (StepController.dough_in_words).
+    MALT_ASKED_PROP = "_malt_asked"
+
     async def NextStep(self, **kwargs):
         step = self.cbpi.step.find_by_id(self.id)
         if (step is None or step.instance is not self
@@ -239,26 +245,31 @@ class MashInStep(CBPiStep):
         # Remembered, so a Stop and Start does not forget that the malt may be
         # going in, restart the pump into the grain, and heat to strike again.
         self._waiting_for_malt = True
+        # Asked before, at an earlier strike temperature (change_target)?
+        again = bool(self.props.get(self.MALT_ASKED_PROP))
+        self.props[self.MALT_ASKED_PROP] = True   # saved with the wait, below
         await self.record(self.WAITING_FOR_MALT_PROP, True)
         self.summary = ""
         await self.push_update()
-        self._ask_for_malt()
+        self._ask_for_malt(again)
 
-    def _ask_for_malt(self):
+    def _ask_for_malt(self, again=False):
         # Kept for a page opened later; taken down when the step is paused or
-        # ends. Started again, it asks again (_resume_waiting_for_malt).
+        # ends. Started again, it asks again (_resume_waiting_for_malt), with
+        # `again` set.
         _kept_for(self, self.cbpi.notify(
             self.name,
-            self._malt_question(),
+            self._malt_question(again),
             action=[NotificationAction("Next Step", self.NextStep)],
             **_keep(self.cbpi),
         ), "malt")
 
-    def _malt_question(self):
+    def _malt_question(self, again=False):
         """The step's Notification, and after it what the recipe adds to the mash, when this is the recipe's dough-in
         and its import had some (StepController.dough_in_words): "Target temperature reached. Please add malt. Add
         to the mash: 5.00 g Gypsum, 3.00 g Calcium Chloride." Said at the dough-in, where the brewer is, never by
-        BrewStart, which runs while nobody is."""
+        BrewStart, which runs while nobody is. Asked `again`, the additions may be in already: "... If you haven't
+        yet, add to the mash: ..."."""
         text = self.props.get(
             "Notification",
             "Target Temp reached. Please add malt and click next to move on.",
@@ -267,7 +278,7 @@ class MashInStep(CBPiStep):
         said = getattr(getattr(self.cbpi, "step", None), "dough_in_words", None)
         if callable(said):
             try:
-                words = said(self.id)
+                words = said(self.id, again=again)
             except Exception as e:  # noqa: BLE001 - the question is asked all the same
                 logging.warning("Could not name the mash additions for %s: %s", self.name, e)
         if not words or words in str(text or ""):
@@ -371,7 +382,8 @@ class MashInStep(CBPiStep):
         strike - handed to the kettle logic before it runs, because a logic
         that has been stopped starts as a new instance, and one told afterwards
         may already have switched the pump on. Then the prompt again: a restart,
-        or another page, may not have it.
+        or another page, may not have it. It asked for the malt when the wait
+        began, so the mash additions may be in already (_malt_question).
         """
         self.strike_temp = self.rest_temp
         if self.kettle is not None:
@@ -393,7 +405,7 @@ class MashInStep(CBPiStep):
                 1, on_update=self.on_timer_update, on_done=self.on_timer_done
             )
         await self.push_update()
-        self._ask_for_malt()
+        self._ask_for_malt(again=True)
 
     def _float_prop(self, name, default):
         """A numeric property, without truncating the fraction away.

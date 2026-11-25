@@ -2360,17 +2360,23 @@ class StepController:
                 labels.append(label)
         return ", ".join(labels) or None
 
-    def dough_in_words(self, step_id):
+    def dough_in_words(self, step_id, again=False):
         """What the question for the malt adds for the loaded recipe's mash additions: "Add to the mash: 5.00 g
         Gypsum, 3.00 g Calcium Chloride." - asked by the dough-in's MashInStep only: the first that doesn't hold the
         strike water for the brewer (holds_water_for_brewer: one on the HLT), else the first, so a recipe with a
-        second never asks twice. None for any other step, or a recipe with none (MashInStep._ask_for_malt)."""
+        second never asks twice. None for any other step, or a recipe with none (MashInStep._ask_for_malt).
+
+        `again`: the step has asked for the malt before and asks again - started after a Stop, after a restart, or
+        at a new strike temperature - when they may be in already: "If you haven't yet, add to the mash: ...", so
+        nobody adds them twice."""
         mashins = [s for s in getattr(self, "profile", None) or [] if s.type == "MashInStep"]
         first = next((s for s in mashins if not self.holds_water_for_brewer(s)), mashins[0] if mashins else None)
         if first is None or first.id != step_id:
             return None
         words = self._additions_words(self.MASH_ADDITIONS_KEY)
-        return "Add to the mash: {}.".format(words) if words else None
+        if not words:
+            return None
+        return ("If you haven't yet, add to the mash: {}." if again else "Add to the mash: {}.").format(words)
 
     def _sparge_additions_at_runoff(self, step):
         """Ask for the sparge water's additions as the runoff starts, beside the first-wort hops
