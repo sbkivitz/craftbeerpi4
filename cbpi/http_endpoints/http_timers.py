@@ -84,7 +84,7 @@ class TimersHttpEndpoints:
             "200":
                 description: the timers, the new one last
             "400":
-                description: the name is too long, or seconds is not 1 to 300 minutes
+                description: the name is too long, or seconds is not 1 second to 300 minutes
             "409":
                 description: there are four already
         """
@@ -152,7 +152,7 @@ class TimersHttpEndpoints:
     async def http_undo(self, request):
         """
         ---
-        description: Put a timer removed in the last 10 seconds back, with its id and in its place, as it would be now - one counting down has counted on meanwhile, one run out rings again
+        description: Put a timer removed in the last 5 seconds back, with its id and in its place, as it would be now - one counting down has counted on meanwhile, one run out rings again
         tags:
         - Timers
         parameters:
@@ -164,7 +164,7 @@ class TimersHttpEndpoints:
             "200":
                 description: the timers
             "404":
-                description: no timer of that id was removed in the last 10 seconds
+                description: no timer of that id was removed in the last 5 seconds (7 for an UNDO still on its way)
             "409":
                 description: four timers already, or another of its name
         """
@@ -188,7 +188,7 @@ class TimersHttpEndpoints:
             "404":
                 description: no such timer
             "409":
-                description: it has run out; answer it with /ok or /plus5
+                description: it has run out; answer it with /ok
         """
         return await self._do(self.controller.reset, request.match_info["id"])
 
@@ -210,7 +210,7 @@ class TimersHttpEndpoints:
             "404":
                 description: no such timer
             "409":
-                description: it has run out; answer it with /ok or /plus5
+                description: it has run out; answer it with /ok
         """
         return await self._do(self.controller.start, request.match_info["id"])
 
@@ -294,7 +294,7 @@ class TimersHttpEndpoints:
     async def http_plus5(self, request):
         """
         ---
-        description: Answer a timer that has run out with five minutes more, and take its prompt down on every screen
+        description: Answer a timer that has run out with five minutes more, and take its prompt down on every screen. Its prompt offers OK only
         tags:
         - Timers
         parameters:

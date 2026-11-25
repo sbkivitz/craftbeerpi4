@@ -4,12 +4,13 @@ Lots of things in a brew day want timing, not only a rest: several timers run
 side by side, each can be named, and one that runs out sounds an alarm and
 shows a visual alert.
 
-A timer has a name ("Timer 1" until it is given one), its own time, and a
-state: stopped (ready, at its own time), running, paused, or done (it ran out,
-and its alarm waits for an answer). At zero it raises a prompt titled with its
-name, with +5 MIN and OK, which every screen keeps until somebody answers it on
-any one of them. OK puts the timer back to its own time, stopped, ready to start
-again, as a kitchen timer's recall does; +5 MIN runs it for five minutes more.
+A timer has a name ("Timer 1" until it is given one), its own time, from 1
+second to 300 minutes, and a state: stopped (ready, at its own time), running,
+paused, or done (it ran out, and its alarm waits for an answer). At zero it
+raises a prompt titled with its name, with OK, which every screen keeps until
+somebody answers it on any one of them. OK puts the timer back to its own time,
+stopped, ready to start again, as a kitchen timer's recall does. plus5, which
+the prompt doesn't offer, answers it by running it for five minutes more.
 BACK TO (reset) puts a timer counting down or paused back to its own time,
 stopped, in the same way. A removed timer can be put back (undo) for
 UNDO_FOR seconds, in its place, as it would be by then.
@@ -91,7 +92,7 @@ class Timer:
         self.id = ident
         self.name = name
         self.set = float(seconds)  # its own time
-        self.run = float(seconds)  # this countdown's length: its own time, or five minutes after +5 MIN
+        self.run = float(seconds)  # this countdown's length: its own time, as add_time or plus5 left it
         self.remaining = float(seconds)  # the time left while it isn't running
         self.state = "stopped"
         self.deadline = None  # clock.monotonic() at zero, while it runs
@@ -126,16 +127,16 @@ class TimersController:
     TOPIC = "timers"
     #: Four at most: four in view at once, as on a four-channel kitchen timer.
     MAX = 4
-    #: A timer's own time: 1 to 300 minutes, the editor's limits.
-    MIN_SET = 60
+    #: A timer's own time: 1 second to 300 minutes, the editor's limits (its minutes and seconds).
+    MIN_SET = 1
     MAX_SET = 300 * 60
     #: Taking time off never leaves less than 10 seconds; adding never more than a day.
     FLOOR = 10
     CEILING = 24 * 60 * 60
-    #: +5 MIN, the alarm's lesser answer.
+    #: plus5's five minutes more.
     MORE = 5 * 60
-    #: The alarm's two buttons, as its prompt labels them and as an answer from a timer's row is sent with
-    #: the prompt taken down, so a screen that didn't press it can say which.
+    #: The answers, as they are sent with the prompt taken down, so a screen that didn't press it can say which:
+    #: OK, the alarm's one button, and plus5's.
     MORE_LABEL = "+5 MIN"
     OK_LABEL = "OK"
     #: A new timer's time when the command gives none: the editor's starting 10 minutes.
@@ -144,7 +145,7 @@ class TimersController:
     #: UNDO_GRACE seconds longer, for an UNDO pressed just before then and still on its way. Real seconds, as the
     #: hand pressing it lives by, and never fewer brewing seconds, so a simulator's faster clock still gives a hand
     #: its time. Meanwhile the timer counts on, by the brewing clock.
-    UNDO_FOR = 10
+    UNDO_FOR = 5
     UNDO_GRACE = 2
     NAME_LEN = 24
     NAMES_SETTING = "BREWDAY_TIMER_NAMES"
@@ -529,7 +530,7 @@ class TimersController:
     def _own_time(self, value) -> float:
         seconds = self._number(value)
         if not self.MIN_SET <= seconds <= self.MAX_SET:
-            raise ValueError(f"A timer's time is 1 to {self.MAX_SET // 60} minutes.")
+            raise ValueError(f"A timer's time is 1 second to {self.MAX_SET // 60} minutes.")
         return seconds
 
     def _name(self, value, fallback: str, t: Timer = None) -> str:
@@ -620,11 +621,8 @@ class TimersController:
         self._changed()
 
     def _ring(self, t: Timer):
-        """Its alarm: a prompt titled with its name, with +5 MIN and OK, kept for every screen until answered."""
+        """Its alarm: a prompt titled with its name, with OK, kept for every screen until answered."""
         ident = t.id
-
-        async def more():
-            await self.plus5(ident)
 
         async def ok():
             await self.ok(ident)
@@ -633,7 +631,7 @@ class TimersController:
             t.name,
             f"The {fmt(t.set)} timer has run out.",
             NotificationType.WARNING,
-            action=[NotificationAction(self.MORE_LABEL, more), NotificationAction(self.OK_LABEL, ok)],
+            action=[NotificationAction(self.OK_LABEL, ok)],
             keep=True,
         )
 
@@ -675,7 +673,7 @@ class TimersController:
         if t.state == "running":
             return self.get_state()
         if t.state == "done":
-            raise TimerRefused(f"{t.name} has run out: answer it with OK or +5 MIN.")
+            raise TimerRefused(f"{t.name} has run out: answer it with OK.")
         if t.state == "stopped":
             t.run = t.remaining
         self._start(t)
@@ -694,7 +692,7 @@ class TimersController:
         return self.get_state()
 
     async def add_time(self, ident, seconds):
-        """A minute or five more or less on a timer that is counting down or paused, at once.
+        """A minute more or less on a timer that is counting down or paused, at once.
         Never less than 10 seconds left; the countdown's length grows with it."""
         t = self._find(ident)
         seconds = self._number(seconds)
@@ -773,10 +771,10 @@ class TimersController:
 
     async def reset(self, ident):
         """Back to its own time, stopped, ready to start again: a timer counting down or paused. One whose alarm
-        waits is answered with OK or +5 MIN instead."""
+        waits is answered with OK instead."""
         t = self._find(ident)
         if t.state == "done":
-            raise TimerRefused(f"{t.name} has run out: answer it with OK or +5 MIN.")
+            raise TimerRefused(f"{t.name} has run out: answer it with OK.")
         if t.state == "stopped":
             return self.get_state()
         self._cancel(t)
@@ -799,7 +797,8 @@ class TimersController:
         return self.get_state()
 
     async def plus5(self, ident):
-        """The alarm answered with five minutes more: it counts down again from 5:00."""
+        """The alarm answered with five minutes more: it counts down again from 5:00. Not one of the prompt's
+        buttons; POST /timers/{id}/plus5 calls it."""
         t = self._find(ident)
         if t.state != "done":
             return self.get_state()
