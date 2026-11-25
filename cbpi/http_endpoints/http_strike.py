@@ -148,6 +148,70 @@ class StrikeHttpEndpoints:
         body = await self._strike_body(request)
         return await self._strike_do(self.cbpi.strike.set_grain, body)
 
+    @request_mapping(path="/strike/recipe", method="POST", auth_required=False)
+    async def http_strike_recipe(self, request):
+        """
+        ---
+        description: The recipe's figures given on Brew Day where BeerSmith's are missing - the grain weight in the state's mass_unit, and the strike water to the mash tun in its vol_unit, either or both. Kept with the loaded recipe, in its mash_numbers, named in its typed and taken out of its lacks, so they're never taken for BeerSmith's. A figure BeerSmith gave is refused.
+        tags:
+        - Step
+        parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            properties:
+              grain:
+                type: number
+              strike_vol:
+                type: number
+              steps:
+                type: array
+                items:
+                  type: string
+        responses:
+            "200":
+                description: what was applied, and the state
+            "400":
+                description: bad_body or out_of_range (with what, low and high)
+            "409":
+                description: recipe_changed, off with nothing loaded, or beersmith - the recipe has BeerSmith's own figure for it
+        """
+        body = await self._strike_body(request)
+        return await self._strike_do(self.cbpi.strike.set_recipe, body)
+
+    @request_mapping(path="/strike/room", method="POST", auth_required=False)
+    async def http_strike_room(self, request):
+        """
+        ---
+        description: The room's temperature given on Brew Day for this brew, in the brewery's unit - the room the forecast takes while the boil kettle's probe gives no reading a room can have; once the probe reads within that range again, its reading is the room. null takes it back.
+        tags:
+        - Step
+        parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            properties:
+              room:
+                type: number
+              steps:
+                type: array
+                items:
+                  type: string
+        responses:
+            "200":
+                description: what was applied, whether it is the room the forecast takes now (used), and the state
+            "400":
+                description: bad_body or out_of_range
+            "409":
+                description: recipe_changed, or off with nothing loaded
+        """
+        body = await self._strike_body(request)
+        return await self._strike_do(self.cbpi.strike.set_room, body)
+
     @request_mapping(path="/strike/forecast", method="GET", auth_required=False)
     async def http_strike_forecast(self, request):
         """

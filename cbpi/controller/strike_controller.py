@@ -1,19 +1,22 @@
 """The strike water helper on the server: USE for the loaded recipe, its forecasts, and the commands the brew-day
-screen sends (GET and POST /step2/strike, its water and grain writes, and a forecast for any strike).
+screen sends (GET and POST /step2/strike, its water, grain, recipe figure and room writes, and a forecast for any
+strike).
 
 The model (cbpi.strike.model) runs in a worker process of its own (cbpi.strike.worker), at low priority, never in the
 control loop. This controller looks at the numbers about once a real second: the recipe's (kept by its import, in
-the basic data's mash_numbers), BrewStart's water and grain temperature or the brew day's own, the boil kettle's
-probe for the room, the Mash Tun's PID_HERMS settings and the rig's numbers (config/strike_plant.json). When they
+the basic data's mash_numbers, or given on Brew Day where it kept none and named there in typed; a mash step's own
+grain weight where neither is), BrewStart's water and grain temperature or the brew day's own, the boil kettle's
+probe for the room (or the room given on Brew Day while the probe gives no reading a room can have), the Mash Tun's
+PID_HERMS settings and the rig's numbers (config/strike_plant.json). When they
 move past what the last answer allows, it sets the worker on them and says so (working), keeping the last answer
 until the new one comes. It never changes the strike water by itself: only USE and BACK TO do.
 
 Every temperature the screen sees and sends is in the brewery's unit (TEMP_UNIT), volumes in BrewStart's
 Volume_Unit, masses in lb or kg. The model works in F, gallons and kg; this controller converts at its edges.
 
-The brew day's own figures (the HLT's water and the grain's temperature by hand, the strike water before the first
-USE, and where each USE wrote its figure) and the last answer are kept in config/strike_day.json with the recipe's
-step ids: loading a recipe, the same one included, starts a new brew day.
+The brew day's own figures (the HLT's water, the grain's temperature and the room's by hand, the strike water before
+the first USE, and where each USE wrote its figure) and the last answer are kept in config/strike_day.json with the
+recipe's step ids: loading a recipe, the same one included, starts a new brew day.
 
 For the Figures page: as the malt goes in, the forecast for the strike in force is kept in
 config/strike_landings.jsonl (S1), and a worker of its own fits the share of the tun's steel the strike water warms to
@@ -286,6 +289,16 @@ class StrikeController:
     ROOM_SAME = {"F": 0.5, "C": 0.3}
     #: A room or a grain temperature the forecast can use, as COMPARE PROBES judges a room's reading.
     ROOM_RANGE = {"F": (35.0, 120.0), "C": (1.5, 49.0)}
+    #: BeerSmith's mash figures a recipe can lack (its mash_numbers' lacks), all of them for one imported without.
+    ALL_LACKS = ("grain", "water", "tun", "infuse_temp", "grain_temp", "tun_temp")
+    #: The recipe's figures that can be given on Brew Day where BeerSmith's are missing: the command's field, the
+    #: mash_numbers field it is kept in, and its name in lacks and typed.
+    TYPED_FIELDS = {"grain": "grain_kg", "strike_vol": "infuse_l"}
+    TYPED_NAMES = {"grain": "grain", "strike_vol": "water"}
+    #: What those may be, in the state's mass_unit and vol_unit: a grain bill and a strike water no brew of this rig
+    #: comes near either end of.
+    TYPED_RANGE = {"grain": {"lb": (0.5, 200.0), "kg": (0.2, 90.0)},
+                   "strike_vol": {"gal": (0.5, 100.0), "L": (2.0, 380.0)}}
     #: More than this above the rest is too far to trust (MashInStep.MAX_STRIKE_RISE_C).
     FAR = {"F": 27.0, "C": 15.0}
     #: Strikes the forecast endpoint takes.
@@ -310,7 +323,7 @@ class StrikeController:
     def __init__(self, cbpi, watch=True):
         self.cbpi = cbpi
         self.watch = watch
-        self.day = {"steps": None, "vol": None, "grain": None, "was": None, "used": None, "landed": None}
+        self.day = {"steps": None, "vol": None, "grain": None, "room": None, "was": None, "used": None, "landed": None}
         self.answer = None
         self.job = None
         self.failed = None
@@ -382,7 +395,7 @@ class StrikeController:
         if not isinstance(data, dict) or not _id_list(data.get("steps")):
             return
         self.day = {"steps": data["steps"]}
-        for key in ("vol", "grain", "was"):
+        for key in ("vol", "grain", "room", "was"):
             value = data.get(key)
             self.day[key] = value if isinstance(value, dict) and _number(value.get("value")) is not None else None
         used = data.get("used")
@@ -482,6 +495,17 @@ class StrikeController:
             return None, PROBE_REASONS.get(problem[0], problem[0])
         offset = _number(_prop(sensor, "offset")) or 0.0
         return round(value - offset, 1), None
+
+    @staticmethod
+    def _step_grain(mash_in, profile):
+        """The grain weight, kg, a mash step keeps itself (MashInStep's Grain_Kg on Brew Steps), for a recipe whose
+        import kept none of BeerSmith's and with none given on Brew Day: the mash step's, else the first MashInStep's
+        that has one. None without."""
+        for s in ([mash_in] if mash_in is not None else []) + [s for s in profile if s.type == "MashInStep"]:
+            kg = _number(_prop(s, "Grain_Kg"))
+            if kg is not None and kg > 0:
+                return kg
+        return None
 
     def _herms(self, mt, unit):
         """(PID_HERMS's settings for the model, in F, and where its code is), or None when the Mash Tun's logic isn't
@@ -661,7 +685,8 @@ class StrikeController:
             else:
                 L.phase = "plan"
 
-        # The recipe's numbers, as its import kept them.
+        # The recipe's numbers, as its import kept them, or as given on Brew Day where it kept none (typed). Without
+        # either, the grain weight a mash step keeps itself on Brew Steps (MashInStep's Grain_Kg).
         L.vol_unit = self._vol_unit(L.bs, unit)
         numbers = basic.get("mash_numbers") if isinstance(basic.get("mash_numbers"), dict) else {}
         grain_kg = _number(numbers.get("grain_kg"))
@@ -671,6 +696,12 @@ class StrikeController:
         tun_heat = _number(numbers.get("tun_cal_g_c"))
         grain_kg = grain_kg if grain_kg and grain_kg > 0 else None
         infuse_l = infuse_l if infuse_l and infuse_l > 0 else None
+        typed_figures = [t for t in numbers.get("typed", []) if t in self.TYPED_NAMES.values()] \
+            if isinstance(numbers.get("typed"), list) else []
+        grain_from = None if grain_kg is None else "typed" if "grain" in typed_figures else "beersmith"
+        if grain_kg is None:
+            grain_kg = self._step_grain(L.mi, profile)
+            grain_from = None if grain_kg is None else "step"
         mass = (lambda kg: None if kg is None else round(kg / model.LB if unit == "F" else kg, 1))
         vol_of_l = (lambda litres: None if litres is None else
                     round(litres / model.L_PER_GAL if L.vol_unit == "gal" else litres, 2))
@@ -680,8 +711,7 @@ class StrikeController:
         if strike_vol is not None and for_grain is not None:
             dead = round(max(0.0, strike_vol - for_grain), 2)
         infuse_c = _number(numbers.get("infuse_temp_c"))
-        lacks = [x for x in numbers.get("lacks", []) if isinstance(x, str)] if numbers else \
-            ["grain", "water", "tun", "infuse_temp", "grain_temp", "tun_temp"]
+        lacks = [x for x in numbers.get("lacks", []) if isinstance(x, str)] if numbers else list(self.ALL_LACKS)
         L.recipe = None if not profile else dict(
             name=L.name, steps=list(L.ids), grain=mass(grain_kg), strike_vol=strike_vol, for_grain=for_grain,
             dead=dead, tun=mass(tun_kg if tun_kg and tun_kg > 0 else None),
@@ -689,7 +719,7 @@ class StrikeController:
             beersmith=None if infuse_c is None else dict(
                 strike=temp_of_c(infuse_c), grain=temp_of_c(_number(numbers.get("grain_temp_c"))),
                 tun=temp_of_c(_number(numbers.get("tun_temp_c")))),
-            lacks=lacks)
+            lacks=lacks, typed=typed_figures, grain_from=grain_from)
         # The tun's steel as the model counts it: the Mash Tun's own figures from the Hardware page when it has
         # them, else the recipe's (BeerSmith's TUN_WEIGHT and TUN_SPECIFIC_HEAT), else none.
         beersmith_tun = (tun_kg, tun_heat) if tun_kg and tun_kg > 0 and tun_heat else None
@@ -726,7 +756,14 @@ class StrikeController:
             typed_bad = True
         if typed is not None:
             typed = round(typed, 1)
-        room, room_why = self._room(L.bk, unit)
+        # The room: the boil kettle's probe less its offset, while it gives a reading a room can have; else the room's
+        # temperature given on Brew Day for this brew, if any. Once the probe reads within that range again, it wins.
+        probe_room, room_why = self._room(L.bk, unit)
+        kept = self.day.get("room") if self.day.get("steps") == L.ids else None
+        room_given = self._to_unit(_number(kept.get("value")), kept.get("unit"), unit, "temp") if kept else None
+        room_given = None if room_given is None else round(room_given, 1)
+        probe_usable = probe_room is not None and low <= probe_room <= high
+        room, room_from = (room_given, "you") if not probe_usable and room_given is not None else (probe_room, "probe")
         grain = typed if typed is not None and not typed_bad else room
         left = None if vol is None or strike_vol is None else round(vol - strike_vol, 2)
         plant, setup = self._plant()
@@ -737,7 +774,8 @@ class StrikeController:
         L.inputs = dict(rest=rest, planned=None if planned is None else round(planned, 1),
                         vol=None if vol is None else round(vol, 2), vol_from=vol_from, left=left,
                         campden=self._campden(L.bs, unit) if L.bs is not None and vol is not None else None,
-                        room=room, room_why=room_why, typed=None if typed_bad else typed, grain=grain,
+                        room=room, room_why=room_why, room_from=room_from, room_given=room_given,
+                        room_probe=probe_room, typed=None if typed_bad else typed, grain=grain,
                         grain_from="you" if typed is not None and not typed_bad else "probe", probe=setup["probe"],
                         grain_place=place if place in StepController.GRAIN_PLACES else None)
         # Every number missing, in the order the box names them; the first is the state's miss, which older screens read
@@ -745,8 +783,8 @@ class StrikeController:
             ("recipe", grain_kg is None or infuse_l is None or rest is None),
             # A SampleTime that isn't a whole number of seconds: no step of the replay divides it.
             ("sample_time", L.sample_time is not None and model.step_for(L.sample_time) is None),
-            ("probe", room is None),
-            ("room", room is not None and not low <= room <= high),
+            ("probe", room_from == "probe" and probe_room is None),
+            ("room", room_from == "probe" and probe_room is not None and not probe_usable),
             ("grain", typed_bad),
             ("vol", vol is None or (strike_vol is not None and vol < strike_vol - 1e-9))) if missing]
         L.miss = L.misses[0] if L.misses else None
@@ -898,7 +936,8 @@ class StrikeController:
 
     def _new_day(self, ids):
         self._stop_job()
-        self.day = {"steps": list(ids), "vol": None, "grain": None, "was": None, "used": None, "landed": None}
+        self.day = {"steps": list(ids), "vol": None, "grain": None, "room": None, "was": None, "used": None,
+                    "landed": None}
         self.answer = None
         self.failed = None
         self._save_day()
@@ -1415,6 +1454,93 @@ class StrikeController:
                         "the boil kettle's probe" if before is None else "%.1f %s" % (before, u))
         return dict(applied=dict(what="grain", to=to, **{"from": before}, by=by, place=answer),
                     strike=self.get_state(self.update()))
+
+    async def set_recipe(self, body):
+        """The recipe's figures given on Brew Day where BeerSmith's are missing (POST /step2/strike/recipe): the grain
+        weight in the state's mass_unit, the strike water to the mash tun in its vol_unit, either or both. Kept with the
+        loaded recipe, in its basic data's mash_numbers (grain_kg, infuse_l), taken out of its lacks and named in its
+        typed, so they're never taken for BeerSmith's; USE is worked out from them at once. A figure BeerSmith gave is
+        refused (409 beersmith): the recipe's own stays. One given here can be given again."""
+        if not isinstance(body, dict) or not _id_list(body.get("steps")) or not set(self.TYPED_FIELDS) & set(body):
+            raise StrikeRefused(400, "bad_body", detail="Send {\"grain\": number, \"strike_vol\": number, "
+                                                        "\"steps\": [...]}, with either or both figures.")
+        given = {}
+        for key in self.TYPED_FIELDS:
+            if key in body:
+                value = _number(body.get(key))
+                if value is None or value <= 0:
+                    raise StrikeRefused(400, "bad_body", detail="%s must be a number more than 0." % key)
+                given[key] = value
+        look = self.update()
+        self._same_recipe(look, body["steps"])
+        if not look.ids:
+            raise StrikeRefused(409, "off", why="no_recipe", strike=self.get_state(look))
+        units = {"grain": look.mass_unit, "strike_vol": look.vol_unit}
+        for key, value in given.items():
+            low, high = self.TYPED_RANGE[key][units[key]]
+            if not low <= value <= high:
+                raise StrikeRefused(400, "out_of_range", what=key, low=low, high=high)
+        stepper = self.cbpi.step
+        basic = stepper.basic_data
+        numbers = dict(basic["mash_numbers"]) if isinstance(basic.get("mash_numbers"), dict) \
+            else {"lacks": list(self.ALL_LACKS)}
+        typed = [t for t in numbers.get("typed", []) if t in self.TYPED_NAMES.values()] \
+            if isinstance(numbers.get("typed"), list) else []
+        for key in given:
+            figure = _number(numbers.get(self.TYPED_FIELDS[key]))
+            if figure is not None and figure > 0 and self.TYPED_NAMES[key] not in typed:
+                raise StrikeRefused(409, "beersmith", what=key, strike=self.get_state(look))
+        before = {key: (look.recipe or {}).get(key) for key in given}
+        for key, value in given.items():
+            per = (model.LB if units[key] == "lb" else 1.0) if key == "grain" \
+                else (model.L_PER_GAL if units[key] == "gal" else 1.0)
+            numbers[self.TYPED_FIELDS[key]] = round(value * per, 3)
+            typed.append(self.TYPED_NAMES[key])
+        numbers["typed"] = sorted(set(typed))
+        numbers["lacks"] = [x for x in numbers.get("lacks", []) if x not in numbers["typed"]]
+        basic["mash_numbers"] = numbers
+        await stepper.save()
+        for key, value in given.items():
+            logger.info("%s set to %s %s for the strike water forecast, given on Brew Day%s",
+                        "Grain weight" if key == "grain" else "Mash water", round(value, 2), units[key],
+                        "" if before[key] is None else ", was %s %s" % (before[key], units[key]))
+        return dict(applied=dict(what="recipe", **{key: round(value, 2) for key, value in given.items()},
+                                 **{"from": before}), strike=self.get_state(self.update()))
+
+    async def set_room(self, body):
+        """The room's temperature given on Brew Day (POST /step2/strike/room), in the brewery's unit, for this brew:
+        the room the forecast takes while the boil kettle's probe gives no reading a room can have. Once the probe reads
+        within that range again, its reading is the room, and this one is kept aside (inputs.room_given) in case it
+        stops again. null takes it back. Kept with the brew day, not with the recipe or BeerSmith's figures."""
+        if not isinstance(body, dict) or not _id_list(body.get("steps")) or "room" not in body:
+            raise StrikeRefused(400, "bad_body", detail="Send {\"room\": number or null, \"steps\": [...]}.")
+        room = body.get("room")
+        if room is not None:
+            room = _number(room)
+            if room is None:
+                raise StrikeRefused(400, "bad_body", detail="room must be a number, or null to take it back.")
+        look = self.update()
+        self._same_recipe(look, body["steps"])
+        if not look.ids:
+            raise StrikeRefused(409, "off", why="no_recipe", strike=self.get_state(look))
+        low, high = self.ROOM_RANGE[look.unit]
+        if room is not None and not low <= room <= high:
+            raise StrikeRefused(400, "out_of_range", low=low, high=high)
+        to = None if room is None else round(room, 1)
+        before = look.inputs["room_given"]
+        self.day["room"] = None if to is None else {"value": to, "unit": look.unit}
+        self._save_day()
+        after = self.update()
+        u = "°" + look.unit
+        if to is None:
+            logger.info("Room temperature given on Brew Day taken back%s",
+                        "" if before is None else ", was %.1f %s" % (before, u))
+        else:
+            logger.info("Room temperature given on Brew Day: %.1f %s%s", to, u,
+                        "" if after.inputs["room_from"] == "you" else
+                        ", kept aside while the boil kettle's probe reads the room")
+        return dict(applied=dict(what="room", to=to, **{"from": before}, used=after.inputs["room_from"] == "you"),
+                    strike=self.get_state(after))
 
     async def forecast(self, temp_text):
         """A forecast without a search of its own for any strike (GET /step2/strike/forecast?temp=), for the answer's
