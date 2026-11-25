@@ -112,26 +112,47 @@ class UploadHttpEndpoints:
         """
 
         ---
-        description: Keep the recipe with this id from the uploaded BeerXML file in the Recipe Book, with a BeerXML file of its own (basic data source_xml, source_xml_recipe). The brew steps are left as they are
+        description: Keep the recipe with this id from the uploaded BeerXML file in the Recipe Book, with a BeerXML file of its own (basic data source_xml, source_xml_recipe). The brew steps are left as they are. Where the book has a recipe of the same name, the page says which way - "update" (UPDATE that book recipe, keeping its steps if the brewer changed it, and give the brew steps loaded from it its mash figures at once) or "new" (ADD AS A NEW RECIPE) - and with neither an earlier import of the name is replaced
         tags:
         - Upload
         parameters:
         - name: "id"
           in: "body"
-          description: "Recipe ID: {'id': ID}"
+          description: "Recipe ID: {'id': ID}, and optionally 'update': a book file's id, or 'new': true"
           required: true
           type: "string"
 
         responses:
             "200":
-                description: "kept in the Recipe Book: {name, file, replaced, warnings: [{title, text}]}"
+                description: "kept in the Recipe Book: {name, file, replaced, warnings: [{title, text}]}; for update also {updated: true, steps: kept or file, loaded}"
             "400":
-                description: "not imported, nothing added to the Recipe Book: {error: recipe not imported, detail}"
+                description: "not imported, nothing added to (or, for update, changed in) the Recipe Book: {error: recipe not imported, detail}"
         """
 
         xml_id = await request.json()
-        ok, result = await self.controller.import_recipe("xml", xml_id.get("id"))
+        how = UploadHttpEndpoints._how(xml_id)
+        if isinstance(how, web.Response):
+            return how
+        ok, result = await self.controller.import_recipe("xml", xml_id.get("id"), **how)
         return self._import_result(ok, result)
+
+    @classmethod
+    def _how(cls, body):
+        """{update or new} for import_recipe from an import's body: "update", a book file's id, or "new": true. A
+        400 response for anything else, nothing imported."""
+        how = {}
+        update, new = body.get("update"), body.get("new")
+        if update is not None:
+            if not isinstance(update, str) or not update:
+                return cls._import_result(False, "update is the id of a recipe in the Recipe Book, as GET /recipe/ "
+                                                 "lists it. Nothing was changed in the Recipe Book.")
+            how["update"] = update
+        if new is not None:
+            if not isinstance(new, bool):
+                return cls._import_result(False, "new is true or false. Nothing was added to the Recipe Book.")
+            if new:
+                how["new"] = True
+        return how
 
     @request_mapping(path="/json", method="GET", auth_required=False)
     async def get_json_list(self, request):

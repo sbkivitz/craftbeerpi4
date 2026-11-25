@@ -23,6 +23,7 @@ from cbpi.api.config import ConfigType
 from cbpi.api.dataclasses import (Actor, Kettle, NotificationAction,
                                   NotificationType, Sensor)
 from cbpi.controller.kettle_controller import KettleController
+from cbpi.controller.recipe_controller import UpdateRefused
 from cbpi.controller.step_controller import StepController
 from voluptuous.schema_builder import message
 
@@ -110,7 +111,7 @@ class UploadController:
         "bf": ("bf_recipe_creation", "Brewfather"),
     }
 
-    async def import_recipe(self, kind, recipe_id):
+    async def import_recipe(self, kind, recipe_id, update=None, new=False):
         """Keep one recipe in the Recipe Book: all of it, or none of it. The
         brew steps are left as they are; LOAD makes a book recipe the brew
         steps (POST /recipe/{file}/brew).
@@ -120,6 +121,21 @@ class UploadController:
         (RecipeController.keep_import), and the import's warnings as
         [{"title", "text"}], each also kept on every screen until OK - or
         (False, why not).
+
+        When a recipe of the same name is in the book already, the page asks
+        first, and says which way:
+        - `new` (ADD AS A NEW RECIPE): kept as a book recipe of its own, never
+          replacing one;
+        - `update`, a book file's id (UPDATE, BeerXML only): that recipe is
+          brought up to date with the import, keeping every change the brewer
+          made to it (RecipeController.update_from_import). The answer adds
+          "updated": true, "steps": "kept" (the book's steps as they were, with
+          the import's mash figures and file) or "file" (an earlier import the
+          brewer never changed, replaced), and "loaded": whether the brew steps
+          loaded from it took the figures too, at once, whatever runs
+          (StepController.take_book_figures). A refusal says nothing was
+          changed in the Recipe Book.
+        Neither: as always, replacing an earlier import of the name.
 
         Writing the recipe while reading it would go wrong two ways:
         - a recipe that cannot be read, such as one with a temperature of
@@ -142,13 +158,20 @@ class UploadController:
         the brew steps aren't touched.
         """
         method_name, label = self.IMPORTERS[kind]
+        if update is not None:
+            if new:
+                return self._not_updated("Choose UPDATE or ADD AS A NEW RECIPE, not both.")
+            if kind != "xml":
+                return self._not_updated("Only a BeerXML file has BeerSmith's mash figures, so nothing was updated "
+                                         "from this {} recipe.".format(label))
         if recipe_id is None or recipe_id == "" or recipe_id == []:
             return self._not_imported("Choose a recipe to import first.")
+        refuse = self._not_imported if update is None else self._not_updated
         async with self._import_lock:
             self.get_config_values()
             problem = self._import_problem()
             if problem is not None:
-                return self._not_imported(problem)
+                return refuse(problem)
             self._staging, self._staged, self._import_error = True, None, None
             self._import_warnings = []
             try:
@@ -165,6 +188,8 @@ class UploadController:
             if error is None and (staged is None or not staged["steps"]):
                 error = "it gave no steps"
             if error is not None:
+                if update is not None:
+                    return self._not_updated("The {} recipe couldn't be read: {}.".format(label, error))
                 return self._not_imported(
                     "The {} recipe was not imported: {}.".format(label, error))
             staged["steps"] = self._with_mash_out(staged["steps"])
@@ -173,13 +198,17 @@ class UploadController:
                 basic[StepController.NO_REMINDER_KEY] = staged["without_reminder"]
             if staged.get("mash_numbers"):
                 basic[self.MASH_NUMBERS_KEY] = staged["mash_numbers"]
-            held.extend(self.too_full(staged.get("mash_numbers")))
+            capacity = self.too_full(staged.get("mash_numbers"))
+            held.extend(capacity)
             # As the book keeps a recipe: each step's name, kind, settings, and waiting.
             steps = [dict(name=s.get("name"), type=s.get("type"), status="I", props=s.get("props") or {})
                      for s in staged["steps"]]
+            if update is not None:
+                return await self._update_book(update, dict(basic=basic, steps=steps), label, staged, held, capacity)
             try:
                 file_id, replaced = await self.cbpi.recipe.keep_import(dict(basic=basic, steps=steps), label,
-                                                                       source_xml=staged.get("source_xml"))
+                                                                       source_xml=staged.get("source_xml"),
+                                                                       **({"new": True} if new else {}))
             except Exception as e:  # noqa: BLE001
                 logging.exception("could not keep the imported recipe in the Recipe Book")
                 return self._not_imported(
@@ -192,6 +221,49 @@ class UploadController:
                 self._warn_brewer(title, text)
             return True, dict(name=staged["name"], file=file_id, replaced=bool(replaced),
                               warnings=[dict(title=title, text=text) for title, text in held])
+
+    async def _update_book(self, file_id, data, label, staged, held, capacity):
+        """import_recipe's UPDATE of the book recipe `file_id` with the import `data`, and of the brew steps loaded
+        from it. Where the book's steps are kept, only the warnings about the recipe's figures (`capacity`) apply:
+        the others are about the file's steps."""
+        try:
+            done = await self.cbpi.recipe.update_from_import(file_id, data, label,
+                                                             source_xml=staged.get("source_xml"))
+        except UpdateRefused as e:
+            return self._not_updated(str(e))
+        except Exception as e:  # noqa: BLE001
+            logging.exception("could not update the Recipe Book's copy from the import")
+            return self._not_updated("{} couldn't be updated in the Recipe Book: {}.".format(staged["name"], e))
+        kept = done["steps"] == "kept"
+        warnings = list(capacity) if kept else list(held)
+        loaded = False
+        take = getattr(self.cbpi.step, "take_book_figures", None)
+        if callable(take):
+            source = {key: done["basic"][key] for key in StepController.SOURCE_KEYS if key in done["basic"]}
+            try:
+                loaded = bool(await take(file_id, data["basic"].get(self.MASH_NUMBERS_KEY), source,
+                                         modified=(done["was"], done["modified"]) if done["same_steps"] else None))
+            except Exception:  # noqa: BLE001 - the book is updated; LOAD brings the figures
+                logging.exception("the brew steps could not take the updated recipe's mash figures")
+        said = ("Updated in your Recipe Book with BeerSmith's mash figures and its file. Your steps are as they were."
+                if kept else "Updated in your Recipe Book: its steps, mash figures and file are this file's, as you "
+                             "hadn't changed it there.")
+        if loaded:
+            said += " Brew Day's copy has the mash figures too, and its steps are as they were."
+        self.cbpi.notify("{} recipe updated".format(label), "{}. {}".format(staged["name"], said),
+                         NotificationType.INFO)
+        for title, text in warnings:
+            self._warn_brewer(title, text)
+        return True, dict(name=staged["name"], file=file_id, replaced=False, updated=True,
+                          steps="kept" if kept else "file", loaded=loaded,
+                          warnings=[dict(title=title, text=text) for title, text in warnings])
+
+    def _not_updated(self, why):
+        """(False, why, saying nothing was changed in the Recipe Book): UPDATE refused, told to every screen."""
+        message = "{} Nothing was changed in the Recipe Book.".format(why)
+        logging.warning("Recipe not updated: %s", message)
+        self.cbpi.notify("Recipe not updated", message, NotificationType.ERROR)
+        return False, message
 
     def _not_imported(self, why, kind=NotificationType.ERROR):
         """(False, why, saying nothing was added to the Recipe Book), after telling every screen: an error, unless

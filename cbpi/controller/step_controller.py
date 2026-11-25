@@ -2169,3 +2169,35 @@ class StepController:
         # The name and the book recipe are basic data, which pages are sent only on mash_profile_update.
         self.cbpi.ws.send(dict(topic="mash_profile_update", data=self.get_state()))
         return book_id
+
+    #: The mash figures of a BeerXML import, in the basic data (UploadController.MASH_NUMBERS_KEY).
+    MASH_NUMBERS_KEY = "mash_numbers"
+
+    async def take_book_figures(self, book_file, numbers, source, modified=None):
+        """UPDATE from an import (UploadController.import_recipe) of the book recipe the brew steps were loaded from
+        (BOOK_FILE_KEY is `book_file`): the steps take its mash figures `numbers` and its BeerXML file `source`
+        ({source_xml, source_xml_recipe}, SOURCE_KEYS) into their basic data at once, nothing loaded again. No step,
+        its status or its settings change, so it works while a step runs or BrewStart waits.
+
+        `modified`, (the book file's modified time before the update, after it): when the steps were as the book had
+        them (BOOK_MODIFIED_KEY not older than before), they are counted as the book's copy after it too, so a page
+        doesn't offer to load them again for figures they already have. -> whether the steps were that recipe's."""
+        basic = self.basic_data if isinstance(self.basic_data, dict) else None
+        if basic is None or not isinstance(book_file, str) or not book_file or basic.get(self.BOOK_FILE_KEY) != book_file:
+            return False
+        if numbers:
+            basic[self.MASH_NUMBERS_KEY] = copy.deepcopy(numbers)
+        for key in self.SOURCE_KEYS:
+            basic.pop(key, None)
+        basic.update({key: source[key] for key in self.SOURCE_KEYS if isinstance(source, dict) and key in source})
+        if modified is not None:
+            was, now = modified
+            try:
+                current = float(basic.get(self.BOOK_MODIFIED_KEY)) >= float(was) - 0.001
+            except (TypeError, ValueError):
+                current = False
+            if current and now is not None:
+                basic[self.BOOK_MODIFIED_KEY] = now
+        await self.save()
+        self.cbpi.ws.send(dict(topic="mash_profile_update", data=self.get_state()))
+        return True
