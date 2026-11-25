@@ -79,7 +79,13 @@ In the owner's words where he gave them.
   not start the HLT pump: "when I switch on the HLT element manually, the pump should not
   come on automatically. What if it isn't primed or the hoses are not in place, etc." (a
   fix was being built on 23 Nov; until it reaches the rig, the rig has
-  `HLT_PUMP_WITH_HEAT` set to No).
+  `HLT_PUMP_WITH_HEAT` set to No). And no pump starts by itself: "some steps auto start
+  the pumps and some do not. It should be more consistent, leaning towards manual starting
+  via a prompt except for the brewstart case running the hlt pump" (25 Nov). A step that
+  needs a pump asks once ("Start the wort pump to recirculate.", **Start pump**), and
+  nothing that needs it runs meanwhile (no heat through the coil without flow); BrewStart
+  heating the strike water may run the HLT pump unattended ("HLT pump may run unattended
+  during heating of strike water"). Switching a pump off for safety stays.
 - **The sparge step**: "sparge step needs to let the HLT get up to mash out temperature
   before pumping wort over to boil kettle. I also may do a "batch sparge" - it should be
   flexible to let me do either". It heats the sparge water, stops both pumps, and waits
