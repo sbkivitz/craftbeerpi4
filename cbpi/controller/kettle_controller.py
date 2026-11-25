@@ -3,7 +3,7 @@ import logging
 import math
 from collections.abc import Mapping
 
-from cbpi.api import clock, kettle_measures
+from cbpi.api import clock, kettle_measures, presence
 from cbpi.api.dataclasses import Kettle, Props
 from cbpi.controller import kettle_file
 from cbpi.controller.basic_controller2 import BasicController
@@ -294,6 +294,19 @@ class KettleController(BasicController):
             await self._warn_if_heater_shared(id)
         except Exception as e:  # noqa: BLE001
             logging.debug("shared-heater check skipped: %s", e)
+        # The brewer switching the mash tun's AUTO on himself (POST /kettle/{id}/on or /toggle): he is there, and
+        # says the strike water is in it, so its wort pump may run (StepController.strike_move_refuses). A step or
+        # a plugin switching it on says nothing of the sort.
+        if presence.pressed() == "auto":
+            stepper = getattr(self.cbpi, "step", None)
+            confirm = getattr(stepper, "confirm_strike_moved", None)
+            roles = getattr(stepper, "_kettle_roles", None)
+            try:
+                mt = roles().get("mt") if callable(roles) else None
+                if callable(confirm) and mt is not None and mt.id == id:
+                    await confirm("auto")
+            except Exception as e:  # noqa: BLE001
+                logging.warning("Could not note the mash tun's AUTO pressed: %s", e)
         await super().start(id, preset=preset)
         self._log_auto(id)
         # Tell every page, as stop() and toggle() do. Started through here -

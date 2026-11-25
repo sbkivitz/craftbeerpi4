@@ -7,6 +7,7 @@ from abc import abstractmethod
 
 import cbpi
 from cbpi.api import clock
+from cbpi.api import presence
 from cbpi.api import readings
 from cbpi.api.base import CBPiBase
 
@@ -255,6 +256,8 @@ class CBPiStep(_TargetArrival, CBPiBase):
         # moving on by itself. Set by StepController.start_step each time the
         # step starts. A step that may not heat unattended (BoilStep) reads it.
         self.started_by_brewer = False
+        # Whether the brewer's press - NEXT, or his answer to its question - asked this step to move on (next).
+        self._next_pressed = False
         self.logger = logging.getLogger(__name__)
         self._elapsed_saved_at = 0.0
         self._elapsed_saved_real_at = 0.0
@@ -582,10 +585,20 @@ class CBPiStep(_TargetArrival, CBPiBase):
         # kettle still cold must be able to say so again, a full window later.
         self.reset_heat_watch()
         self.running = True
+        self._next_pressed = False
         self.task = asyncio.create_task(self._run())
         self.task.add_done_callback(self._done)
 
     async def next(self):
+        # A step that holds the water for the brewer (BrewStart, a MashIn on the HLT) moves on only on his press:
+        # NEXT, or his answer to its question. Asked by itself, it carries on holding, and the step controller says
+        # so (StepController.refuses_self_next). Whether it was his press goes with the step to the controller,
+        # which checks again as the step ends (done), for a step that moves on some other way.
+        by_person = presence.pressed() is not None
+        refuses = getattr(getattr(self.cbpi, "step", None), "refuses_self_next", None)
+        if not by_person and callable(refuses) and refuses(self) is True:
+            return
+        self._next_pressed = by_person
         self.running = False
         self.cancel_reason = StepResult.NEXT
         # A step can be ACTIVE with no task behind it - that is what a profile

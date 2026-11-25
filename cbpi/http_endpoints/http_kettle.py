@@ -3,6 +3,7 @@ from urllib.parse import quote
 
 from aiohttp import web
 from cbpi.api import *
+from cbpi.api import presence
 from cbpi.api.dataclasses import Kettle, Props
 from cbpi.controller import kettle_file
 from cbpi.controller.kettle_controller import KettleController
@@ -279,7 +280,9 @@ class KettleHttpEndpoints:
                 description: invalid HTTP Met
         """
         id = request.match_info["id"]
-        await self.controller.start(id)
+        # The brewer's own AUTO: on the mash tun, it says the strike water is in it (cbpi.api.presence).
+        with presence.press("auto"):
+            await self.controller.start(id)
         return web.Response(status=204)
 
     @request_mapping(path="/{id}/off", method="POST", auth_required=False)
@@ -336,7 +339,8 @@ class KettleHttpEndpoints:
                 description: invalid HTTP Met
         """
         id = request.match_info["id"]
-        await self.controller.toggle(id)
+        with presence.press("auto"):
+            await self.controller.toggle(id)
         return web.Response(status=204)
 
     @request_mapping(path="/{id}/action", method="POST", auth_required=auth)

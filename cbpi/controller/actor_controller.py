@@ -402,6 +402,12 @@ class ActorController(BasicController):
                 else:
                     output = 100
             if item.instance.state is False:
+                # The mash tun's wort pump waits for the brewer: until he has said the strike water is in the mash
+                # tun for this brew, only his own press of the pump starts it - never a step, a logic or a plugin
+                # (StepController.strike_move_refuses). Checked here, where every actor is switched on.
+                refuses = getattr(getattr(self.cbpi, "step", None), "strike_move_refuses", None)
+                if inspect.iscoroutinefunction(refuses) and await refuses(id) is True:
+                    return False
                 # Interlock, checked here because every element in the system is
                 # energized through this one function - no step, logic or
                 # third-party plugin can go round it.

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 from abc import ABCMeta
 
@@ -68,6 +69,21 @@ class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
 
     async def on_start(self):
         pass
+
+    async def actor_on(self, id, power=100, output=None):
+        """CBPiBase.actor_on, unless this is the mash tun's AUTO and the brewer hasn't said the strike water is in it:
+        then its wort pump and the heat it sends through the coil stay off, and he is told
+        (StepController.strike_move_refuses)."""
+        refuses = getattr(getattr(self.cbpi, "step", None), "strike_move_refuses", None)
+        if inspect.iscoroutinefunction(refuses):
+            try:
+                if await refuses(id, logic_kettle=self.id) is True:
+                    return
+            except Exception as e:  # noqa: BLE001 - not knowing is no permission
+                logging.getLogger(type(self).__name__).warning(
+                    "Could not tell whether %s may switch %s on, so it stays off: %s", self.id, id, e)
+                return
+        await super().actor_on(id, power, output)
 
     async def on_stop(self):
         pass

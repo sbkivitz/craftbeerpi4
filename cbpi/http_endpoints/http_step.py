@@ -3,6 +3,7 @@ import logging
 
 from aiohttp import web
 from cbpi.api import *
+from cbpi.api import presence
 from cbpi.api.dataclasses import Props, Step
 from cbpi.controller.step_controller import (ActionRefused, BookRefused, OrderRefused, StartRefused, StepController,
                                              StepRunning)
@@ -249,7 +250,9 @@ class StepHttpEndpoints(StrikeHttpEndpoints):
                 description: successful operation
         """
 
-        await self.controller.next()
+        # The brewer's NEXT: the one press that moves a step holding the water on (cbpi.api.presence).
+        with presence.press("next"):
+            await self.controller.next()
         return web.Response(status=200)
 
     @request_mapping(path="/precheck", auth_required=False)
@@ -498,9 +501,11 @@ class StepHttpEndpoints(StrikeHttpEndpoints):
         id = request.match_info["id"]
         action = data.get("action", data.get("name"))
         try:
-            ok = await self.controller.run_action(
-                id, action, data.get("parameter", [])
-            )
+            # A person's press: a step that holds the water may move on from its own button (cbpi.api.presence).
+            with presence.press("step action"):
+                ok = await self.controller.run_action(
+                    id, action, data.get("parameter", [])
+                )
         except ActionRefused as refused:
             # The step's own words for why not, so a page can show them. A page tells this core by the error: an
             # older one answers every 400 here as "action not run".

@@ -1,5 +1,6 @@
 from aiohttp import web
 from cbpi.api import *
+from cbpi.api import presence
 import logging
 
 from cbpi.api.dataclasses import Actor, Props
@@ -198,7 +199,9 @@ class ActorHttpEndpoints:
                 description: failed to switch on actor
         """
         id = request.match_info["id"]
-        status = await self.controller.on(id)
+        # The brewer's own press: his wort pump says the strike water is in the mash tun (cbpi.api.presence).
+        with presence.press("actor"):
+            status = await self.controller.on(id)
         return web.Response(status=200 if status else 500)
 
     @request_mapping(path="/{id}/off", method="POST", auth_required=False)

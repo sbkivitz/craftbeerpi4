@@ -18,7 +18,7 @@ from os.path import isfile, join
 import cbpi
 import shortuuid
 import yaml
-from cbpi.api import clock, timefmt
+from cbpi.api import clock, presence, timefmt
 from cbpi.api.dataclasses import (NotificationAction, NotificationType, Props,
                                   Step)
 from tabulate import tabulate
@@ -148,6 +148,7 @@ class StepController:
     # Class defaults too, for a controller assembled without __init__.
     _listeners = ()
     _listener_tasks = ()
+    _wort_prompt = None
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
@@ -169,6 +170,10 @@ class StepController:
         self._mash_ph_reminder_task = None
         self._mash_ph_prompt_id = None
         self._mash_ph_shutting_down = False
+        # Steps that held the water and asked to move on by themselves this brew: step id -> how many times
+        # (_said_self_next). And the "Wort pump held" prompt while it is up (_tell_wort_held).
+        self._self_next_refused = {}
+        self._wort_prompt = None
         self.cbpi.app.on_cleanup.append(self.shutdown)
 
     async def init(self):
@@ -1186,7 +1191,250 @@ class StepController:
             held.instance.summary = ""
         self._held_step_id = None
 
-    # start()'s steps when START didn't say which recipe it was pressed on:
+    # Holding the strike water for the brewer.
+    #
+    # BrewStart heats the strike water and holds it; so does a MashIn on the HLT. Nothing after either may start
+    # until the brewer is there: he moves the water to the mash tun, maybe doughs in, connects the hoses and pumps,
+    # and then presses NEXT, or answers the step's question. So such a step moves on only on his press
+    # (cbpi.api.presence), never by asking for it itself - a plugin's mistake, a setting, a timer. And the mash
+    # tun's wort pump, with the heat its AUTO sends through the coil, waits until he has said the water is in the
+    # mash tun for this brew (strike_move_confirmed). The HLT pump is not held: it may stir the HLT while the strike
+    # water heats (cbpi/extension/hltpump).
+
+    #: Said, as a warning titled with the step's name, when a step that holds the water asks to move on by itself.
+    SELF_NEXT_TEXT = "{} tried to move on by itself; it's holding the water. Press NEXT when you're ready."
+    #: Said when such a step asks again, having been started again to hold the water: it is stopped instead.
+    SELF_NEXT_STOPPED_TEXT = ("{} tried again to move on by itself, so it has stopped: nothing heats or moves on "
+                              "until you press START to hold the water again, or NEXT to go on.")
+
+    #: In the brew steps' basic data once the brewer has said the strike water is in the mash tun, for this brew:
+    #: {"at": when, on the brewing clock; "by": how - "next" (NEXT, or his answer, out of the last step holding the
+    #: water, or out of a mash tun step), "start" (he started a mash tun step himself), "pump" (he switched the wort
+    #: pump on himself), "auto" (he switched the mash tun's AUTO on himself) or "button" (Water's in, below)}. A
+    #: reset, a load or an unload drops it; the Recipe Book never keeps it (BREW_KEYS).
+    STRIKE_MOVED_KEY = "strike_moved"
+
+    WORT_HELD_TITLE = "Wort pump held"
+    WORT_HELD_TEXT = ("{} wanted to start the wort pump, but nobody has said the strike water is in the mash tun "
+                      "yet, so the wort pump stays off and nothing heats the mash through the coil. When the water "
+                      "is in the mash tun and the hoses are on, press Water's in.")
+    WATER_IN = "Water's in"
+
+    def _kettle_roles(self):
+        """{"hlt", "mt", "bk"} as the brew-day screen finds them (cbpi.extension.hltpump.kettle_roles); all None if
+        they can't be found."""
+        try:
+            from cbpi.extension.hltpump import kettle_roles
+            return kettle_roles(self.cbpi)
+        except Exception as e:  # noqa: BLE001
+            logging.debug("Could not find the HLT and the mash tun: %s", e)
+            return {"hlt": None, "mt": None, "bk": None}
+
+    @staticmethod
+    def _kettle_of(step):
+        props = getattr(step, "props", None)
+        try:
+            return props.get("Kettle", None) if props is not None else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _on_mash_tun(self, step):
+        """Whether `step` works on the mash tun (its Kettle)."""
+        mt = self._kettle_roles().get("mt")
+        return mt is not None and self._kettle_of(step) == mt.id
+
+    def holds_water_for_brewer(self, step):
+        """Whether `step` - a brew step, or its running instance - holds the water for the brewer: a BrewStart, a
+        MashInStep on a vessel other than the mash tun (the HLT's strike water), or a step that says so itself with
+        holds_water_for_brewer() True. Never raises."""
+        entry = self.find_by_id(getattr(step, "id", None)) if getattr(step, "id", None) is not None else None
+        if entry is None:
+            return False
+        if entry.type == self.BREWSTART_TYPE:
+            return True
+        try:
+            said = getattr(entry.instance, "holds_water_for_brewer", None)
+            if (said() if callable(said) else said) is True:
+                return True
+        except Exception as e:  # noqa: BLE001
+            logging.debug("'%s' could not say whether it holds the water: %s", entry.name, e)
+        if entry.type == "MashInStep":
+            mt = self._kettle_roles().get("mt")
+            kettle = self._kettle_of(entry)
+            return mt is not None and bool(kettle) and kettle != mt.id
+        return False
+
+    def refuses_self_next(self, step):
+        """True, having said so, when `step` holds the water for the brewer (holds_water_for_brewer) and asks to
+        move on by itself rather than on his press: CBPiStep.next then carries on holding. Not when the step that
+        would start next holds the water too, off the mash tun (_hands_to_holder). Never raises."""
+        try:
+            if presence.pressed() is not None or not self.holds_water_for_brewer(step):
+                return False
+            entry = self.find_by_id(step.id)
+            if self._hands_to_holder(entry):
+                return False
+            self._said_self_next(entry)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not check whether a step may move on by itself: %s", e)
+            return False
+
+    def _hands_to_holder(self, entry):
+        """Whether the step that starts when `entry` ends - a stopped one first, else the first not begun, as start()
+        picks it - holds the water too, on a vessel other than the mash tun: a BrewStart handing over at its time to
+        the MashIn on the HLT right after it (the rig page's step 9b), which heats the same water, holds it and asks.
+        Moving on so keeps the brew at the water, so it may happen by itself; it doesn't say the water is in."""
+        nxt = next((s for s in self.profile or [] if s is not entry and s.status == StepState.STOP), None)
+        if nxt is None:
+            nxt = next((s for s in self.profile or [] if s is not entry and s.status == StepState.INITIAL), None)
+        if nxt is None or self._on_mash_tun(nxt) or not self.holds_water_for_brewer(nxt):
+            return False
+        logging.info("'%s' hands over by itself to '%s', which holds the water too", entry.name, nxt.name)
+        return True
+
+    def _said_self_next(self, entry):
+        """The warning, once a brew for each step: logged, and kept for every page until the step ends."""
+        refused = self.__dict__.setdefault("_self_next_refused", {})
+        refused[entry.id] = refused.get(entry.id, 0) + 1
+        if refused[entry.id] > 1:
+            logging.debug("'%s' asked again to move on by itself: refused", entry.name)
+            return
+        logging.warning("'%s' tried to move on by itself, which only the brewer's NEXT may do: it carries on "
+                        "holding the water", entry.name)
+        try:
+            self._ask_kept("self-next", entry, lambda s: s.status == StepState.ACTIVE, entry.name or "Brew Steps",
+                           self.SELF_NEXT_TEXT.format(entry.name or "The step"), NotificationType.WARNING,
+                           action=[NotificationAction("OK")])
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not tell the brewer that '%s' tried to move on: %s", entry.name, e)
+
+    def _refuse_finished_hold(self, entry):
+        """A step holding the water ended with NEXT that wasn't the brewer's press - it went round CBPiStep.next.
+        It is started again to hold the water, once; ended so again, it is stopped, which heats nothing."""
+        self._said_self_next(entry)
+        again = self.__dict__.get("_self_next_refused", {}).get(entry.id, 0) > 1
+
+        async def hold_again():
+            if again:
+                entry.status = StepState.STOP
+                self._tell("stopped", entry)
+                logging.warning("'%s' tried again to move on by itself: stopped", entry.name)
+                try:
+                    self.cbpi.notify(entry.name or "Brew Steps",
+                                     self.SELF_NEXT_STOPPED_TEXT.format(entry.name or "The step"),
+                                     NotificationType.WARNING)
+                except Exception as e:  # noqa: BLE001
+                    logging.warning("Could not say that '%s' stopped: %s", entry.name, e)
+            else:
+                await self.start_step(entry)
+            await self.save()
+
+        asyncio.create_task(hold_again())
+
+    def strike_move_confirmed(self):
+        """Whether the brewer has said the strike water is in the mash tun, for this brew (STRIKE_MOVED_KEY)."""
+        basic = self.basic_data if isinstance(self.basic_data, dict) else {}
+        return isinstance(basic.get(self.STRIKE_MOVED_KEY), dict)
+
+    def _strike_steps_left(self, but=None):
+        """The steps holding the water before the mash tun's first step (all of them, with none on the mash tun),
+        not yet done, `but` that one."""
+        mt = self._kettle_roles().get("mt")
+        left = []
+        for item in self.profile or []:
+            if mt is not None and self._kettle_of(item) == mt.id:
+                break
+            if item is not but and item.status != StepState.DONE and self.holds_water_for_brewer(item):
+                left.append(item)
+        return left
+
+    def _confirm_strike_moved(self, by):
+        """Note that the brewer has said the strike water is in the mash tun (STRIKE_MOVED_KEY). True if that is
+        news. Saved by the caller."""
+        if self.strike_move_confirmed():
+            return False
+        if not isinstance(self.basic_data, dict):
+            self.basic_data = {}
+        self.basic_data[self.STRIKE_MOVED_KEY] = dict(at=round(clock.now(), 3), by=str(by))
+        logging.info("The strike water is in the mash tun, the brewer says (%s): the wort pump may run", by)
+        self._retire_wort_prompt()
+        return True
+
+    async def confirm_strike_moved(self, by):
+        """The brewer has said the strike water is in the mash tun: the wort pump may run (strike_move_refuses)."""
+        if self._confirm_strike_moved(by):
+            await self.save()
+            self.push_udpate(complete=True)
+
+    def _finished_by_press(self, entry):
+        """`entry`, holding the water, has been moved on by the brewer's press: if it was the last before the mash
+        tun, the strike water is in the mash tun."""
+        if not self._strike_steps_left(but=entry):
+            self._confirm_strike_moved("next")
+
+    async def strike_move_refuses(self, actor_id, logic_kettle=None):
+        """True, having told the brewer, when `actor_id` must stay off because the strike water isn't in the mash
+        tun yet, for this brew: the mash tun's wort pump, switched on by anything but his own press of it
+        (ActorController.on); and, for the mash tun's AUTO (`logic_kettle` its kettle's id), its wort pump and its
+        heater - on a HERMS the HLT element, heating the mash through the coil (CBPiKettleLogic.actor_on). His press
+        of the wort pump says the water is in. Never raises."""
+        try:
+            mt = self._kettle_roles().get("mt")
+            if mt is None or not actor_id:
+                return False
+            if logic_kettle is not None:
+                if logic_kettle != mt.id or actor_id not in (mt.agitator, mt.heater):
+                    return False
+            elif actor_id != mt.agitator:
+                return False
+            if logic_kettle is None and presence.pressed() == "actor":
+                await self.confirm_strike_moved("pump")
+                return False
+            if self.strike_move_confirmed():
+                return False
+            self._tell_wort_held("The mash tun's AUTO" if logic_kettle is not None else "A step or a plugin")
+            return True
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not check whether %s may switch on: %s", actor_id, e)
+            return False
+
+    def _tell_wort_held(self, who):
+        """The "Wort pump held" prompt, with Water's in, kept for every page until the water is in or the brew
+        starts over; logged as it goes up."""
+        if self.__dict__.get("_wort_prompt") is not None:
+            logging.debug("%s wanted to start the wort pump: still held", who)
+            return
+        logging.warning("%s wanted to start the wort pump before the brewer said the strike water is in the mash "
+                        "tun: the wort pump stays off, and nothing heats the mash through the coil", who)
+
+        async def water_in():
+            await self.confirm_strike_moved("button")
+
+        try:
+            self._wort_prompt = self.cbpi.notify(
+                self.WORT_HELD_TITLE, self.WORT_HELD_TEXT.format(who), NotificationType.WARNING,
+                action=[NotificationAction(self.WATER_IN, water_in)], keep=True) or "said"
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not tell the brewer the wort pump is held: %s", e)
+
+    def _retire_wort_prompt(self):
+        prompt, self._wort_prompt = self.__dict__.get("_wort_prompt"), None
+        if prompt in (None, "said"):
+            return
+        retire = getattr(getattr(self.cbpi, "notification", None), "retire", None)
+        if callable(retire):
+            try:
+                retire(prompt)
+            except Exception as e:  # noqa: BLE001
+                logging.debug("Could not take the wort pump prompt down: %s", e)
+
+    def _forget_strike_move(self):
+        """Starting over, or another brew: the strike water isn't in the mash tun until the brewer says so again."""
+        if isinstance(self.basic_data, dict):
+            self.basic_data.pop(self.STRIKE_MOVED_KEY, None)
+        self.__dict__["_self_next_refused"] = {}
+        self._retire_wort_prompt()
     # whatever is loaded starts, as it always has.
     _ANY_RECIPE = object()
 
@@ -1316,10 +1564,16 @@ class StepController:
     async def next(self):
         logging.info("Trigger Next")
         logging.debug("Current profile: %s", self.profile)
+        # The brewer's NEXT (POST /step2/next) or his answer to a question, or something asking by itself
+        # (cbpi.api.presence): a step holding the water moves on only on his.
+        by_person = presence.pressed() is not None
         active = self.find_by_status(StepState.ACTIVE)
         step = active
         if step is not None:
             if step.instance is not None and getattr(step.instance, "task", None):
+                if by_person:
+                    # For a step whose own next() doesn't reach CBPiStep.next, which notes the press itself.
+                    step.instance._next_pressed = True
                 await step.instance.next()
             else:
                 # An ACTIVE step with no task behind it is a violated invariant,
@@ -1344,6 +1598,13 @@ class StepController:
         step = self.find_by_status(StepState.STOP) or self.find_by_status(StepState.ERROR)
         if step is not None:
             if step.instance is not None:
+                if self.holds_water_for_brewer(step):
+                    if not by_person:
+                        self._said_self_next(step)
+                        return
+                    self._finished_by_press(step)
+                elif by_person and self._on_mash_tun(step):
+                    self._confirm_strike_moved("next")
                 step.status = StepState.DONE
                 self._tell("step_done", step)
                 await self.save()
@@ -1473,6 +1734,7 @@ class StepController:
             except:
                 logging.warning("No Step Instance - Id: %s", item.id)
         self._clear_hold()
+        self._forget_strike_move()
         # Starting over: no question about the brew before still stands.
         self._retire_prompts(everything=True)
         self._tell("reset")
@@ -1496,6 +1758,9 @@ class StepController:
             "basic": self.basic_data,
             "steps": list(map(lambda item: item.to_dict(), self.profile)),
             "types": self.get_types(),
+            # When and how the brewer said the strike water is in the mash tun, this brew; None until he has.
+            "strike_moved": (self.basic_data.get(self.STRIKE_MOVED_KEY)
+                             if isinstance(self.basic_data, dict) else None),
         }
 
     async def move(self, id, direction: StepMove):
@@ -1575,6 +1840,17 @@ class StepController:
 
         if result == StepResult.NEXT:
             step_current = self.find_by_id(step.id)
+            # A step holding the water moves on only on the brewer's press (CBPiStep.next refuses anything else),
+            # or by itself to a step that holds the water too; one that got round that is started again to hold it.
+            if self.holds_water_for_brewer(step_current):
+                if getattr(step, "_next_pressed", False):
+                    self._finished_by_press(step_current)
+                elif not self._hands_to_holder(step_current):
+                    self._refuse_finished_hold(step_current)
+                    return
+            elif getattr(step, "_next_pressed", False) and self._on_mash_tun(step_current):
+                # The brewer moving on from a mash tun step himself: the mash is in it.
+                self._confirm_strike_moved("next")
             step_current.status = StepState.DONE
             self._tell("step_done", step_current)
 
@@ -1813,6 +2089,9 @@ class StepController:
     async def start_step(self, step, by_brewer=False):
         try:
             logging.info("Try to start step %s" % step)
+            # The brewer starting a mash tun step himself - START, Resume - says the strike water is in it.
+            if by_brewer and self._on_mash_tun(step):
+                self._confirm_strike_moved("start")
             if step.instance is not None:
                 step.instance.started_by_brewer = bool(by_brewer)
             await step.instance.start()
@@ -1939,6 +2218,7 @@ class StepController:
         atomic_write_json(self.path, data, indent=4, sort_keys=True)
         self._held_step_id = None
         self.load()
+        self._forget_strike_move()
         self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
         self._tell("loaded")
@@ -1957,6 +2237,7 @@ class StepController:
 
         self._held_step_id = None
         self.load()
+        self._forget_strike_move()
         self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
         self._tell("loaded")
@@ -2013,8 +2294,9 @@ class StepController:
     #: leaves it out.
     GRAIN_PLACE_KEY = "grain_place"
     GRAIN_PLACES = ("garage", "indoors")
-    #: What belongs to this brew of the steps rather than to the recipe.
-    BREW_KEYS = BOOK_KEYS + (GRAIN_PLACE_KEY,)
+    #: What belongs to this brew of the steps rather than to the recipe: the strike water said to be in the mash tun
+    #: (STRIKE_MOVED_KEY) too.
+    BREW_KEYS = BOOK_KEYS + (GRAIN_PLACE_KEY, STRIKE_MOVED_KEY)
 
     #: In the basic data of a book recipe imported from BeerXML, and of the brew steps loaded from it: the BeerXML
     #: file the book keeps for it, and the NAME of the recipe in that file (RecipeController.SOURCE_KEYS). LOAD

@@ -9,7 +9,7 @@ from email import message
 
 import shortuuid
 from cbpi.api import *
-from cbpi.api import clock, timefmt
+from cbpi.api import clock, presence, timefmt
 from cbpi.api.dataclasses import NotificationType
 
 # What notify_log_event says of the log line it is notifying, for notify to pass on to the listeners: per thread and
@@ -393,7 +393,9 @@ class NotificationController:
             )
             if action is not None and action.method is not None:
                 background_tasks = set()
-                task = asyncio.create_task(action.method())
+                # The brewer's answer: a person's press in the task that runs it, as a step's question needs to
+                # move on (cbpi.api.presence).
+                task = asyncio.create_task(presence.press_in_task("answer", action.method))
                 background_tasks.add(task)
                 task.add_done_callback(background_tasks.discard)
             # Answered: gone from every page, not just the one it was
