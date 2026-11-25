@@ -26,6 +26,7 @@ from tabulate import tabulate
 from ..api.decorator import normalize_action_parameters, resolve_action
 from ..api.step import CBPiStep, StepMove, StepResult, StepState
 from ..api.timer import Timer
+from .pump_starts import PumpStarts
 
 
 def system_clock_synchronized():
@@ -111,7 +112,7 @@ class ActionRefused(Exception):
         self.reason = reason
 
 
-class StepController:
+class StepController(PumpStarts):
 
     # Carrying on by itself after a restart (allow_resume). Real seconds: the
     # first is how long to wait for the system clock to be confirmed before
@@ -1691,6 +1692,8 @@ class StepController:
                     data=dict(type="info", title="Pause", message="Calling paue step"),
                 )
                 step.status = StepState.STOP
+                # Paused: no pump starts again by itself when it carries on (pump_starts).
+                self._forget_pump_starts()
                 self._tell("stopped", step)
 
                 await self.save()
@@ -1788,6 +1791,7 @@ class StepController:
                 logging.warning("No Step Instance - Id: %s", item.id)
         self._clear_hold()
         self._forget_strike_move()
+        self._forget_pump_starts()
         # Starting over: no question about the brew before still stands.
         self._retire_prompts(everything=True)
         self._tell("reset")
@@ -2273,6 +2277,7 @@ class StepController:
         self._held_step_id = None
         self.load()
         self._forget_strike_move()
+        self._forget_pump_starts()
         self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
         self._tell("loaded")
@@ -2292,6 +2297,7 @@ class StepController:
         self._held_step_id = None
         self.load()
         self._forget_strike_move()
+        self._forget_pump_starts()
         self._retire_prompts(everything=True)
         self.push_udpate(complete=True)
         self._tell("loaded")

@@ -6,6 +6,7 @@ from cbpi.api.automation import by_automation
 from cbpi.api.dataclasses import Actor, Props
 from cbpi.api.tasks import cancellation_is_real, spawn, wait_within
 from cbpi.controller.basic_controller2 import BasicController
+from cbpi.controller.pump_starts import pressed_pump
 from tabulate import tabulate
 
 
@@ -523,6 +524,8 @@ class ActorController(BasicController):
                 # Neither: switching on something already on changes nothing.
                 # The default level is the brewer's, and an element a logic is
                 # driving must not jump to it until the logic's next cycle.
+            # His own press of a pump starts it for the brew (cbpi/controller/pump_starts.py).
+            pressed_pump(self.cbpi, id, True)
             return True
         except Exception as e:
             logging.error("Failed to switch on Actor {} {}".format(id, e))
@@ -555,6 +558,8 @@ class ActorController(BasicController):
                 )
                 return False
             await item.instance.off()
+            # His own press of a pump stops it until he starts it again (cbpi/controller/pump_starts.py).
+            pressed_pump(self.cbpi, id, False)
 
             self.cbpi.ws.send(
                 dict(

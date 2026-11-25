@@ -73,8 +73,10 @@ class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
     async def actor_on(self, id, power=100, output=None):
         """CBPiBase.actor_on, unless this is the mash tun's AUTO and the brewer hasn't said the strike water is in it:
         then its wort pump and the heat it sends through the coil stay off, and he is told
-        (StepController.strike_move_refuses)."""
-        refuses = getattr(getattr(self.cbpi, "step", None), "strike_move_refuses", None)
+        (StepController.strike_move_refuses). And a pump - any kettle's agitator - starts only once the brewer has
+        started it: until then it stays off, and he is asked for it (StepController.may_start_pump)."""
+        stepper = getattr(self.cbpi, "step", None)
+        refuses = getattr(stepper, "strike_move_refuses", None)
         if inspect.iscoroutinefunction(refuses):
             try:
                 if await refuses(id, logic_kettle=self.id) is True:
@@ -83,6 +85,9 @@ class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
                 logging.getLogger(type(self).__name__).warning(
                     "Could not tell whether %s may switch %s on, so it stays off: %s", self.id, id, e)
                 return
+        may_start = getattr(stepper, "may_start_pump", None)
+        if inspect.iscoroutinefunction(may_start) and await may_start(id, quiet=True) is not True:
+            return
         await super().actor_on(id, power, output)
 
     async def on_stop(self):
@@ -158,3 +163,12 @@ class CBPiKettleLogic(CBPiBase, metaclass=ABCMeta):
         self.task.cancel()
         await self.task
         self.state = False
+        # Nothing here wants its kettle's pump any more: a prompt asking for it comes down.
+        withdraw = getattr(getattr(self.cbpi, "step", None), "withdraw_pump_ask", None)
+        kettle = None
+        try:
+            kettle = self.cbpi.kettle.find_by_id(self.id)
+        except Exception:  # noqa: BLE001
+            kettle = None
+        if callable(withdraw) and getattr(kettle, "agitator", None):
+            withdraw(kettle.agitator)

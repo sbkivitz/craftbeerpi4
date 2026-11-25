@@ -152,7 +152,7 @@ class NotificationStep(CBPiStep):
             options=["Yes", "No"],
             # What the step does when it is missing; declared so an editor shows it.
             default_value="Yes",
-            description="Stop the recirculation pump once strike temperature is reached, while you dough in. Grain should go into a still tun rather than be drawn into a HERMS coil that has no grain bed in front of it. It also bounds the overshoot from a fast mash-in ramp: the coil is the only path from the HLT to the mash, so stopping the pump cuts that path at once, where a heating element would coast. Measured on a 30 L rig driving the HLT flat out - overshoot +3.0 F with the pump running, -0.1 F with it stopped. The pump restarts when you press Next. Set to No if you would rather keep circulating and hold temperature during dough-in.",
+            description="Stop the recirculation pump once strike temperature is reached, while you dough in. Grain should go into a still tun rather than be drawn into a HERMS coil that has no grain bed in front of it. It also bounds the overshoot from a fast mash-in ramp: the coil is the only path from the HLT to the mash, so stopping the pump cuts that path at once, where a heating element would coast. Measured on a 30 L rig driving the HLT flat out - overshoot +3.0 F with the pump running, -0.1 F with it stopped. Once you press Next, the first rest asks you to start the pump again. Set to No if you would rather keep circulating and hold temperature during dough-in.",
         ),
     ]
 )
@@ -430,9 +430,18 @@ class MashInStep(CBPiStep):
 
         Separate from grain_present because they are different facts: one is
         about what is in the vessel, the other is about what the step needs the
-        rig to do right now.
+        rig to do right now. Held, the pump is the brewer's to start again
+        once the grain is in: the next step that wants it asks him
+        (StepController.pump_stopped).
         """
         self._tell_logic("pump_hold", bool(hold))
+        if hold:
+            stepper = getattr(self.cbpi, "step", None)
+            stopped, role = getattr(stepper, "pump_stopped", None), getattr(stepper, "pump_role", None)
+            pump = getattr(getattr(self, "kettle", None), "agitator", None)
+            # The grain goes into the mash tun: its wort pump; not the HLT's, for a MashIn heating the strike water.
+            if callable(stopped) and callable(role) and pump and role(pump) == "wort":
+                stopped(pump)
 
     def _tell_logic(self, name, value):
         try:
@@ -2275,7 +2284,7 @@ class BoilStep(CBPiStep):
         ),
         Property.Actor(
             label="Actor",
-            description="Actor can trigger a valve for the cooldwon to target temperature",
+            description="Actor can trigger a valve for the cooldwon to target temperature. A pump (a kettle's agitator) isn't started by the step: it asks you to start it",
         ),
         Property.Kettle(label="Kettle"),
     ]
@@ -2340,10 +2349,21 @@ class CooldownStep(CBPiStep):
             1, on_update=self.on_timer_update, on_done=self.on_timer_done
         )
 
+    async def _start_actor(self):
+        """Switch its actor on - a valve, say. A pump isn't started by a step: the brewer is asked to start it
+        (StepController.may_start_pump), and the cool down runs meanwhile."""
+        stepper = getattr(self.cbpi, "step", None)
+        is_pump = getattr(stepper, "is_pump", None)
+        may_start = getattr(stepper, "may_start_pump", None)
+        if callable(is_pump) and is_pump(self.actor) and inspect.iscoroutinefunction(may_start):
+            if await may_start(self.actor, purpose="cool the wort") is not True:
+                return
+        await self.actor_on(self.actor)
+
     async def run(self):
         timestring = datetime.fromtimestamp(self.start_time)
         if self.actor is not None:
-            await self.actor_on(self.actor)
+            await self._start_actor()
         self.summary = "Started: {}".format(timefmt.time_of_day(timestring, self.cbpi))
         await self.push_update()
         while self.running == True:

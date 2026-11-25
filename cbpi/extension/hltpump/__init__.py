@@ -1,4 +1,4 @@
-"""Run the HLT pump whenever a logic heats the HLT, until the sparge.
+"""The HLT pump with the HLT's heat: run by BrewStart's heating, asked for otherwise, until the sparge.
 
 Water heated from below settles into layers, hot on top, so the HLT's probe
 and the HERMS coil each sit in different water. The HLT pump keeps the HLT
@@ -10,30 +10,34 @@ The HLT's own logic (PIDBoil) switches only the element, the mash tun's
 PID_HERMS only its own pump - the wort pump - and an element switched on by
 hand is just the element: none of them runs the HLT pump.
 
-So, on the server, with no page open too:
-- Before the sparge, when a logic starts heating the HLT - its own AUTO or
-  the mash tun's HERMS - the HLT pump is switched on, and a notification says
-  why and asks for its valves to be checked.
+No pump starts by itself (cbpi/controller/pump_starts.py), with one exception,
+BrewStart heating the strike water. So, on the server, with no page open too:
+- While a BrewStart step is the step running, when its heating starts - the
+  HLT's own AUTO - the HLT pump is switched on, and a notification says why
+  and asks for its valves to be checked. Nobody may be there: BrewStart heats
+  the water before the brewer is up. A BrewStart step starting asks for the
+  pump and its valves to be checked, and waits for an answer. Started with
+  its valves set to move water to the mash tun, the pump would empty the HLT
+  into it and could leave the element dry.
+- Before the sparge, when anything else starts heating the HLT - its own AUTO
+  under another step, or the mash tun's HERMS - with the HLT pump off, the
+  brewer is asked to start it: "Start the HLT pump to stir the HLT.", with
+  Start pump, once a step. The heat goes on meanwhile: the pump only stirs.
 - Never for its element switched on by hand. The brewer heating by hand may
   not have primed the pump or put its hoses in place, so the pump stays his
   to start.
-- Including when nobody is there: BrewStart heating the water before the
-  brewer is up. A BrewStart step starting asks for the pump and its valves to
-  be checked, and waits for an answer. Started with its valves set to move
-  water to the mash tun, the pump would empty the HLT into it and could leave
-  the element dry.
 - It is left on when the heating stops, so it runs the whole time before the
   sparge rather than stopping and starting between rests.
-- The brewer can still stop it, and ALL OFF does. It starts again the next
-  time a logic starts heating the HLT, which includes one logic taking the
-  heating over from another - the recipe's water heating handing over to the
-  mash tun's HERMS - or from the hand. A stop is never fought: the element
-  pulsing under a running logic is not a start.
+- The brewer can still stop it, and ALL OFF does. BrewStart starts it again
+  only when its heating starts again; anything else asks again, in the next
+  step. A stop is never fought: the element pulsing under a running logic is
+  not a start.
 - From the sparge on - once the recipe reaches the first step named for the
   runoff, as the first-wort reminder finds it - it is the brewer's, to set the
   valves for the sparge water and start. A recipe that is over, every step
   done, counts as none.
-- HLT_PUMP_WITH_HEAT = No turns all of this off.
+- HLT_PUMP_WITH_HEAT = No turns all of this off: nothing starts the HLT pump
+  or asks for it.
 
 And whatever the setting, the HLT pump is switched off as the runoff ends.
 Running on after the Sparge step's time is up, it would send sparge water to
@@ -57,7 +61,8 @@ where nobody starts the boil to switch the pumps off. A recipe ending on its
 runoff step is switched off and told about once, as the recipe ending.
 
 The steps switch pumps off for the brewer's hoses through pump_off and
-runoff_pumps_off below.
+runoff_pumps_off below, which also end his start of the pump: nothing runs it
+again until he starts it (pump_starts).
 
 The HLT is found as the brew-day screen finds it (brewday/live.js
 kettleRoles): the kettle the mash tun's HERMS works on - its HLT_Kettle, else
@@ -88,8 +93,11 @@ CHECK_TITLE = "Check the HLT pump"
 CHECK_TEXT = ("The HLT pump will start when the heating does, and nobody may be there. "
               "Before you leave it: make sure the pump is ready to go and its valves are "
               "open to recirculate the HLT. ({} in Settings)")
-STARTED_TEXT = ("Switched on with the HLT heat, to keep the water from settling into hot "
+STARTED_TEXT = ("Switched on as BrewStart heats the strike water, to keep it from settling into hot "
                 "and cool layers. Check its valves are set to recirculate the HLT. ({} in Settings)")
+#: What the HLT pump is asked for, when anything but BrewStart starts heating the HLT: "Start the HLT pump to
+#: stir the HLT." (StepController.may_start_pump).
+ASK_PURPOSE = "stir the HLT"
 RUNOFF_TITLE = "HLT pump"
 RUNOFF_OFF_TEXT = "{} has ended, so the HLT pump is off."
 RUNOFF_WORT_TEXT = "The wort pump is still running, to finish draining the mash tun."
@@ -214,8 +222,13 @@ def hlt_pump(cbpi):
 
 
 async def pump_off(cbpi, pump_id):
-    """Switch a pump off if it is running. True if it was, and the switch
+    """Switch a pump off if it is running, for safety: the brewer's start of it
+    no longer stands, running or not, so nothing runs it again until he starts
+    it (StepController.pump_stopped). True if it was running, and the switch
     answered; never raises."""
+    stopped = getattr(getattr(cbpi, "step", None), "pump_stopped", None)
+    if pump_id and callable(stopped):
+        stopped(pump_id)
     pump = cbpi.actor.find_by_id(pump_id) if pump_id else None
     if pump is None or not _on(pump):
         return False
@@ -269,8 +282,9 @@ class HLTPumpWithHeat(CBPiExtension):
                 logger.warning("HLT pump: could not check the HLT: %s", e)
 
     async def look(self):
-        """Switch the HLT pump on if a logic has just started heating the HLT,
-        before the sparge."""
+        """When a logic has just started heating the HLT, before the sparge,
+        with the HLT pump off: switch it on if that is BrewStart's heating,
+        else ask the brewer for it."""
         if not self.enabled():
             self._source = None
             return
@@ -285,13 +299,30 @@ class HLTPumpWithHeat(CBPiExtension):
         pump = self.cbpi.actor.find_by_id(pump_id)
         if pump is None or _on(pump):
             return
-        logger.info("HLT pump on: the HLT is heating (%s), before the sparge (%s)", now, SETTING)
+        if not self.brewstart_heats(now):
+            ask = getattr(getattr(self.cbpi, "step", None), "may_start_pump", None)
+            if asyncio.iscoroutinefunction(ask):
+                logger.info("HLT pump: the HLT is heating (%s), before the sparge: asking the brewer to start it", now)
+                await ask(pump_id, purpose=ASK_PURPOSE)
+            return
+        logger.info("HLT pump on: BrewStart is heating the strike water (%s)", SETTING)
         if await self.cbpi.actor.on(pump_id) is False:
             return
         try:
             self.cbpi.notify("HLT pump", STARTED_TEXT.format(SETTING), NotificationType.INFO)
         except Exception as e:  # noqa: BLE001 - saying why never stops the pump
             logger.debug("HLT pump: could not say why it started: %s", e)
+
+    def brewstart_heats(self, source):
+        """Whether the heat that has just started is BrewStart's: the HLT's own AUTO (`source` "own") while a
+        BrewStart step is the step running."""
+        if source != "own":
+            return False
+        try:
+            active = self.cbpi.step.find_by_status(StepState.ACTIVE)
+        except Exception:  # noqa: BLE001 - not known to be BrewStart's: asked for, never started
+            return False
+        return active is not None and getattr(active, "type", None) in SCHEDULED_STEPS
 
     def step_event(self, event, snapshot):
         """A step listener (StepController.add_listener).

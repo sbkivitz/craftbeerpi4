@@ -227,7 +227,9 @@ class ActorHttpEndpoints:
                 description: failed to switch off actor
         """
         id = request.match_info["id"]
-        status = await self.controller.off(id)
+        # The brewer's own press: a pump he stops stays off until he starts it (cbpi.api.presence).
+        with presence.press("actor"):
+            status = await self.controller.off(id)
         return web.Response(status=200 if status else 500)
 
     @request_mapping(path="/{id}/action", method="POST", auth_required=auth)
