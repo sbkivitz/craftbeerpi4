@@ -1,6 +1,6 @@
 """What the strike water model takes from a vessel's own figures, kept with its kettle on the Hardware page
 (cbpi.api.kettle_measures): what it weighs empty, and what it's made of; and the least water the HLT keeps over its
-element and coil (least_water), which the strike water may never go below.
+element and coil (least_water), which the strike water box warns of when the figures go below it.
 
 The rule is the brewer's: a vessel's figure only narrows a guess or replaces BeerSmith's. A weight or material that
 is blank, missing, 0 or less, or can't be read gives nothing, and the model is exactly as it is without it.

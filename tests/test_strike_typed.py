@@ -16,8 +16,9 @@ Day instead:
   reading is the room and the one given waits aside; null takes it back. A new brew day starts without it.
 - The HLT keeps the least water that covers its element and coil (cbpi.strike.vessels.least_water: its own min_water
   on Hardware, else 15 % of its capacity, else 3 gal): mash water given here, or HLT water, that would leave it less is
-  refused, saying what would be left and the least; BrewStart's Volume or BeerSmith's figures that do are a warning
-  in the state (hlt_low) that blocks nothing.
+  kept, and the answer's warning says what is left and the least in the box's words; the state warns (hlt_low), as
+  for BrewStart's Volume or BeerSmith's figures that do, and blocks nothing. HLT water less than the mash water is
+  still refused.
 """
 
 import asyncio
@@ -238,44 +239,59 @@ def test_the_least_and_the_sparge_left_are_in_the_state(tmp_path, monkeypatch):
     assert (st["warnings"], st["misses"]) == ([], [])
 
 
-def test_mash_water_leaving_the_hlt_less_than_the_least_is_refused_with_what_is_left(tmp_path, monkeypatch):
+def test_mash_water_leaving_the_hlt_less_than_the_least_is_kept_with_a_warning(tmp_path, monkeypatch):
     b = Brewery(tmp_path, monkeypatch, step_kg=9.072, volume=20, hlt=dict(capacity=20.0))
     b.state()
-    status, body = b.refused("set_recipe", strike_vol=20.0)
-    assert (status, body) == (400, {"error": "too_much", "what": "strike_vol", "hlt": 20.0, "left": 0.0,
-                                    "least": 3.0, "least_from": "capacity", "most": 17.0})
-    assert b.refused("set_recipe", strike_vol=17.01)[1]["left"] == 2.99
-    assert "mash_numbers" not in b.basic, "a refused figure isn't kept"
-    st = b.send("set_recipe", strike_vol=8.26)["strike"]
-    assert (st["recipe"]["strike_vol"], st["inputs"]["left"], st["warnings"]) == (8.26, 11.74, [])
-    st = b.send("set_recipe", strike_vol=17.0)["strike"]
-    assert (st["inputs"]["left"], st["warnings"]) == (3.0, []), "exactly the least is enough"
+    out = b.send("set_recipe", strike_vol=20.0)
+    assert out["warning"] == {"what": "hlt_low", "left": 0.0, "least": 3.0, "least_from": "capacity", "unit": "gal",
+                              "says": "Leaves 0.0 gal in the HLT, under its 3.0 gal minimum."}
+    st = out["strike"]
+    assert (st["recipe"]["strike_vol"], st["inputs"]["left"], st["warnings"]) == (20.0, 0.0, ["hlt_low"])
+    assert b.basic["mash_numbers"]["infuse_l"] == round(20.0 * model.L_PER_GAL, 3), "the figure is kept"
+    assert b.send("set_recipe", strike_vol=17.01)["warning"]["says"] == \
+        "Leaves 2.99 gal in the HLT, under its 3.00 gal minimum.", "two places where one would show them the same"
+    out = b.send("set_recipe", strike_vol=8.26)
+    assert (out["warning"], out["strike"]["inputs"]["left"], out["strike"]["warnings"]) == (None, 11.74, [])
+    out = b.send("set_recipe", strike_vol=17.0)
+    assert (out["warning"], out["strike"]["inputs"]["left"]) == (None, 3.0), "exactly the least is enough"
 
 
-def test_the_hlts_own_least_water_is_the_one_mash_water_is_held_to(tmp_path, monkeypatch):
+def test_the_hlts_own_least_water_is_the_one_mash_water_is_warned_of(tmp_path, monkeypatch):
     b = Brewery(tmp_path, monkeypatch, step_kg=9.072, volume=20, hlt=dict(capacity=20.0, min_water=6.0))
     b.state()
-    body = b.refused("set_recipe", strike_vol=14.5)[1]
-    assert (body["least"], body["least_from"], body["most"], body["left"]) == (6.0, "hardware", 14.0, 5.5)
+    w = b.send("set_recipe", strike_vol=14.5)["warning"]
+    assert (w["least"], w["least_from"], w["left"], w["says"]) == \
+        (6.0, "hardware", 5.5, "Leaves 5.5 gal in the HLT, under its 6.0 gal minimum.")
 
 
 def test_mash_water_given_before_the_hlts_water_is_known_is_kept(tmp_path, monkeypatch):
     b = Brewery(tmp_path, monkeypatch, step_kg=9.072, volume=None)
     assert b.state()["inputs"]["vol"] is None
-    st = b.send("set_recipe", strike_vol=20.0)["strike"]
+    out = b.send("set_recipe", strike_vol=20.0)
+    st = out["strike"]
     assert (st["recipe"]["strike_vol"], st["inputs"]["left"], st["warnings"], st["miss"]) == (20.0, None, [], "vol")
+    assert out["warning"] is None
 
 
-def test_hlt_water_leaving_less_than_the_least_after_the_mash_water_is_refused(tmp_path, monkeypatch):
+def test_hlt_water_leaving_less_than_the_least_after_the_mash_water_is_kept_with_a_warning(tmp_path, monkeypatch):
     b = Brewery(tmp_path, monkeypatch, numbers=BEERSMITH, hlt=dict(capacity=20.0))
     b.state()
     mash = round(34.1 / model.L_PER_GAL, 2)
-    status, body = b.refused("set_water", vol=11.0)
-    assert (status, body) == (400, {"error": "too_little", "min": round(mash + 3.0, 2), "mash": mash,
-                                    "left": round(11.0 - mash, 2), "least": 3.0, "least_from": "capacity"})
-    assert b.profile[0].props["Volume"] == 15, "a refused figure isn't kept"
+    out = b.send("set_water", vol=11.0)
+    assert out["applied"]["to"] == 11.0 and b.profile[0].props["Volume"] == 11.0, "the figure is kept"
+    assert out["warning"] == {"what": "hlt_low", "left": round(11.0 - mash, 2), "least": 3.0, "least_from": "capacity",
+                              "unit": "gal", "says": "Leaves %.1f gal in the HLT, under its 3.0 gal minimum." % (11.0 - mash)}
+    assert out["strike"]["warnings"] == ["hlt_low"]
     out = b.send("set_water", vol=round(mash + 3.0, 2))
-    assert (out["applied"]["to"], out["strike"]["warnings"]) == (round(mash + 3.0, 2), [])
+    assert (out["applied"]["to"], out["warning"], out["strike"]["warnings"]) == (round(mash + 3.0, 2), None, [])
+
+
+def test_hlt_water_less_than_the_mash_water_is_still_refused(tmp_path, monkeypatch):
+    b = Brewery(tmp_path, monkeypatch, numbers=BEERSMITH, hlt=dict(capacity=20.0))
+    b.state()
+    mash = round(34.1 / model.L_PER_GAL, 2)
+    assert b.refused("set_water", vol=mash - 0.5) == (400, {"error": "too_little", "min": mash})
+    assert b.profile[0].props["Volume"] == 15, "a refused figure isn't kept"
 
 
 def test_brewstarts_volume_set_elsewhere_too_low_is_a_warning_that_blocks_nothing(tmp_path, monkeypatch):

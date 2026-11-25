@@ -10,8 +10,8 @@ strike water box has them at once:
   so a screen can tell a CraftBeerPi that takes "edit").
 - "back": [...] puts BeerSmith's own back, BeerSmith's again; so does changing the figure to BeerSmith's own. There's
   nothing to go back to for a figure BeerSmith never gave.
-- Mash water that would leave the HLT less than the least that covers its element and coil is refused, as on Brew Day;
-  BeerSmith's own is never refused.
+- Mash water that would leave the HLT less than the least that covers its element and coil is kept with a warning, as
+  on Brew Day.
 - MashInStep works its strike out from the recipe's figures where the recipe has them, its own Grain_Kg and Mash_Water
   only where it has none; and a figure given clears a MashIn still to come's own copy, so there's no second copy to
   disagree.
@@ -110,11 +110,12 @@ def test_a_figure_both_given_and_put_back_or_an_unknown_one_is_a_bad_body(tmp_pa
     assert b.basic["mash_numbers"] == BEERSMITH
 
 
-def test_mash_water_changed_from_beersmiths_is_held_to_the_hlts_least(tmp_path, monkeypatch):
+def test_mash_water_changed_from_beersmiths_under_the_hlts_least_is_kept_with_a_warning(tmp_path, monkeypatch):
     b = Brewery(tmp_path, monkeypatch, numbers=BEERSMITH, volume=12, hlt={"capacity": 20})
-    status, body = b.refused("set_recipe", strike_vol=9.5, edit=True)
-    assert (status, body["error"], body["most"], body["least"]) == (400, "too_much", 9.0, 3.0)
-    assert b.basic["mash_numbers"] == BEERSMITH
+    out = b.send("set_recipe", strike_vol=9.5, edit=True)
+    assert (out["applied"]["strike_vol"], out["warning"]["least"], out["warning"]["says"]) == \
+        (9.5, 3.0, "Leaves 2.5 gal in the HLT, under its 3.0 gal minimum.")
+    assert b.basic["mash_numbers"]["typed"] == ["water"]
 
 
 def test_beersmiths_own_mash_water_is_never_refused(tmp_path, monkeypatch):

@@ -105,6 +105,13 @@ class StrikeRefused(Exception):
         return dict(error=self.error, **self.more)
 
 
+def hlt_low_words(left, least, unit):
+    """The warning hlt_low in the strike water box's words: "Leaves 0.5 gal in the HLT, under its 3.0 gal minimum."
+    Figures to one place, or to two where one place would show them the same."""
+    places = 1 if round(left, 1) < round(least, 1) else 2
+    return "Leaves %.*f %s in the HLT, under its %.*f %s minimum." % (places, left, unit, places, least, unit)
+
+
 # ---------------------------------------------------------------------------------------------------------------
 # The worker process
 # ---------------------------------------------------------------------------------------------------------------
@@ -782,7 +789,7 @@ class StrikeController:
         room, room_from = (room_given, "you") if not probe_usable and room_given is not None else (probe_room, "probe")
         grain = typed if typed is not None and not typed_bad else room
         left = None if vol is None or strike_vol is None else round(vol - strike_vol, 2)
-        # The least the HLT keeps over its element and coil: the strike water may never take it lower.
+        # The least the HLT keeps over its element and coil: figures that take it lower are warned of (warnings).
         L.least = vessels.least_water(L.hlt, unit, L.vol_unit)
         plant, setup = self._plant()
         plant, hlt_from = vessels.with_hlt(plant, hlt_figure)
@@ -1392,8 +1399,8 @@ class StrikeController:
 
     async def set_water(self, body):
         """The HLT's water (POST /step2/strike/water): BrewStart's Volume, or by hand the brew day's figure. Refused
-        (400 too_little) where it would leave the HLT less than the least that covers its element and coil once the
-        mash water has gone."""
+        (400 too_little) only where it is less than the mash water. Water that would leave the HLT less than the least
+        that covers its element and coil once the mash water has gone is kept, with the warning (hlt_low_warning)."""
         if not isinstance(body, dict) or not _id_list(body.get("steps")):
             raise StrikeRefused(400, "bad_body", detail="Send {\"vol\": number, \"steps\": [...]}.")
         vol = _number(body.get("vol"))
@@ -1404,11 +1411,8 @@ class StrikeController:
         if not look.ids:
             raise StrikeRefused(409, "off", why="no_recipe", strike=self.get_state(look))
         strike = (look.recipe or {}).get("strike_vol")
-        least = look.least["value"]
-        if strike is not None and vol - strike < least - 1e-9:
-            # The HLT keeps the mash water and, after it has gone, the least that covers its element and coil.
-            raise StrikeRefused(400, "too_little", min=round(strike + least, 2), mash=strike,
-                                left=round(vol - strike, 2), least=least, least_from=look.least["from"])
+        if strike is not None and vol < strike - 1e-9:
+            raise StrikeRefused(400, "too_little", min=strike)
         to = round(vol, 2)
         before = look.inputs["vol"]
         if look.bs is not None:
@@ -1422,8 +1426,9 @@ class StrikeController:
         campden = self._campden(look.bs, look.unit) if look.bs is not None else None
         logger.info("HLT water set to %.1f %s%s", to, look.vol_unit,
                     "" if before is None else ", was %.1f %s" % (before, look.vol_unit))
+        after = self.update()
         return dict(applied=dict(what="water", to=to, **{"from": before}, by=by, campden=campden),
-                    strike=self.get_state(self.update()))
+                    warning=self.hlt_low_warning(after), strike=self.get_state(after))
 
     async def set_grain(self, body):
         """The grain's temperature (POST /step2/strike/grain): BrewStart's Grain_Temp, or by hand the brew day's
@@ -1484,15 +1489,16 @@ class StrikeController:
                     strike=self.get_state(self.update()))
 
     @staticmethod
-    def refuse_mash_water(look, strike_vol):
-        """Raise 400 too_much where mash water `strike_vol` (in look.vol_unit) would leave the HLT less than the least
-        that covers its element and coil (look.least): {"what": "strike_vol", "hlt", "left", "least", "least_from",
-        "most"}, most being the most mash water the HLT's water allows. Nothing to check while the HLT's water isn't
-        known. `look` is a _look()."""
-        hlt, least = look.inputs["vol"], look.least["value"]
-        if hlt is not None and hlt - strike_vol < least - 1e-9:
-            raise StrikeRefused(400, "too_much", what="strike_vol", hlt=hlt, left=round(hlt - strike_vol, 2),
-                                least=least, least_from=look.least["from"], most=round(hlt - least, 2))
+    def hlt_low_warning(look):
+        """The state's warning hlt_low for `look` (a _look()) as the commands that set the HLT water or the mash water
+        answer it, or None: {"what": "hlt_low", "left", "least", "least_from", "unit", "says"}, left being the water
+        the HLT keeps once the mash water has gone (0 where the mash water is more) and says the strike water box's
+        words (hlt_low_words). A warning, never a refusal: the figures are typed, and nothing switches on them."""
+        if "hlt_low" not in look.warnings:
+            return None
+        left, least = max(look.inputs["left"], 0.0), look.least["value"]
+        return dict(what="hlt_low", left=round(left, 2), least=least, least_from=look.least["from"],
+                    unit=look.vol_unit, says=hlt_low_words(left, least, look.vol_unit))
 
     @classmethod
     def _beersmith_kept(cls, numbers):
@@ -1533,7 +1539,7 @@ class StrikeController:
         "back": [the figures' names] puts it back, BeerSmith's again, as does changing it to BeerSmith's own. One given
         or changed can be given again. Each MashInStep still to come that keeps its own copy of a figure given
         (Grain_Kg, Mash_Water) has it cleared, so it reads the recipe's. Mash water that would leave the HLT less than the
-        least that covers its element and coil is refused (refuse_mash_water), unless it is BeerSmith's own."""
+        least that covers its element and coil is kept, with the warning (hlt_low_warning)."""
         keys = set(self.TYPED_FIELDS)
         back = body.get("back", []) if isinstance(body, dict) else None
         if not isinstance(body, dict) or not _id_list(body.get("steps")) or not isinstance(back, list) \
@@ -1596,8 +1602,6 @@ class StrikeController:
         same = {**from_file, **own}
         restored = [key for key, value in given.items() if self.TYPED_FIELDS[key] in same
                     and round(same[self.TYPED_FIELDS[key]] / per[key], places[key]) == round(value, places[key])]
-        if "strike_vol" in given and "strike_vol" not in restored:
-            self.refuse_mash_water(look, given["strike_vol"])
         before = {key: (look.recipe or {}).get(key) for key in list(given) + back}
         kept = own
         for key, value in given.items():
@@ -1643,7 +1647,9 @@ class StrikeController:
         applied.update({key: after.get(key) for key in back + restored})
         if back or restored:
             applied["back"] = back + restored
-        return dict(applied=dict(what="recipe", **applied, **{"from": before}), strike=self.get_state(self.update()))
+        done = self.update()
+        return dict(applied=dict(what="recipe", **applied, **{"from": before}), warning=self.hlt_low_warning(done),
+                    strike=self.get_state(done))
 
     async def suggest(self, file=None):
         """A suggestion for the recipe's grain weight and mash water where it has none of its own, from BeerSmith's
