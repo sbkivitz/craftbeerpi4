@@ -1,19 +1,21 @@
 """BrewStart 1.3.0 as the strike water step.
 
-From BrewStart 1.3.0 a Ready by BrewStart heats the HLT itself, holds the water at its Ready_Temp and asks for it to
-be moved, and only the brewer's Next moves on. With no strike water step on the HLT before the Mash Tun's MashIn -
-Test Recipe v5 - CraftBeerPi's strike water helper takes that BrewStart as the strike water step:
+From BrewStart 1.3.0 a BrewStart on the HLT heats it itself, holds the water at its Ready_Temp and asks for it to
+be moved, and only the brewer's Next moves on: Ready by from 1.3.0, Start at too from 1.3.0.post7, and a blank Timing
+is Ready by. With no strike water step on the HLT before the Mash Tun's MashIn - Test Recipe v5 - CraftBeerPi's strike
+water helper takes that BrewStart as the strike water step, whatever its Timing:
 
 - the state says by "step", step_ids.strike is BrewStart's, and inputs.planned is its Ready_Temp; the phase is "plan"
   while it waits for its time, "heat" once it has begun heating (its mark, _brewstart_heating) and isn't done, and
   "moved" once it is done or the Mash Tun's MashIn has started;
 - USE and BACK TO write its Ready_Temp: through change_target while it runs, which moves the HLT's target once it
   heats and takes down a question already asked; through forget_wait when it was stopped after it asked;
-- an older BrewStart (no change_target), a Start at, or a Ready by on another kettle isn't: the helper works by hand,
-  as before;
+- USE on a Start at or a blank Timing writes its Ready_Temp too, never the HLT's target round it;
+- an older BrewStart (no change_target), or one heating another kettle, isn't: the helper works by hand, as before;
 - a recipe with a strike water step on the HLT keeps that step as the strike water step, as before.
 
-Those taking BrewStart as the strike water step fail on 4.7.7.post60.
+Those taking BrewStart as the strike water step fail on 4.7.7.post60; those taking a Start at or a blank Timing as
+it fail on 4.7.7.post81.
 """
 
 import asyncio
@@ -129,8 +131,9 @@ def apply(strike, do, to):
 
 # ------------------------------------------------------------------ the state
 
-def test_a_ready_by_brewstart_that_heats_the_hlt_is_the_strike_water_step(tmp_path, monkeypatch):
-    found = state(helper(tmp_path, monkeypatch, v5()))
+@pytest.mark.parametrize("timing", ["Ready by", "Start at", ""], ids=["ready-by", "start-at", "blank"])
+def test_a_brewstart_that_heats_the_hlt_is_the_strike_water_step(tmp_path, monkeypatch, timing):
+    found = state(helper(tmp_path, monkeypatch, v5(timing=timing)))
     assert (found["applies"], found["by"], found["phase"]) == (True, "step", "plan")
     assert found["step_ids"] == {"brewstart": "bs", "strike": "bs", "mash_in": "mi"}
     assert found["inputs"]["planned"] == 152.0
@@ -151,10 +154,10 @@ def test_its_phase(tmp_path, monkeypatch, status, heating, mash_in, phase):
 
 @pytest.mark.parametrize("bs", [
     dict(instance=BrewStartPost10),                           # hands over at the heating start
-    dict(timing="Start at"),
     dict(heat_kettle="bk"),
+    dict(timing="Start at", heat_kettle="bk"),
     dict(instance=None),
-], ids=["before-1.3.0", "start-at", "another-kettle", "no-instance"])
+], ids=["before-1.3.0", "another-kettle", "start-at-another-kettle", "no-instance"])
 def test_a_brewstart_that_doesnt_heat_the_hlt_itself_isnt(tmp_path, monkeypatch, bs):
     found = state(helper(tmp_path, monkeypatch, v5(**bs)))
     assert (found["by"], found["step_ids"]["strike"], found["step_ids"]["brewstart"]) == ("hand", None, "bs")
@@ -188,6 +191,25 @@ def test_use_while_it_heats_goes_through_change_target(tmp_path, monkeypatch):
     assert strike.day["used"] == [dict(step="bs", prop="Ready_Temp", value=155.0, unit="F")]
     assert strike.recipe_temps(profile) == {"bs": {"Ready_Temp": 152.0}}
     strike.cbpi.step.save.assert_awaited()
+
+
+@pytest.mark.parametrize("timing", ["Start at", ""], ids=["start-at", "blank"])
+def test_use_on_a_start_at_heating_goes_through_change_target_not_the_hlt(tmp_path, monkeypatch, timing):
+    profile = v5(timing=timing, heating=True)
+    strike = helper(tmp_path, monkeypatch, profile)
+    applied = apply(strike, "use", 155.0)
+    assert (applied["by"], applied["changed"]) == ("step", ["step", "hlt", "brewstart"])
+    assert profile[0].instance.calls == [("change_target", 155.0)] and profile[0].props["Ready_Temp"] == 155.0
+    strike.cbpi.kettle.set_target_temp.assert_not_awaited()
+
+
+def test_a_strike_water_step_on_the_hlt_keeps_a_start_at_brewstart_s_ready_temp_with_it(tmp_path, monkeypatch):
+    strike_water = Step("sw", "Strike water", type="MashInStep", status=StepState.INITIAL,
+                        props=Props({"Kettle": "hlt", "Temp": 163.0}))
+    profile = [brewstart(timing="Start at"), strike_water] + mash_tun()
+    strike = helper(tmp_path, monkeypatch, profile)
+    assert apply(strike, "use", 160.0)["changed"] == ["step", "brewstart"]
+    assert (strike_water.props["Temp"], profile[0].props["Ready_Temp"]) == (160.0, 160.0)
 
 
 def test_use_while_it_waits_for_its_time_changes_only_its_ready_temp(tmp_path, monkeypatch):

@@ -1600,12 +1600,16 @@ class StepController:
         step = self.find_by_status(StepState.STOP) or self.find_by_status(StepState.ERROR)
         if step is not None:
             if step.instance is not None:
-                if self.holds_water_for_brewer(step):
-                    if not by_person:
+                # A stopped or failed step waits for the brewer: only his press skips it.
+                if not by_person:
+                    if self.holds_water_for_brewer(step):
                         self._said_self_next(step)
-                        return
+                    else:
+                        self._refuse_unpressed_next(step, skip=True)
+                    return
+                if self.holds_water_for_brewer(step):
                     self._finished_by_press(step)
-                elif by_person and self._on_mash_tun(step):
+                elif self._on_mash_tun(step):
                     self._confirm_strike_moved("next")
                 step.status = StepState.DONE
                 self._tell("step_done", step)
@@ -1618,10 +1622,57 @@ class StepController:
         elif active is None and self.find_by_status(StepState.INITIAL) is not None:
             # Nothing running and nothing stopped: the profile is waiting before
             # its next step - held for the brewer before a boil, or not begun.
-            # Next means go on, so start it.
+            # Next means go on, so start it - on his press only.
+            if not by_person:
+                self._refuse_unpressed_next(self.find_by_status(StepState.INITIAL), skip=False)
+                return
             await self.start()
         else:
             logging.info("No Step is running")
+
+    #: Said, as a warning titled with the step's name, when something asks the profile to start a step that waits for
+    #: the brewer (not begun, or held before it - the boil's "Ready to boil?") without his press.
+    UNPRESSED_START_TEXT = "Something tried to start {} by itself; it waits for you. Press NEXT when you're ready."
+    #: Said when something asks to skip a stopped or failed step without his press.
+    UNPRESSED_SKIP_TEXT = ("Something tried to skip {} by itself; it waits for you. Press START to carry on, or NEXT "
+                           "to skip it.")
+
+    @staticmethod
+    def _asked_by():
+        """Where the next() being refused came from, for the log: the first caller outside this controller, as
+        "module.function", or "unknown"."""
+        frame = inspect.currentframe()
+        try:
+            here = frame.f_code.co_filename
+            while frame is not None and frame.f_code.co_filename == here:
+                frame = frame.f_back
+            if frame is None:
+                return "unknown"
+            return "%s.%s" % (frame.f_globals.get("__name__", "?"), frame.f_code.co_name)
+        finally:
+            del frame
+
+    def _refuse_unpressed_next(self, step, skip):
+        """next() not from a person's press while the profile waits for the brewer at `step`: before it (not begun,
+        or held before it) or at it, stopped or failed. Nothing starts or is skipped. A WARNING, and a warning kept
+        for every page while that wait lasts, said once a wait; asked again meanwhile, logged quietly."""
+        status = step.status
+        prompts = self.__dict__.get("_kept_prompts") or {}
+        if any(kind == "unpressed-next" and step_id == step.id for kind, step_id, _ in prompts.values()):
+            logging.debug("Asked again to move on to '%s' without the brewer's press: refused", step.name)
+            return
+        logging.warning("'%s' waits for the brewer, %s: %s asked to %s it without his press, so nothing %s",
+                        step.name, "stopped" if status == StepState.STOP else "failed" if status == StepState.ERROR
+                        else "not started", self._asked_by(), "skip" if skip else "start",
+                        "is skipped" if skip else "starts")
+        text = self.UNPRESSED_SKIP_TEXT if skip else self.UNPRESSED_START_TEXT
+        try:
+            self._ask_kept("unpressed-next", step,
+                           lambda s: s.status == status and self.find_by_status(StepState.ACTIVE) is None,
+                           step.name or "Brew Steps", text.format(step.name or "the next step"),
+                           NotificationType.WARNING, action=[NotificationAction("OK")])
+        except Exception as e:  # noqa: BLE001
+            logging.warning("Could not tell the brewer that something tried to move on to '%s': %s", step.name, e)
 
     async def resume(self):
         # Delegating to start() rather than calling start_step() directly keeps one

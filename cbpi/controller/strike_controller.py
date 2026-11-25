@@ -587,13 +587,14 @@ class StrikeController:
 
     @staticmethod
     def _heats_the_hlt(bs, hlt):
-        """Whether BrewStart `bs` heats the HLT itself, holds the water and asks for it to be moved - a Ready by
-        BrewStart on the HLT from 1.3.0, which has change_target for USE and BACK TO. With no strike water step on
-        the HLT before the Mash Tun's MashIn, it is the strike water step then, its Ready_Temp the strike water's
-        temperature."""
+        """Whether BrewStart `bs` heats the HLT itself, holds the water and asks for it to be moved - a BrewStart on
+        the HLT from 1.3.0, which has change_target for USE and BACK TO, whatever its Timing: Start at and Ready by
+        both heat the water to Ready_Temp and hold it (1.3.0.post7), and a blank Timing is Ready by. With no strike
+        water step on the HLT before the Mash Tun's MashIn, it is the strike water step then, its Ready_Temp the
+        strike water's temperature."""
         if bs is None or hlt is None:
             return False
-        if str(_prop(bs, "Timing") or "") != "Ready by" or _prop(bs, "Heat_Kettle") != hlt.id:
+        if _prop(bs, "Heat_Kettle") != hlt.id:
             return False
         return callable(getattr(getattr(bs, "instance", None), "change_target", None))
 
@@ -1357,7 +1358,7 @@ class StrikeController:
                     changed.append("question")
             elif self._forget_wait(si):
                 changed.append("question")
-            if bs is not None and bs.status != StepState.DONE and str(_prop(bs, "Timing") or "") == "Ready by":
+            if bs is not None and bs.status != StepState.DONE:
                 if bs is not si:
                     bs.props["Ready_Temp"] = to
                     wrote.append((bs.id, "Ready_Temp"))

@@ -1891,8 +1891,9 @@ class BoilStep(CBPiStep):
 
         self.lid_temp = condenser.lid_temp(self.get_config_value("TEMP_UNIT", "C"))
         lid_on = self.props.get("LidAlert", "No") == "Yes"
-        # The lid actor follows the setting; the alert is given once a brew.
+        # The lid actor follows the setting, switched on once a run; the alert is given once a brew.
         self.lid_actor_flag = lid_on
+        self.lid_actor_switched = False
         self.lid_flag = lid_on and not self.props.get(self.LID_ALERT_DONE_PROP, False)
         self.lid_actor = self.get_config_value("steps_boil_actor", None)
         # What the lid alert says. A rig with a steam condenser keeps the lid on
@@ -2177,8 +2178,12 @@ class BoilStep(CBPiStep):
                 await self.record(self.LID_ALERT_DONE_PROP, True)
 
             if self.lid_actor is not None and sensor_value >= self.lid_temp and self.lid_actor_flag:
-                if self.get_actor_state(self.lid_actor) is False:
-                    await self.actor_on(self.lid_actor)
+                # Switched on once a run, as the wort first reaches the lid's temperature, and then left to the
+                # brewer: switched off by hand, it stays off, whatever the wort does after.
+                if not getattr(self, "lid_actor_switched", False):
+                    self.lid_actor_switched = True
+                    if self.get_actor_state(self.lid_actor) is False:
+                        await self.actor_on(self.lid_actor)
                 # A condenser's mister on as the boil asks, this brew: switched off once the wort has cooled after
                 # the boil, not as the boil ends (cbpi.extension.condenser).
                 if (self._condenser_fitted() and not self.props.get(condenser.ACTOR_ON_PROP, False)
