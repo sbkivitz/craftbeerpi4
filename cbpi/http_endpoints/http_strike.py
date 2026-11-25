@@ -152,7 +152,7 @@ class StrikeHttpEndpoints:
     async def http_strike_recipe(self, request):
         """
         ---
-        description: The recipe's figures given on Brew Day where BeerSmith's are missing - the grain weight in the state's mass_unit, and the strike water to the mash tun in its vol_unit, either or both. Kept with the loaded recipe, in its mash_numbers, named in its typed and taken out of its lacks, so they're never taken for BeerSmith's. A figure BeerSmith gave is refused.
+        description: The recipe's figures, given on Brew Day where BeerSmith's are missing or changed in the recipe editor - the grain weight in the state's mass_unit, and the strike water to the mash tun (the mash water) in its vol_unit, either or both. Kept with the loaded recipe, in its mash_numbers, named in its typed and taken out of its lacks, so they're never taken for BeerSmith's. A figure BeerSmith gave is refused, unless edit is true - then BeerSmith's own is kept for back, which puts it back; a figure given the same as BeerSmith's own is BeerSmith's again. A MashInStep still to come has its own copy of a figure given cleared, so it reads the recipe's.
         tags:
         - Step
         parameters:
@@ -166,20 +166,46 @@ class StrikeHttpEndpoints:
                 type: number
               strike_vol:
                 type: number
+              edit:
+                type: boolean
+              back:
+                type: array
+                items:
+                  type: string
               steps:
                 type: array
                 items:
                   type: string
         responses:
             "200":
-                description: what was applied, and the state
+                description: what was applied (with back, the figures put back to BeerSmith's own), and the state
             "400":
                 description: bad_body, out_of_range (with what, low and high), or too_much - mash water that would leave the HLT less than the least that covers its element and coil (with what, hlt, left, least, least_from and most, the most mash water the HLT's water allows)
             "409":
-                description: recipe_changed, off with nothing loaded, or beersmith - the recipe has BeerSmith's own figure for it
+                description: recipe_changed, off with nothing loaded, beersmith - the recipe has BeerSmith's own figure for it - or no_beersmith - there's no BeerSmith figure to go back to
         """
         body = await self._strike_body(request)
         return await self._strike_do(self.cbpi.strike.set_recipe, body)
+
+    @request_mapping(path="/strike/suggest", method="GET", auth_required=False)
+    async def http_strike_suggest(self, request):
+        """
+        ---
+        description: A suggestion for the recipe's grain weight and mash water where it has none of its own, from BeerSmith's data - the recipe's kept BeerSmith file, else another Recipe Book recipe of the same name with a grain bill within 2%, else (the mash water) the kept file's water-to-grain ratio times the grain weight. Nothing is saved. Without file, the loaded recipe; with file, that Recipe Book recipe.
+        tags:
+        - Step
+        parameters:
+        - name: file
+          in: query
+          required: false
+          type: string
+        responses:
+            "200":
+                description: mass_unit, vol_unit, and grain and strike_vol, each null or {value, from (file, book or ratio), says}
+            "404":
+                description: not_found - no such Recipe Book recipe
+        """
+        return await self._strike_do(self.cbpi.strike.suggest, request.query.get("file"))
 
     @request_mapping(path="/strike/room", method="POST", auth_required=False)
     async def http_strike_room(self, request):

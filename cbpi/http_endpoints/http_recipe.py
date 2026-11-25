@@ -99,7 +99,7 @@ class RecipeHttpEndpoints:
         data = await request.json()
         name = request.match_info["name"]
         await self.controller.save(name, data)
-        logging.error(data)
+        logging.debug("Recipe book: %s saved from the recipe editor", name)
         return web.Response(status=204)
 
     @request_mapping(path="/{name}", method="DELETE", auth_required=False)

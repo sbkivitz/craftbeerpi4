@@ -41,12 +41,15 @@ import threading
 import time
 import types
 
+import yaml
+
 from cbpi.api import clock, readings
 from cbpi.api.persist import atomic_write_json
 from cbpi.api.step import StepState
 from cbpi.controller.step_controller import StepController
 from cbpi.extension.hltpump import kettle_roles
 from cbpi.strike import landings, model, vessels
+from cbpi.strike import suggest as suggestion
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +298,11 @@ class StrikeController:
     #: mash_numbers field it is kept in, and its name in lacks and typed.
     TYPED_FIELDS = {"grain": "grain_kg", "strike_vol": "infuse_l"}
     TYPED_NAMES = {"grain": "grain", "strike_vol": "water"}
+    #: Where mash_numbers keeps BeerSmith's own figure for each one the recipe editor changed ({grain_kg, infuse_l}),
+    #: for the way back to it. A figure changed from BeerSmith's is named in typed too, as it isn't BeerSmith's.
+    BEERSMITH_KEPT = "beersmith"
+    #: MashInStep's own copy of each figure, which the recipe's takes the place of.
+    STEP_COPIES = {"grain": "Grain_Kg", "strike_vol": "Mash_Water"}
     #: What those may be, in the state's mass_unit and vol_unit: a grain bill and a strike water no brew of this rig
     #: comes near either end of.
     TYPED_RANGE = {"grain": {"lb": (0.5, 200.0), "kg": (0.2, 90.0)},
@@ -712,6 +720,13 @@ class StrikeController:
             dead = round(max(0.0, strike_vol - for_grain), 2)
         infuse_c = _number(numbers.get("infuse_temp_c"))
         lacks = [x for x in numbers.get("lacks", []) if isinstance(x, str)] if numbers else list(self.ALL_LACKS)
+        # BeerSmith's own figure for each one changed from it in the recipe editor, in the state's units.
+        kept = self._beersmith_kept(numbers)
+        changed = {}
+        if "grain" in typed_figures and kept.get("grain_kg") is not None:
+            changed["grain"] = mass(kept["grain_kg"])
+        if "water" in typed_figures and kept.get("infuse_l") is not None:
+            changed["strike_vol"] = vol_of_l(kept["infuse_l"])
         L.recipe = None if not profile else dict(
             name=L.name, steps=list(L.ids), grain=mass(grain_kg), strike_vol=strike_vol, for_grain=for_grain,
             dead=dead, tun=mass(tun_kg if tun_kg and tun_kg > 0 else None),
@@ -719,7 +734,7 @@ class StrikeController:
             beersmith=None if infuse_c is None else dict(
                 strike=temp_of_c(infuse_c), grain=temp_of_c(_number(numbers.get("grain_temp_c"))),
                 tun=temp_of_c(_number(numbers.get("tun_temp_c")))),
-            lacks=lacks, typed=typed_figures, grain_from=grain_from)
+            lacks=lacks, typed=typed_figures, grain_from=grain_from, changed=changed)
         # The tun's steel as the model counts it: the Mash Tun's own figures from the Hardware page when it has
         # them, else the recipe's (BeerSmith's TUN_WEIGHT and TUN_SPECIFIC_HEAT), else none.
         beersmith_tun = (tun_kg, tun_heat) if tun_kg and tun_kg > 0 and tun_heat else None
@@ -1478,16 +1493,56 @@ class StrikeController:
             raise StrikeRefused(400, "too_much", what="strike_vol", hlt=hlt, left=round(hlt - strike_vol, 2),
                                 least=least, least_from=look.least["from"], most=round(hlt - least, 2))
 
+    @classmethod
+    def _beersmith_kept(cls, numbers):
+        """BeerSmith's own figure for each the recipe editor changed, as mash_numbers keeps it: {grain_kg, infuse_l},
+        each a number more than 0, or none."""
+        kept = numbers.get(cls.BEERSMITH_KEPT) if isinstance(numbers, dict) else None
+        if not isinstance(kept, dict):
+            return {}
+        out = {}
+        for field in cls.TYPED_FIELDS.values():
+            value = _number(kept.get(field))
+            if value is not None and value > 0:
+                out[field] = value
+        return out
+
+    def _clear_step_copies(self, profile, keys):
+        """Clear the copy of each figure in `keys` that a MashInStep still to come keeps itself (Grain_Kg,
+        Mash_Water), so it reads the recipe's: one figure, never a second that disagrees. A step that has begun keeps
+        what it began with. -> how many were cleared."""
+        cleared = 0
+        for s in profile:
+            if s.type != "MashInStep" or s.status != StepState.INITIAL:
+                continue
+            for key in keys:
+                prop = self.STEP_COPIES[key]
+                if not _blank(_prop(s, prop)):
+                    s.props[prop] = ""
+                    cleared += 1
+        return cleared
+
     async def set_recipe(self, body):
-        """The recipe's figures given on Brew Day where BeerSmith's are missing (POST /step2/strike/recipe): the grain
-        weight in the state's mass_unit, the strike water to the mash tun in its vol_unit, either or both. Kept with the
-        loaded recipe, in its basic data's mash_numbers (grain_kg, infuse_l), taken out of its lacks and named in its
-        typed, so they're never taken for BeerSmith's; USE is worked out from them at once. A figure BeerSmith gave is
-        refused (409 beersmith): the recipe's own stays. One given here can be given again. Mash water that would leave
-        the HLT less than the least that covers its element and coil is refused (refuse_mash_water)."""
-        if not isinstance(body, dict) or not _id_list(body.get("steps")) or not set(self.TYPED_FIELDS) & set(body):
+        """The recipe's figures, the grain weight in the state's mass_unit and the strike water to the mash tun (the
+        mash water) in its vol_unit, either or both (POST /step2/strike/recipe): given on Brew Day where BeerSmith's are
+        missing, or changed in the recipe editor. Kept with the loaded recipe, in its basic data's mash_numbers
+        (grain_kg, infuse_l), taken out of its lacks and named in its typed, so they're never taken for BeerSmith's; USE
+        is worked out from them at once. A figure BeerSmith gave is refused (409 beersmith), so its own stays, unless
+        the recipe editor sends it with "edit": true: BeerSmith's own is then kept in mash_numbers' beersmith, and
+        "back": [the figures' names] puts it back, BeerSmith's again, as does changing it to BeerSmith's own. One given
+        or changed can be given again. Each MashInStep still to come that keeps its own copy of a figure given
+        (Grain_Kg, Mash_Water) has it cleared, so it reads the recipe's. Mash water that would leave the HLT less than the
+        least that covers its element and coil is refused (refuse_mash_water), unless it is BeerSmith's own."""
+        keys = set(self.TYPED_FIELDS)
+        back = body.get("back", []) if isinstance(body, dict) else None
+        if not isinstance(body, dict) or not _id_list(body.get("steps")) or not isinstance(back, list) \
+                or not all(k in keys for k in back) or not (keys & set(body) or back) or keys & set(body) & set(back):
             raise StrikeRefused(400, "bad_body", detail="Send {\"grain\": number, \"strike_vol\": number, "
-                                                        "\"steps\": [...]}, with either or both figures.")
+                                                        "\"steps\": [...]}, with either or both figures; \"edit\": "
+                                                        "true to change BeerSmith's; \"back\": [\"grain\", "
+                                                        "\"strike_vol\"] for BeerSmith's own.")
+        edit = body.get("edit") is True
+        back = list(dict.fromkeys(back))
         given = {}
         for key in self.TYPED_FIELDS:
             if key in body:
@@ -1510,28 +1565,119 @@ class StrikeController:
             else {"lacks": list(self.ALL_LACKS)}
         typed = [t for t in numbers.get("typed", []) if t in self.TYPED_NAMES.values()] \
             if isinstance(numbers.get("typed"), list) else []
+        kept = self._beersmith_kept(numbers)
         for key in given:
             figure = _number(numbers.get(self.TYPED_FIELDS[key]))
-            if figure is not None and figure > 0 and self.TYPED_NAMES[key] not in typed:
+            if figure is not None and figure > 0 and self.TYPED_NAMES[key] not in typed and not edit:
                 raise StrikeRefused(409, "beersmith", what=key, strike=self.get_state(look))
-        if "strike_vol" in given:
+        for key in back:
+            field, name = self.TYPED_FIELDS[key], self.TYPED_NAMES[key]
+            figure = _number(numbers.get(field))
+            if field not in kept and (name in typed or figure is None or figure <= 0):
+                raise StrikeRefused(409, "no_beersmith", what=key, strike=self.get_state(look))
+        per = {"grain": model.LB if units["grain"] == "lb" else 1.0,
+               "strike_vol": model.L_PER_GAL if units["strike_vol"] == "gal" else 1.0}
+        # BeerSmith's own figure for each given, where the recipe has it: a figure given the same as it, to the places
+        # the state shows it, is BeerSmith's again.
+        places = {"grain": 1, "strike_vol": 2}
+        own = dict(kept)
+        for key in given:
+            field, name = self.TYPED_FIELDS[key], self.TYPED_NAMES[key]
+            figure = _number(numbers.get(field))
+            if name not in typed and figure is not None and figure > 0:
+                own[field] = figure
+        # Where the recipe has no BeerSmith figure, its kept BeerSmith file's own: a figure given the same as it (a
+        # suggestion taken) is BeerSmith's.
+        missing = [key for key in given if self.TYPED_FIELDS[key] not in own]
+        in_file = suggestion.read_file(self.cbpi, basic) if missing else None
+        from_file = {self.TYPED_FIELDS[key]: _number(in_file.get(self.TYPED_FIELDS[key])) for key in missing
+                     if in_file and (_number(in_file.get(self.TYPED_FIELDS[key])) or 0) > 0}
+        same = {**from_file, **own}
+        restored = [key for key, value in given.items() if self.TYPED_FIELDS[key] in same
+                    and round(same[self.TYPED_FIELDS[key]] / per[key], places[key]) == round(value, places[key])]
+        if "strike_vol" in given and "strike_vol" not in restored:
             self.refuse_mash_water(look, given["strike_vol"])
-        before = {key: (look.recipe or {}).get(key) for key in given}
+        before = {key: (look.recipe or {}).get(key) for key in list(given) + back}
+        kept = own
         for key, value in given.items():
-            per = (model.LB if units[key] == "lb" else 1.0) if key == "grain" \
-                else (model.L_PER_GAL if units[key] == "gal" else 1.0)
-            numbers[self.TYPED_FIELDS[key]] = round(value * per, 3)
-            typed.append(self.TYPED_NAMES[key])
+            field, name = self.TYPED_FIELDS[key], self.TYPED_NAMES[key]
+            if key in restored:
+                continue
+            numbers[field] = round(value * per[key], 3)
+            typed.append(name)
+        for key in back + restored:
+            field, name = self.TYPED_FIELDS[key], self.TYPED_NAMES[key]
+            if field in kept:
+                numbers[field] = kept.pop(field)
+            elif field in from_file:
+                numbers[field] = round(from_file[field], 6)
+                numbers["lacks"] = [x for x in numbers.get("lacks", []) if x != name]
+            typed = [t for t in typed if t != name]
+        if kept:
+            numbers[self.BEERSMITH_KEPT] = kept
+        else:
+            numbers.pop(self.BEERSMITH_KEPT, None)
         numbers["typed"] = sorted(set(typed))
         numbers["lacks"] = [x for x in numbers.get("lacks", []) if x not in numbers["typed"]]
         basic["mash_numbers"] = numbers
+        self._clear_step_copies(stepper.profile, list(given) + back)
         await stepper.save()
-        for key, value in given.items():
-            logger.info("%s set to %s %s for the strike water forecast, given on Brew Day%s",
-                        "Grain weight" if key == "grain" else "Mash water", round(value, 2), units[key],
-                        "" if before[key] is None else ", was %s %s" % (before[key], units[key]))
-        return dict(applied=dict(what="recipe", **{key: round(value, 2) for key, value in given.items()},
-                                 **{"from": before}), strike=self.get_state(self.update()))
+        # Every screen hears the recipe's basic data with the steps, so the recipe pages have the figures at once.
+        push = getattr(stepper, "push_udpate", None)
+        if callable(push):
+            push(complete=True)
+        after = self.update().recipe or {}
+        for key in list(given) + back:
+            what = "Grain weight" if key == "grain" else "Mash water"
+            was = "" if before[key] is None else ", was %s %s" % (before[key], units[key])
+            if key in back or key in restored:
+                logger.info("%s back to BeerSmith's %s %s for the strike water forecast%s", what, after.get(key),
+                            units[key], was)
+            else:
+                logger.info("%s set to %s %s for the strike water forecast, %s%s", what, round(given[key], 2),
+                            units[key], "changed from BeerSmith's in the recipe editor"
+                            if key in after.get("changed", {}) else "given on Brew Day" if not edit
+                            else "given in the recipe editor", was)
+        applied = {key: round(value, 2) for key, value in given.items() if key not in restored}
+        applied.update({key: after.get(key) for key in back + restored})
+        if back or restored:
+            applied["back"] = back + restored
+        return dict(applied=dict(what="recipe", **applied, **{"from": before}), strike=self.get_state(self.update()))
+
+    async def suggest(self, file=None):
+        """A suggestion for the recipe's grain weight and mash water where it has none of its own, from BeerSmith's
+        data (cbpi.strike.suggest), for a box that asks for either to open with (GET /step2/strike/suggest): the loaded
+        recipe's, or with `file` the Recipe Book recipe's. Nothing is saved. Raises 404 not_found for a book file that
+        isn't there."""
+        unit = readings.temp_unit(self.cbpi)
+        mass_unit = "lb" if unit == "F" else "kg"
+        if file is None:
+            look = self.update()
+            basic = getattr(self.cbpi.step, "basic_data", None)
+            basic = basic if isinstance(basic, dict) and look.ids else {}
+            step_kg = self._step_grain(look.mi, list(getattr(self.cbpi.step, "profile", None) or [])) \
+                if look.ids else None
+            vol_unit, this_file = look.vol_unit, basic.get("book_file")
+        else:
+            from cbpi.controller.recipe_controller import RecipeController
+            path = self.cbpi.config_folder.get_recipe_file_by_id(file) \
+                if isinstance(file, str) and RecipeController.SOURCE_ID.fullmatch(file) else None
+            if path is None or not os.path.isfile(path):
+                raise StrikeRefused(404, "not_found", file=file)
+            try:
+                with open(path) as f:
+                    entry = yaml.load(f, Loader=yaml.FullLoader) or {}
+            except Exception:  # noqa: BLE001 - as one not there: the box opens empty
+                raise StrikeRefused(404, "not_found", file=file)
+            basic = entry.get("basic") if isinstance(entry.get("basic"), dict) else {}
+            steps = [s for s in entry.get("steps") or [] if isinstance(s, dict)]
+            bs = next((types.SimpleNamespace(props=s.get("props") or {}) for s in steps if s.get("type") == "BrewStart"),
+                      None)
+            vol_unit, this_file = self._vol_unit(bs, unit), file
+            step_kg = next((kg for kg in (_number((s.get("props") or {}).get("Grain_Kg")) for s in steps
+                                          if s.get("type") == "MashInStep") if kg is not None and kg > 0), None)
+        found = suggestion.suggest(self.cbpi, basic, step_kg, mass_unit, vol_unit, this_file=this_file)
+        return dict(mass_unit=mass_unit, vol_unit=vol_unit, **found)
 
     async def set_room(self, body):
         """The room's temperature given on Brew Day (POST /step2/strike/room), in the brewery's unit, for this brew:

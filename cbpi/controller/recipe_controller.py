@@ -78,34 +78,50 @@ class RecipeController:
         goes: a later import of the same name then adds a copy rather than
         overwrite the brewer's edits. See keep_import.
 
+        The basic data is merged, never replaced: every key of the book's own
+        that `data` doesn't send (its mash figures, mash_numbers, among them)
+        stays as the book has it, and one sent replaces it, so an editor that
+        sends only the name, author and notes loses nothing, and one that sends
+        changed mash figures has them kept.
+
         The BeerXML file a recipe was imported with (SOURCE_KEYS) is the book's
         to say, never the page's: a recipe saved in place keeps the one it has,
         whatever `data` holds, and a new one (a clone) has none."""
-        basic = data.get("basic") if isinstance(data, dict) else None
-        if isinstance(basic, dict):
+        if isinstance(data, dict):
+            book = self._book_basic(name)
+            if not isinstance(data.get("basic"), dict):
+                data["basic"] = {}
+            basic = data["basic"]
+            for key, value in book.items():
+                if key not in basic:
+                    basic[key] = value
             basic.pop(self.IMPORTED_FROM, None)
             for key in self.SOURCE_KEYS:
                 basic.pop(key, None)
-            basic.update(self.source_fields(name))
+            basic.update({key: book[key] for key in self.SOURCE_KEYS if key in book})
         path = self.cbpi.config_folder.get_recipe_file_by_id(name)
-        logging.info(data)
+        logging.debug("Recipe book: %s saved", name)
         with open(path, "w") as file:
             yaml.dump(data, file, indent=4, sort_keys=True)
 
-    def source_fields(self, file_id):
-        """{source_xml, source_xml_recipe} as the book recipe `file_id` has them now, or {} when it has none, isn't
-        in the book, or can't be read."""
+    def _book_basic(self, file_id):
+        """The basic data of book recipe `file_id` as its file has it now, or {} when it isn't in the book or can't be
+        read."""
         path = self.cbpi.config_folder.get_recipe_file_by_id(file_id)
         if not os.path.isfile(path):
             return {}
         try:
             with open(path) as file:
                 basic = (yaml.load(file, Loader=yaml.FullLoader) or {}).get("basic") or {}
-        except Exception as e:  # noqa: BLE001 - the recipe is then saved without them
-            logging.warning("Recipe book: could not read %s to keep its BeerXML file: %s", file_id, e)
+        except Exception as e:  # noqa: BLE001 - the recipe is then saved as sent
+            logging.warning("Recipe book: could not read %s to keep what the save doesn't send: %s", file_id, e)
             return {}
-        if not isinstance(basic, dict):
-            return {}
+        return basic if isinstance(basic, dict) else {}
+
+    def source_fields(self, file_id):
+        """{source_xml, source_xml_recipe} as the book recipe `file_id` has them now, or {} when it has none, isn't
+        in the book, or can't be read."""
+        basic = self._book_basic(file_id)
         return {key: basic[key] for key in self.SOURCE_KEYS if key in basic}
 
     def _source_path(self, file_id):

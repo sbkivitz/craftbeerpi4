@@ -135,7 +135,7 @@ class NotificationStep(CBPiStep):
         Property.Number(
             label="Grain_Kg",
             configurable=True,
-            description="Grain bill in kg. With a grain temperature and mash water volume, the step heats past Temp so the mash lands on it after doughing in. Leave blank to heat to Temp as before.",
+            description="Grain bill in kg, used only where the recipe has no grain weight of its own (BeerSmith's, or given on Brew Day or in the recipe editor), which is used where it has one. With a grain temperature and mash water volume, the step heats past Temp so the mash lands on it after doughing in. Leave blank to heat to Temp as before.",
         ),
         Property.Sensor(
             label="Grain_Sensor",
@@ -144,7 +144,7 @@ class NotificationStep(CBPiStep):
         Property.Number(
             label="Mash_Water",
             configurable=True,
-            description="Mash water in litres. Required for strike calculation.",
+            description="Mash water in litres, the strike water to the mash tun, used only where the recipe has no mash water of its own, which is used where it has one. Required for strike calculation.",
         ),
         Property.Select(
             label="Stop_Pump_At_Strike",
@@ -413,6 +413,28 @@ class MashInStep(CBPiStep):
         except Exception as e:  # noqa: BLE001
             logging.warning("Could not set %s: %s", name, e)
 
+    def _grain_and_water(self):
+        """(kg of grain, litres of mash water) the strike is worked out from: the recipe's own figures, its
+        mash_numbers' grain_kg and infuse_l (BeerSmith's, or given on Brew Day or in the recipe editor), each where the
+        recipe has it, so the step never works from a second copy that could disagree with it; its own Grain_Kg and
+        Mash_Water only where the recipe has none (one built on Brew Steps, or imported without them). Raises
+        ValueError for a figure of its own that isn't a number."""
+        stepper = getattr(self.cbpi, "step", None)
+        basic = getattr(stepper, "basic_data", None)
+        numbers = basic.get("mash_numbers") if isinstance(basic, dict) else None
+        numbers = numbers if isinstance(numbers, dict) else {}
+
+        def figure(field, prop):
+            try:
+                value = float(numbers.get(field))
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and value > 0:
+                return value
+            return float(self.props.get(prop, 0) or 0)
+
+        return figure("grain_kg", "Grain_Kg"), figure("infuse_l", "Mash_Water")
+
     def _strike_target(self, rest_temp):
         """Water temperature to heat to, so the mash lands on rest_temp.
 
@@ -429,8 +451,7 @@ class MashInStep(CBPiStep):
         it does answer.
         """
         try:
-            grain_kg = float(self.props.get("Grain_Kg", 0) or 0)
-            water_l = float(self.props.get("Mash_Water", 0) or 0)
+            grain_kg, water_l = self._grain_and_water()
         except (TypeError, ValueError):
             return rest_temp
         if grain_kg <= 0 or water_l <= 0:
