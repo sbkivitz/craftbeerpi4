@@ -1,8 +1,8 @@
 """A simulator's change of speed sets CraftBeerPi's clock back to the computer's time (cbpi.api.clock.reset,
 CraftBeerPi.brewing_clock), and whatever keeps a time on the clock moves with it, so the brew carries on with as long
 to go: a step's timer, the brew steps' kept times, the brew-day timers, the alarms' watches; BrewStart plans again;
-a kettle logic that can't move its own times starts again; the logs written ahead are archived; every screen is
-told, and a notification says it."""
+a kettle logic that can't move its own times starts again; each sensor log gets a row saying the clock moved, after
+every row it had, so the graphs keep the readings so far; every screen is told, and a notification says it."""
 
 import asyncio
 import logging
@@ -367,91 +367,105 @@ def logs(tmp_path):
     return LogController(cbpi)
 
 
-def test_the_logs_written_ahead_are_archived_and_new_rows_start_a_new_file(tmp_path):
+def open_log(log, tmp_path, name):
+    """`name`'s sensor log open as SensorLogTarget_CSV opens it: a batching handler on sensor_<name>.log, holding
+    readings in memory for up to a minute."""
     from cbpi.extension.SensorLogTarget_CSV import BatchingRotatingFileHandler
+    data_logger = logging.getLogger("cbpi.sensor.test-" + name)
+    data_logger.propagate = False
+    data_logger.setLevel(logging.DEBUG)
+    handler = BatchingRotatingFileHandler(str(tmp_path / ("sensor_%s.log" % name)), maxBytes=500000, backupCount=5,
+                                          flush_seconds=60)
+    handler.clock_log = log
+    data_logger.addHandler(handler)
+    log.datalogger[name] = data_logger
+    return data_logger, handler
+
+
+def close_log(data_logger, handler):
+    data_logger.removeHandler(handler)
+    handler.close()
+
+
+def lines(path):
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def moved_by(line):
+    from cbpi.api import logclock
+    return logclock.moved_by(line.split(",", 1)[1])
+
+
+def test_each_log_gets_a_row_saying_the_clock_moved_and_keeps_every_row(tmp_path):
     now = 1_795_400_000.0
     write_rows(tmp_path / "sensor_ahead.log", now + DAY, 10)
     write_rows(tmp_path / "sensor_ahead.log.1", now + DAY - 100, 10)
-    write_rows(tmp_path / "sensor_behind.log", now - 100, 10)
+    newest, older = lines(tmp_path / "sensor_ahead.log"), lines(tmp_path / "sensor_ahead.log.1")
     log = logs(tmp_path)
-    data_logger = logging.getLogger("cbpi.sensor.test-ahead")
-    data_logger.propagate = False
-    data_logger.setLevel(logging.DEBUG)
-    handler = BatchingRotatingFileHandler(str(tmp_path / "sensor_ahead.log"), maxBytes=500000, backupCount=5,
-                                          flush_seconds=60)
-    data_logger.addHandler(handler)
-    held = now + 2 * DAY  # buffered, not on disk yet
-    data_logger.info("%s,170.0" % datetime.fromtimestamp(held).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])
-    log.datalogger["ahead"] = data_logger
-    log._last_change = {"ahead": 1, "behind": 2}
-
-    async def archive():
-        archived = log.archive_logs_ahead(now)
-        await log.archive_zipping
-        return archived
-
-    archived = asyncio.run(archive())
-
-    assert archived["sensors"] == ["ahead"]
-    folder = archived["folder"]
-    assert sorted(os.listdir(folder)) == ["sensor_ahead.log", "sensor_ahead.log.1"]
-    assert "170.0" in (open(os.path.join(folder, "sensor_ahead.log"), encoding="utf-8").read())
-    assert not (tmp_path / "sensor_ahead.log").exists()
-    assert (tmp_path / "sensor_behind.log").exists()
-    assert "ahead" not in log.datalogger and data_logger.handlers == []
-    assert log._last_change == {"behind": 2}
-    assert len(archived["zips"]) == 1 and (tmp_path / archived["zips"][0]).exists()
-    assert archived["latest"] == pytest.approx(held, abs=0.01)
-    # A reading already on its way to the closed file opens nothing again.
-    handler.handle(logging.makeLogRecord(dict(msg="2026-11-24 23:15:01.000,171.0", levelno=logging.INFO)))
-    handler.flush()
-    assert not (tmp_path / "sensor_ahead.log").exists()
+    data_logger, handler = open_log(log, tmp_path, "ahead")
+    try:
+        assert log.clock_moved(-2 * DAY) == ["ahead"]
+        # Nothing archived, moved or deleted: every row as written, then the move's own row.
+        assert sorted(os.listdir(tmp_path)) == ["sensor_ahead.log", "sensor_ahead.log.1"]
+        assert lines(tmp_path / "sensor_ahead.log.1") == older
+        after = lines(tmp_path / "sensor_ahead.log")
+        assert after[:-1] == newest
+        assert moved_by(after[-1]) == pytest.approx(-2 * DAY)
+        # The log stays open, and a reading taken on the moved clock goes after the move's row.
+        assert log.datalogger["ahead"] is data_logger and data_logger.handlers == [handler]
+        data_logger.info("%s,171.0" % log.stamp(now - DAY + 30))
+        handler.flush()
+        assert lines(tmp_path / "sensor_ahead.log")[-1].endswith(",171.0")
+        # Read back, the readings so far are two days earlier, on the clock as it now is, and the new one carries on.
+        read = log._read_sensor_log("ahead", "v")
+        expected = [now - DAY - 100 + i for i in range(10)] + [now - DAY + i for i in range(10)] + [now - DAY + 30]
+        assert [t.to_pydatetime() for t in read.index] == [datetime.fromtimestamp(s) for s in expected]
+        assert read["v"].iloc[-1] == 171.0
+    finally:
+        close_log(data_logger, handler)
 
 
-def test_no_log_ahead_archives_nothing(tmp_path):
+def test_a_move_under_a_second_marks_no_log(tmp_path):
     now = 1_795_400_000.0
     write_rows(tmp_path / "sensor_behind.log", now - 100, 10)
-    assert logs(tmp_path).archive_logs_ahead(now) is None
-    assert not (tmp_path / "archive").exists()
-
-
-def test_a_log_held_open_for_a_moment_is_still_archived(tmp_path):
-    now = 1_795_400_000.0
-    write_rows(tmp_path / "sensor_ahead.log", now + DAY, 10)
+    before = lines(tmp_path / "sensor_behind.log")
     log = logs(tmp_path)
-    real, refused = os.replace, []
-
-    def held_twice(source, target):
-        if len(refused) < 2:
-            refused.append(source)
-            raise PermissionError(32, "The process cannot access the file because it is being used")
-        real(source, target)
-
-    with mock.patch("cbpi.controller.log_file_controller.os.replace", held_twice), \
-            mock.patch("cbpi.controller.log_file_controller.time.sleep"):
-        archived = log.archive_logs_ahead(now)
-    assert len(refused) == 2 and archived["sensors"] == ["ahead"]
-    assert not (tmp_path / "sensor_ahead.log").exists()
-    assert os.path.exists(os.path.join(archived["folder"], "sensor_ahead.log"))
+    assert log.clock_moved(0.004) == []
+    assert log.clock_moves == []
+    assert lines(tmp_path / "sensor_behind.log") == before
+    assert os.listdir(tmp_path) == ["sensor_behind.log"]
 
 
-def test_rows_still_held_in_memory_count(tmp_path):
-    from cbpi.extension.SensorLogTarget_CSV import BatchingRotatingFileHandler
+def test_a_log_not_open_gets_the_row_at_the_end_of_its_newest_file(tmp_path):
+    now = 1_795_400_000.0
+    write_rows(tmp_path / "sensor_target.log", now - 200, 10)
+    write_rows(tmp_path / "sensor_target.log.1", now - 400, 10)
+    newest, older = lines(tmp_path / "sensor_target.log"), lines(tmp_path / "sensor_target.log.1")
+    log = logs(tmp_path)
+    assert log.clock_moved(-3600.0) == ["target"]
+    after = lines(tmp_path / "sensor_target.log")
+    assert after[:-1] == newest
+    assert moved_by(after[-1]) == pytest.approx(-3600.0)
+    assert lines(tmp_path / "sensor_target.log.1") == older
+
+
+def test_rows_still_held_in_memory_are_written_before_the_move_and_move_with_it(tmp_path):
     now = 1_795_400_000.0
     write_rows(tmp_path / "sensor_held.log", now - 100, 10)
     log = logs(tmp_path)
-    data_logger = logging.getLogger("cbpi.sensor.test-held")
-    data_logger.propagate = False
-    data_logger.setLevel(logging.DEBUG)
-    data_logger.addHandler(BatchingRotatingFileHandler(str(tmp_path / "sensor_held.log"), maxBytes=500000,
-                                                       backupCount=5, flush_seconds=60))
-    stamp = datetime.fromtimestamp(now + DAY).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    data_logger.info("%s,170.0" % stamp)
-    log.datalogger["held"] = data_logger
-    archived = log.archive_logs_ahead(now)
-    assert archived is not None and archived["sensors"] == ["held"]
-    assert not (tmp_path / "sensor_held.log").exists()
-
+    data_logger, handler = open_log(log, tmp_path, "held")
+    try:
+        data_logger.info("%s,170.0" % log.stamp(now))
+        assert lines(tmp_path / "sensor_held.log")[-1].endswith(",159.0"), "the reading is not held in memory"
+        assert log.clock_moved(-DAY) == ["held"]
+        after = lines(tmp_path / "sensor_held.log")
+        assert after[-2].endswith(",170.0")
+        assert moved_by(after[-1]) == pytest.approx(-DAY)
+        read = log._read_sensor_log("held", "v")
+        assert read.index[-1].to_pydatetime() == datetime.fromtimestamp(now - DAY)
+        assert read["v"].iloc[-1] == 170.0
+    finally:
+        close_log(data_logger, handler)
 
 # --- the whole reset --------------------------------------------------------------------------------------------------
 
@@ -462,9 +476,13 @@ def server():
     cbpi.kettle.clock_moved = mock.Mock(return_value=["k1"])
     cbpi.kettle.restart_after_clock_reset = mock.AsyncMock(return_value=["k1"])
     cbpi.kettle.push_udpate = mock.AsyncMock()
-    cbpi.log.archive_logs_ahead = mock.Mock(return_value=None)
+    cbpi.log.clock_moved = mock.Mock(return_value=["a"])
     cbpi.plugin.extensions = []
     return cbpi
+
+
+#: What the notification adds after a real move: the graphs keep what the sensor logs hold.
+GRAPHS_KEPT = " The graphs keep the readings so far, moved with the clock, and carry on from them."
 
 
 def test_the_reset_tells_every_screen_and_says_so(pc):
@@ -485,11 +503,11 @@ def test_the_reset_tells_every_screen_and_says_so(pc):
     cbpi.timers.clock_moved.assert_called_once()
     cbpi.step.replan_after_clock_reset.assert_awaited_once()
     cbpi.kettle.restart_after_clock_reset.assert_awaited_once_with(["k1"])
-    cbpi.log.archive_logs_ahead.assert_called_once()
+    cbpi.log.clock_moved.assert_called_once_with(pytest.approx(-2 * DAY))
     title, message = cbpi.notify.call_args.args[:2]
     assert title == "Clock"
     assert message == ("CraftBeerPi's clock is back to this computer's time, {}, now running 1\u00d7 (was 30\u00d7)."
-                       .format(clock_controller.clock_time(pc.now())))
+                       .format(clock_controller.clock_time(pc.now())) + GRAPHS_KEPT)
 
 
 def test_a_change_of_speed_at_the_computers_time_starts_nothing_again(pc):
@@ -508,14 +526,15 @@ def test_a_speed_the_clock_cannot_run_at_changes_and_says_nothing(pc):
     cbpi.notify.assert_not_called()
 
 
-def test_the_notification_says_the_archive_too(pc):
+def test_the_notification_says_the_graphs_keep_the_readings_only_after_a_real_move(pc):
     ahead_by_two_days(pc)
     cbpi = server()
-    cbpi.log.archive_logs_ahead = mock.Mock(return_value=dict(
-        sensors=["a"], latest=pc.now() + DAY, folder="X:\\logs\\archive\\run-simulation", zips=["z.zip"]))
     asyncio.run(clock_controller.ClockController(cbpi).reset(1))
-    message = cbpi.notify.call_args.args[1]
-    assert "were archived" in message and "z.zip" in message and "run-simulation" in message
+    assert cbpi.notify.call_args.args[1].endswith(GRAPHS_KEPT)
+    quiet = server()
+    asyncio.run(clock_controller.ClockController(quiet).reset(60))
+    message = quiet.notify.call_args.args[1]
+    assert message.endswith("now running 60\u00d7 (was 1\u00d7).") and "graphs" not in message
 
 
 def test_the_time_and_speed_as_the_brewer_reads_them():
