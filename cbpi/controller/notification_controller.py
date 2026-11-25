@@ -230,7 +230,9 @@ class NotificationController:
         :param kind: a word a page can tell the notification by, whatever its
             words say, sent with it as "kind": "condenser_on" for the boil's
             lid reminder where a steam condenser is fitted, "condenser_off" for
-            the reminder to turn its mister off after the boil. None sends none.
+            the reminder to turn its mister off after the boil, "hop-1" to
+            "hop-6" for the boil's hop alert for that addition (Hop_1 to
+            Hop_6). None sends none.
         :return: the notification's id
 
         A listener (add_listener) that takes a log_line keyword is told, for a

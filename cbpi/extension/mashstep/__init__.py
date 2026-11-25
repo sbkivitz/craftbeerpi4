@@ -2025,21 +2025,27 @@ class BoilStep(CBPiStep):
                 # Kept for a page opened later, and through a pause: the boil
                 # does not give it again. Gone once answered, or the boil
                 # is over or reset.
+                #
+                # The words name only the addition: its place in the boil's
+                # list (Hop_1 to Hop_6) means nothing to the brewer. A page
+                # tells the additions apart by the kind, "hop-3".
                 if text is not None and text != "":
                     _kept_for(self, self.cbpi.notify(
                         "Hop Alert",
-                        "Please add %s (%s)" % (text, number),
+                        "Please add %s" % text,
                         NotificationType.WARNING,
                         action=[NotificationAction("Added")],
                         **_keep(self.cbpi),
+                        **_kind(self.cbpi, "hop-%d" % number),
                     ), "hop-%d" % number, while_paused=True)
                 else:
                     _kept_for(self, self.cbpi.notify(
                         "Hop Alert",
-                        "Please add Hop %s" % number,
+                        "Please add the next hop addition",
                         NotificationType.WARNING,
                         action=[NotificationAction("Added")],
                         **_keep(self.cbpi),
+                        **_kind(self.cbpi, "hop-%d" % number),
                     ), "hop-%d" % number, while_paused=True)
 
     async def on_stop(self):
