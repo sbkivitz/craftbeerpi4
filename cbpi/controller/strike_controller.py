@@ -28,6 +28,7 @@ import asyncio
 import base64
 import dataclasses
 import datetime
+import decimal
 import hashlib
 import importlib
 import json
@@ -105,11 +106,27 @@ class StrikeRefused(Exception):
         return dict(error=self.error, **self.more)
 
 
+def _figure(x, places):
+    """x to `places` places, halves up, as the web UI shows it."""
+    return str(decimal.Decimal(repr(float(x))).quantize(decimal.Decimal(1).scaleb(-places), decimal.ROUND_HALF_UP))
+
+
+def _places(a, b):
+    """One place, or two where one would show a and b the same."""
+    return 1 if _figure(a, 1) != _figure(b, 1) else 2
+
+
 def hlt_low_words(left, least, unit):
     """The warning hlt_low in the strike water box's words: "Leaves 0.5 gal in the HLT, under its 3.0 gal minimum."
     Figures to one place, or to two where one place would show them the same."""
-    places = 1 if round(left, 1) < round(least, 1) else 2
-    return "Leaves %.*f %s in the HLT, under its %.*f %s minimum." % (places, left, unit, places, least, unit)
+    places = _places(left, least)
+    return "Leaves %s %s in the HLT, under its %s %s minimum." % (_figure(left, places), unit, _figure(least, places), unit)
+
+
+def hlt_under_words(hlt, mash, unit):
+    """The warning hlt_under in the strike water box's words: "Less than the 19.5 gal of mash water." The mash water to
+    one place, or to two where one place would show the HLT water the same."""
+    return "Less than the %s %s of mash water." % (_figure(mash, _places(hlt, mash)), unit)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -815,8 +832,11 @@ class StrikeController:
             ("vol", vol is None or (strike_vol is not None and vol < strike_vol - 1e-9))) if missing]
         L.miss = L.misses[0] if L.misses else None
         # What the figures would do that they shouldn't, blocking nothing: the mash water leaving less in the HLT than
-        # covers its element and coil.
+        # covers its element and coil (hlt_low), or more mash water than HLT water (hlt_under).
         L.warnings = ["hlt_low"] if left is not None and left < L.least["value"] - 1e-9 else []
+        if vol is not None and strike_vol is not None and vol < strike_vol - 1e-9:
+            # Less HLT water than the mash water: said in place of hlt_low, which it also is.
+            L.warnings = ["hlt_under"]
 
         L.rig = dict(through_coil=setup["through_coil"], still_probe=setup["still_probe"])
         L.guesses = None
@@ -1398,9 +1418,10 @@ class StrikeController:
         return dict(do=do, to=to, **{"from": before}, by=look.by, changed=changed)
 
     async def set_water(self, body):
-        """The HLT's water (POST /step2/strike/water): BrewStart's Volume, or by hand the brew day's figure. Refused
-        (400 too_little) only where it is less than the mash water. Water that would leave the HLT less than the least
-        that covers its element and coil once the mash water has gone is kept, with the warning (hlt_low_warning)."""
+        """The HLT's water (POST /step2/strike/water): BrewStart's Volume, or by hand the brew day's figure. Water less
+        than the mash water, or that would leave the HLT less than the least that covers its element and coil once the
+        mash water has gone, is kept, with the warning (hlt_low_warning). Never refused for its amount: it is typed,
+        and nothing switches on it."""
         if not isinstance(body, dict) or not _id_list(body.get("steps")):
             raise StrikeRefused(400, "bad_body", detail="Send {\"vol\": number, \"steps\": [...]}.")
         vol = _number(body.get("vol"))
@@ -1410,9 +1431,6 @@ class StrikeController:
         self._same_recipe(look, body["steps"])
         if not look.ids:
             raise StrikeRefused(409, "off", why="no_recipe", strike=self.get_state(look))
-        strike = (look.recipe or {}).get("strike_vol")
-        if strike is not None and vol < strike - 1e-9:
-            raise StrikeRefused(400, "too_little", min=strike)
         to = round(vol, 2)
         before = look.inputs["vol"]
         if look.bs is not None:
@@ -1490,10 +1508,15 @@ class StrikeController:
 
     @staticmethod
     def hlt_low_warning(look):
-        """The state's warning hlt_low for `look` (a _look()) as the commands that set the HLT water or the mash water
-        answer it, or None: {"what": "hlt_low", "left", "least", "least_from", "unit", "says"}, left being the water
-        the HLT keeps once the mash water has gone (0 where the mash water is more) and says the strike water box's
-        words (hlt_low_words). A warning, never a refusal: the figures are typed, and nothing switches on them."""
+        """The state's warning for `look` (a _look()) as the commands that set the HLT water or the mash water answer
+        it, or None: hlt_under, {"what": "hlt_under", "hlt", "mash", "unit", "says"}, where the HLT water is less than
+        the mash water; else hlt_low, {"what": "hlt_low", "left", "least", "least_from", "unit", "says"}, left being
+        the water the HLT keeps once the mash water has gone. says is the strike water box's words (hlt_under_words,
+        hlt_low_words). A warning, never a refusal: the figures are typed, and nothing switches on them."""
+        if "hlt_under" in look.warnings:
+            hlt, mash = look.inputs["vol"], (look.recipe or {}).get("strike_vol")
+            return dict(what="hlt_under", hlt=hlt, mash=mash, unit=look.vol_unit,
+                        says=hlt_under_words(hlt, mash, look.vol_unit))
         if "hlt_low" not in look.warnings:
             return None
         left, least = max(look.inputs["left"], 0.0), look.least["value"]

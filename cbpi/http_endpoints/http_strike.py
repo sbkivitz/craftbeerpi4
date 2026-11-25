@@ -87,7 +87,7 @@ class StrikeHttpEndpoints:
     async def http_strike_water(self, request):
         """
         ---
-        description: All the water in the HLT, strike and sparge - BrewStart's Volume, in its Volume_Unit, or by hand the brew day's figure. At least the strike water. Water that leaves the HLT less than covers its element and coil once the strike water has gone (the state's inputs.least) is kept, and the answer's warning says so.
+        description: All the water in the HLT, strike and sparge - BrewStart's Volume, in its Volume_Unit, or by hand the brew day's figure. Water less than the strike water (the mash water), or that leaves the HLT less than covers its element and coil once the strike water has gone (the state's inputs.least), is kept, and the answer's warning says so.
         tags:
         - Step
         parameters:
@@ -105,9 +105,9 @@ class StrikeHttpEndpoints:
                   type: string
         responses:
             "200":
-                description: what was applied, with the Campden tablets BrewStart gives for it; warning, the state's hlt_low where the figures leave the HLT less than covers its element and coil ({what, left, least, least_from, unit, says}), else null; and the state
+                description: what was applied, with the Campden tablets BrewStart gives for it; warning, the state's hlt_under where the HLT water is less than the mash water ({what, hlt, mash, unit, says}), else its hlt_low where the figures leave the HLT less than covers its element and coil ({what, left, least, least_from, unit, says}), else null; and the state
             "400":
-                description: bad_body, or too_little - less than the mash water (with min, the mash water)
+                description: bad_body
             "409":
                 description: recipe_changed, or off with nothing loaded
         """
@@ -178,7 +178,7 @@ class StrikeHttpEndpoints:
                   type: string
         responses:
             "200":
-                description: what was applied (with back, the figures put back to BeerSmith's own); warning, the state's hlt_low where the figures leave the HLT less than covers its element and coil ({what, left, least, least_from, unit, says}), else null - mash water that does is kept; and the state
+                description: what was applied (with back, the figures put back to BeerSmith's own); warning, the state's hlt_under where the mash water is more than the HLT water ({what, hlt, mash, unit, says}), else its hlt_low where the figures leave the HLT less than covers its element and coil ({what, left, least, least_from, unit, says}), else null - mash water that does either is kept; and the state
             "400":
                 description: bad_body, or out_of_range (with what, low and high)
             "409":

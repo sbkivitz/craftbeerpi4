@@ -18,7 +18,7 @@ Day instead:
   on Hardware, else 15 % of its capacity, else 3 gal): mash water given here, or HLT water, that would leave it less is
   kept, and the answer's warning says what is left and the least in the box's words; the state warns (hlt_low), as
   for BrewStart's Volume or BeerSmith's figures that do, and blocks nothing. HLT water less than the mash water is
-  still refused.
+  kept too, the warning hlt_under in place of hlt_low.
 """
 
 import asyncio
@@ -286,12 +286,28 @@ def test_hlt_water_leaving_less_than_the_least_after_the_mash_water_is_kept_with
     assert (out["applied"]["to"], out["warning"], out["strike"]["warnings"]) == (round(mash + 3.0, 2), None, [])
 
 
-def test_hlt_water_less_than_the_mash_water_is_still_refused(tmp_path, monkeypatch):
+def test_hlt_water_less_than_the_mash_water_is_kept_with_a_warning(tmp_path, monkeypatch):
     b = Brewery(tmp_path, monkeypatch, numbers=BEERSMITH, hlt=dict(capacity=20.0))
     b.state()
     mash = round(34.1 / model.L_PER_GAL, 2)
-    assert b.refused("set_water", vol=mash - 0.5) == (400, {"error": "too_little", "min": mash})
-    assert b.profile[0].props["Volume"] == 15, "a refused figure isn't kept"
+    out = b.send("set_water", vol=8.5)
+    assert out["applied"]["to"] == 8.5 and b.profile[0].props["Volume"] == 8.5, "the figure is kept"
+    assert out["warning"] == {"what": "hlt_under", "hlt": 8.5, "mash": mash, "unit": "gal",
+                              "says": "Less than the 9.0 gal of mash water."}
+    st = out["strike"]
+    assert (st["warnings"], st["miss"]) == (["hlt_under"], "vol"), "said once, in place of hlt_low; no forecast yet"
+    out = b.send("set_water", vol=8.96)
+    assert out["warning"]["says"] == "Less than the 9.01 gal of mash water.", "two places where one shows them the same"
+    out = b.send("set_water", vol=round(mash + 1, 2))
+    assert (out["warning"]["what"], out["strike"]["warnings"]) == ("hlt_low", ["hlt_low"])
+
+
+def test_mash_water_more_than_the_hlt_water_is_kept_with_a_warning(tmp_path, monkeypatch):
+    b = Brewery(tmp_path, monkeypatch, step_kg=9.072, volume=20, hlt=dict(capacity=20.0))
+    b.state()
+    out = b.send("set_recipe", strike_vol=21.0)
+    assert (out["applied"]["strike_vol"], out["warning"]["what"], out["warning"]["says"]) == \
+        (21.0, "hlt_under", "Less than the 21.0 gal of mash water.")
 
 
 def test_brewstarts_volume_set_elsewhere_too_low_is_a_warning_that_blocks_nothing(tmp_path, monkeypatch):
