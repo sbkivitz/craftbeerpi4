@@ -1,4 +1,6 @@
 import asyncio
+import contextvars
+import inspect
 import logging
 import os
 from collections import OrderedDict
@@ -9,6 +11,10 @@ import shortuuid
 from cbpi.api import *
 from cbpi.api import clock, timefmt
 from cbpi.api.dataclasses import NotificationType
+
+# What notify_log_event says of the log line it is notifying, for notify to pass on to the listeners: per thread and
+# per task, as logging can come from any.
+_LOG_LINE = contextvars.ContextVar("log_line", default=None)
 
 
 class NotificationController:
@@ -86,6 +92,14 @@ class NotificationController:
     LOG_NOTIFY_REPEAT_EVERY = 3600
     LOG_NOTIFY_QUIET = 300
     LOG_NOTIFY_REMEMBERED = 200
+    # Why a log line is notified, as a listener that takes log_line is told:
+    # LOG_LINE_NEW the first time, or back after LOG_NOTIFY_QUIET unlogged -
+    # its fault cleared and came back; LOG_LINE_STILL once an hour while it
+    # keeps being logged - a fault that never cleared. A listener that holds
+    # back repeats of the same words, as phone alerts do, holds back only the
+    # second kind.
+    LOG_LINE_NEW = "new"
+    LOG_LINE_STILL = "still"
 
     def notify_log_event(self, record):
         NOTIFY_ON_ERROR = self.cbpi.config.get("NOTIFY_ON_ERROR", "No")
@@ -97,22 +111,29 @@ class NotificationController:
             except Exception:  # noqa: BLE001
                 message = str(record.msg)
             try:
-                if self._log_notification_due(record.levelno, message):
+                due = self._log_notification_due(record.levelno, message)
+                if due:
                     # on log events higher then INFO we want to notify all clients
                     type = NotificationType.WARNING
                     if record.levelno > 30:
                         type = NotificationType.ERROR
-                    self.cbpi.notify(
-                        title=f"{record.levelname}", message=message, type=type
-                    )
+                    told = _LOG_LINE.set(due)
+                    try:
+                        self.cbpi.notify(
+                            title=f"{record.levelname}", message=message, type=type
+                        )
+                    finally:
+                        _LOG_LINE.reset(told)
             except Exception as e:
                 pass
         return True
 
     def _log_notification_due(self, level, message):
-        """Whether this log line raises a notification: the first time it is
-        logged, when it comes back after LOG_NOTIFY_QUIET seconds unlogged, and
-        once every LOG_NOTIFY_REPEAT_EVERY seconds while it keeps being logged.
+        """Whether this log line raises a notification, and why: the first
+        time it is logged, and when it comes back after LOG_NOTIFY_QUIET
+        seconds unlogged, LOG_LINE_NEW; once every LOG_NOTIFY_REPEAT_EVERY
+        seconds while it keeps being logged, LOG_LINE_STILL. None when it
+        doesn't.
 
         Timed on CraftBeerPi's clock, so a simulator at 60x notifies as a rig
         would, 60 times as fast. A gap that comes out negative - the clock
@@ -123,9 +144,12 @@ class NotificationController:
         key = (level, message)
         now = clock.monotonic()
         times = lines.get(key)  # [when last notified, when last logged]
-        due = (
+        new = (
             times is None
             or not 0 <= now - times[1] < self.LOG_NOTIFY_QUIET
+        )
+        due = (
+            new
             or not 0 <= now - times[0] < self.LOG_NOTIFY_REPEAT_EVERY
         )
         if due:
@@ -135,7 +159,9 @@ class NotificationController:
         lines.move_to_end(key)
         while len(lines) > self.LOG_NOTIFY_REMEMBERED:
             lines.popitem(last=False)
-        return due
+        if not due:
+            return None
+        return self.LOG_LINE_NEW if new else self.LOG_LINE_STILL
 
     def get_state(self):
         result = self.notifications
@@ -152,12 +178,26 @@ class NotificationController:
         except:
             self.logger.error("Failed to remove listener {}".format(listener_id))
 
-    async def _call_listener(self, title, message, type, action):
+    async def _call_listener(self, title, message, type, action, log_line=None):
+        # The listeners' tasks copy this task's context: cleared first, so a
+        # notification a listener sends itself isn't taken for this log line's.
+        _LOG_LINE.set(None)
         background_tasks = set()
         for id, method in self.listener.items():
-            task = asyncio.create_task(method(self.cbpi, title, message, type, action))
+            # log_line to a listener that takes it; any other is called as it
+            # always was.
+            more = dict(log_line=log_line) if self._takes_log_line(method) else {}
+            task = asyncio.create_task(method(self.cbpi, title, message, type, action, **more))
             background_tasks.add(task)
             task.add_done_callback(background_tasks.discard)
+
+    @staticmethod
+    def _takes_log_line(method):
+        try:
+            parameters = inspect.signature(method).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(p.name == "log_line" or p.kind is p.VAR_KEYWORD for p in parameters)
 
     def _open(self):
         """open_prompts, made on first use. A controller assembled without
@@ -187,8 +227,13 @@ class NotificationController:
             open when it is sent: one sent while the server starts reaches
             none.
         :return: the notification's id
+
+        A listener (add_listener) that takes a log_line keyword is told, for a
+        notification notify_log_event makes from a log line, why it is sent:
+        LOG_LINE_NEW or LOG_LINE_STILL. None for any other notification.
         """
         notifcation_id = shortuuid.uuid()
+        log_line = _LOG_LINE.get()
         background_tasks = set()
 
         def prepare_action(item):
@@ -243,7 +288,7 @@ class NotificationController:
         self.cbpi.ws.send(
             dict(topic=self.update_key, data=self.notifications), self.sorting
         )
-        task = asyncio.create_task(self._call_listener(title, message, type, action))
+        task = asyncio.create_task(self._call_listener(title, message, type, action, log_line))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
         return notifcation_id

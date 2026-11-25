@@ -1,7 +1,8 @@
 """With NOTIFY_ON_ERROR on, a WARNING or ERROR log line raises a notification (and a phone alert through the
 listeners). A line logged again and again - a fault logging every control pass - is notified once an hour; a line that
-has gone unlogged for 5 minutes has cleared, and is notified at once when it comes back. Timed on CraftBeerPi's clock
-(cbpi.api.clock), driven here by hand."""
+has gone unlogged for 5 minutes has cleared, and is notified at once when it comes back. A listener that takes log_line
+is told which: "new" the first time and each time it comes back, "still" for the hour's reminder, None for any other
+notification. Timed on CraftBeerPi's clock (cbpi.api.clock), driven here by hand."""
 
 import asyncio
 import logging
@@ -10,6 +11,7 @@ import types
 import pytest
 
 from cbpi.api import clock
+from cbpi.api.dataclasses import NotificationType
 from cbpi.controller.notification_controller import NotificationController
 
 HOUR = 3600.0
@@ -182,4 +184,77 @@ def test_a_clock_put_behind_counts_as_the_line_coming_back_once(hand):
     clock.set_source(Manual(mono=hand.monotonic() + 2 * HOUR))
     every(controller, clock.get_source(), 10 * MINUTE, 1.0)
     assert len(sent) == 3
+
+
+def sending():
+    """A controller whose notify() is the real one, sending to nowhere, with two listeners: one that takes log_line,
+    told what each notification was, and one written before log_line, told the same five things as ever."""
+    told, plain = [], []
+    controller = NotificationController.__new__(NotificationController)
+    controller.cbpi = types.SimpleNamespace(
+        config=types.SimpleNamespace(get=lambda key, default=None: "Yes" if key == "NOTIFY_ON_ERROR" else default),
+        ws=types.SimpleNamespace(send=lambda *a, **k: None), push_update=lambda *a, **k: None)
+    controller.cbpi.notify = lambda title, message, type, action=[], keep=False: controller.notify(
+        title, message, type, action, keep=keep)
+    controller.callback_cache, controller.listener, controller.notifications = {}, {}, []
+    controller.update_key, controller.sorting = "notificationupdate", False
+
+    async def listener(cbpi, title, message, type, action, log_line=None):
+        told.append((message, log_line))
+
+    async def older(cbpi, title, message, type, action):
+        plain.append(message)
+
+    controller.add_listener(listener)
+    controller.add_listener(older)
+    return controller, told, plain
+
+
+async def settled():
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+
+def test_listeners_are_told_whether_a_log_line_is_new_back_or_still_being_logged(hand):
+    stuck = "Actor pump reports still ON after being switched off"
+
+    async def run():
+        controller, told, plain = sending()
+        log(controller)
+        await settled()
+        assert told == [(stuck, "new")]
+        every(controller, hand, 10 * MINUTE, 1.0)
+        await settled()
+        assert len(told) == 1
+        hand.wait(6 * MINUTE)  # cleared, and back
+        log(controller)
+        await settled()
+        assert told[1:] == [(stuck, "new")]
+        hand.wait(1.0)
+        every(controller, hand, HOUR - 1.0, 1.0)
+        log(controller)  # an hour on, never cleared
+        await settled()
+        assert told[2:] == [(stuck, "still")]
+        controller.notify("Boil", "Could not switch Boil Kettle off.", NotificationType.WARNING)
+        await settled()
+        assert told[3:] == [("Could not switch Boil Kettle off.", None)]
+        assert plain == [stuck, stuck, stuck, "Could not switch Boil Kettle off."]
+
+    asyncio.run(run())
+
+
+def test_a_notification_a_listener_sends_of_its_own_is_not_a_log_lines(hand):
+    async def run():
+        controller, told, _ = sending()
+
+        async def answers(cbpi, title, message, type, action, log_line=None):
+            if log_line is not None:
+                cbpi.notify("Phone alerts", "Sent to the phone.", NotificationType.INFO)
+
+        controller.add_listener(answers)
+        log(controller, "Sensor HLT has not answered for 60 s", logging.WARNING)
+        await settled()
+        assert sorted(told, key=str) == [("Sensor HLT has not answered for 60 s", "new"), ("Sent to the phone.", None)]
+
+    asyncio.run(run())
 
