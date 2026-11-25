@@ -265,11 +265,11 @@ class MashInStep(CBPiStep):
         ), "malt")
 
     def _malt_question(self, again=False):
-        """The step's Notification, and after it what the recipe adds to the mash, when this is the recipe's dough-in
-        and its import had some (StepController.dough_in_words): "Target temperature reached. Please add malt. Add
-        to the mash: 5.00 g Gypsum, 3.00 g Calcium Chloride." Said at the dough-in, where the brewer is, never by
-        BrewStart, which runs while nobody is. Asked `again`, the additions may be in already: "... If you haven't
-        yet, add to the mash: ..."."""
+        """The step's Notification, and after it the water salts and acids the recipe adds to the mash, when this is
+        the recipe's dough-in and its import had some (StepController.dough_in_words): "Target temperature reached.
+        Please add malt. Add to the mash: 5.00 g Gypsum, 3.00 g Calcium Chloride." Said at the dough-in, where the
+        brewer is, never by BrewStart, which runs while nobody is. Asked `again`, they may be in already: "... If you
+        haven't yet, add to the mash: ..."."""
         text = self.props.get(
             "Notification",
             "Target Temp reached. Please add malt and click next to move on.",

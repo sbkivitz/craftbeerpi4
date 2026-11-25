@@ -2457,23 +2457,27 @@ class UploadController:
         return self._xml_amount(misc) if weight else None
 
     def _addition(self, misc):
-        """One MISC as the basic data keeps it: {"name", "type", "use", "amount", "label"}. The label is what a
-        reminder names it by, amount first, a count as a plain number ("2 Campden Tablets"), as a boil addition's
-        (_xml_misc_label); None when the MISC has no name."""
+        """One MISC as the basic data keeps it: {"name", "type", "use", "amount", "label", "remind"}. The label is what
+        a reminder names it by, amount first, a count as a plain number ("2 Campden Tablets"), as a boil addition's
+        (_xml_misc_label); remind, whether the dough-in or the sparge's start does - a water salt or acid
+        (StepController.is_water_treatment). None when the MISC has no name."""
         name = (misc.findtext("NAME") or "").strip()
         if not name:
             return None
         amount = self._addition_amount(misc)
         said = self._xml_misc_amount(misc) if (misc.findtext("DISPLAY_AMOUNT") or "").strip() else amount
-        return {"name": name, "type": (misc.findtext("TYPE") or "").strip() or None,
+        kind = (misc.findtext("TYPE") or "").strip() or None
+        return {"name": name, "type": kind,
                 "use": (misc.findtext("USE") or "").strip() or None, "amount": amount,
-                "label": "{} {}".format(said, name) if said else name}
+                "label": "{} {}".format(said, name) if said else name,
+                StepController.REMIND_KEY: StepController.is_water_treatment(kind, name)}
 
     def getMashSpargeAdditions(self, recipe):
         """A BeerXML recipe's MISCs for the mash and for the sparge water - BeerSmith's water agents and acids (TYPE
-        "Water Agent", USE "Mash" or "Sparge"), and anything else it adds there - in recipe order, and those no step
-        here reminds of: ([mash], [sparge], [not placed]), each as _addition has it. The boil's ("Boil") are the boil
-        step's, and in none of them. Never raises: a recipe that can't be read has none."""
+        "Water Agent", USE "Mash" or "Sparge"), and anything else it adds there, rice hulls too, the reminders naming
+        only the water salts and acids (remind) - in recipe order, and those no step here reminds of: ([mash],
+        [sparge], [not placed]), each as _addition has it. The boil's ("Boil") are the boil step's, and in none of
+        them. Never raises: a recipe that can't be read has none."""
         mash, sparge, not_placed = [], [], []
         try:
             for misc in recipe.findall("MISCS/MISC"):
@@ -2566,20 +2570,22 @@ class UploadController:
 
     def _additions_warnings(self, staged, steps):
         """The import's warnings about its mash and sparge additions, for a recipe kept with `steps` (the book's
-        dicts): [(title, text)]. A MISC no step reminds of (getMashSpargeAdditions' not placed) is named as not
-        imported; mash additions with no MashInStep to ask for them at the dough-in, or sparge additions with no
-        runoff step (StepController._collects_wort), are named as without a reminder. [] for a recipe with none."""
+        dicts): [(title, text)]. A MISC for the fermenter or the bottles (getMashSpargeAdditions' not placed) is named
+        as not imported; water salts and acids for the mash with no MashInStep to ask for them at the dough-in, or for
+        the sparge water with no runoff step (StepController._collects_wort), are named as without a reminder. The
+        other mash and sparge additions are kept, and never reminded of, so never named. [] for a recipe with none."""
         found = []
         not_placed = [entry for entry in staged.get("not_placed") or [] if isinstance(entry, dict)]
         if not_placed:
-            found.append(("Additions not imported", "Not imported, as CraftBeerPi reminds you only of what goes into "
-                          "the mash, the sparge water and the boil: {}. Add them yourself.".format(", ".join(
+            found.append(("Additions not imported", "Not imported, as CraftBeerPi keeps only what goes into the mash, "
+                          "the sparge water and the boil: {}. Add them yourself.".format(", ".join(
                               "{} ({})".format(entry["label"], entry.get("use") or "no use given")
                               for entry in not_placed))))
         steps = [s for s in steps or [] if isinstance(s, dict)]
 
         def words(key):
-            return ", ".join(entry["label"] for entry in staged.get(key) or [] if isinstance(entry, dict))
+            return ", ".join(entry["label"] for entry in staged.get(key) or []
+                             if isinstance(entry, dict) and StepController.reminded(entry))
 
         mash = words(StepController.MASH_ADDITIONS_KEY)
         if mash and not any(s.get("type") == "MashInStep" for s in steps):

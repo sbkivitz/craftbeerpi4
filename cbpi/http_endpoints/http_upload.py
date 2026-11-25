@@ -112,7 +112,7 @@ class UploadHttpEndpoints:
         """
 
         ---
-        description: Keep the recipe with this id from the uploaded BeerXML file in the Recipe Book, with a BeerXML file of its own (basic data source_xml, source_xml_recipe), and in its basic data BeerSmith's mash figures (mash_numbers), what goes into the mash and the sparge water (mash_additions, sparge_additions - [{name, type, use, amount, label}]), its mash profile's pH (mash_ph - {value, from - mash_profile}) and its yeasts (yeasts). The brew steps are left as they are. Where the book has a recipe of the same name, the page says which way - "update" (UPDATE that book recipe, keeping its steps if the brewer changed it, and give the brew steps loaded from it its mash figures at once) or "new" (ADD AS A NEW RECIPE) - and with neither an earlier import of the name is replaced
+        description: Keep the recipe with this id from the uploaded BeerXML file in the Recipe Book, with a BeerXML file of its own (basic data source_xml, source_xml_recipe), and in its basic data BeerSmith's mash figures (mash_numbers), what goes into the mash and the sparge water (mash_additions, sparge_additions - [{name, type, use, amount, label, remind}], remind true for the water salts and acids the dough-in and the sparge name), its mash profile's pH (mash_ph - {value, from - mash_profile}) and its yeasts (yeasts). The brew steps are left as they are. Where the book has a recipe of the same name, the page says which way - "update" (UPDATE that book recipe, keeping its steps if the brewer changed it, and give the brew steps loaded from it its mash figures at once) or "new" (ADD AS A NEW RECIPE) - and with neither an earlier import of the name is replaced
         tags:
         - Upload
         parameters:

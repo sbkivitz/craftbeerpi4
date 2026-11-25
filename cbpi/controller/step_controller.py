@@ -2330,30 +2330,56 @@ class StepController:
 
     #: In the basic data of a BeerXML import, beside its mash_numbers (UploadController reads them): what goes into
     #: the mash and into the sparge water - the water agents and acids, and any other BeerXML MISC whose USE is Mash or
-    #: Sparge - each {"name", "type", "use", "amount", "label"}, the amount as BeerSmith shows it (DISPLAY_AMOUNT) and
-    #: the label the reminders name it by ("5.00 g Gypsum"); the pH of the recipe's mash profile, {"value", "from":
-    #: "mash_profile"}; and its yeasts. Part of the recipe, like its name: LOAD, SAVE TO BOOK and the book keep them,
-    #: and an UPDATE from BeerSmith brings them up to date (RecipeController.update_from_import, take_book_figures).
-    #: The dough-in's MashInStep names the mash's in its question for the malt (dough_in_words), and the runoff's start
-    #: the sparge water's (_sparge_additions_at_runoff).
+    #: Sparge - each {"name", "type", "use", "amount", "label", "remind"}, the amount as BeerSmith shows it
+    #: (DISPLAY_AMOUNT), the label the reminders name it by ("5.00 g Gypsum"), and whether they do (REMIND_KEY); the
+    #: pH of the recipe's mash profile, {"value", "from": "mash_profile"}; and its yeasts. Part of the recipe, like its
+    #: name: LOAD, SAVE TO BOOK and the book keep them, and an UPDATE from BeerSmith brings them up to date
+    #: (RecipeController.update_from_import, take_book_figures). The dough-in's MashInStep names the mash's water
+    #: salts and acids in its question for the malt (dough_in_words), and the runoff's start the sparge water's
+    #: (_sparge_additions_at_runoff).
     MASH_ADDITIONS_KEY = "mash_additions"
     SPARGE_ADDITIONS_KEY = "sparge_additions"
     MASH_PH_KEY = "mash_ph"
     YEASTS_KEY = "yeasts"
     RECIPE_FACTS = (MASH_ADDITIONS_KEY, SPARGE_ADDITIONS_KEY, MASH_PH_KEY, YEASTS_KEY)
 
+    #: In each of those additions: True when the reminders name it - a water salt or acid (is_water_treatment) - and
+    #: False for the rest, rice hulls or a fining, kept for a plugin's notes all the same. An addition kept before
+    #: there was one is judged as the import would (reminded).
+    REMIND_KEY = "remind"
+
+    @staticmethod
+    def is_water_treatment(type, name):
+        """Whether a BeerXML MISC of TYPE `type` named `name` is a water salt or acid, the only mash and sparge
+        additions the brew reminds of: TYPE "Water Agent" - BeerSmith's water salts, acids and Campden tablets - or a
+        name with the word acid in it ("Lactic Acid", "Citric Acid"), but not acid malt, a grain."""
+        if str(type or "").strip().lower() == "water agent":
+            return True
+        named = str(name or "")
+        return bool(re.search(r"\bacid\b", named, re.I)) and not re.search(r"\bmalt\b", named, re.I)
+
+    @classmethod
+    def reminded(cls, addition):
+        """Whether the reminders name `addition`, an entry of mash_additions or sparge_additions: its REMIND_KEY, or
+        for one kept without it, is_water_treatment."""
+        said = addition.get(cls.REMIND_KEY)
+        if isinstance(said, bool):
+            return said
+        return cls.is_water_treatment(addition.get("type"), addition.get("name"))
+
     #: On the runoff step that asked for the sparge water's additions: asked once a brew, not again when that step or
     #: another runoff step starts, nor after a restart. Underscored: cleared by a reset and never kept in a recipe.
     SPARGE_ASKED_PROP = "_sparge_additions_asked"
 
     def _additions_words(self, key):
-        """'5.00 g Gypsum, 3.00 g Calcium Chloride': the loaded recipe's additions under `key` (MASH_ADDITIONS_KEY or
-        SPARGE_ADDITIONS_KEY), in recipe order, each by its label; None when it has none."""
+        """'5.00 g Gypsum, 3.00 g Calcium Chloride': the loaded recipe's water salts and acids under `key`
+        (MASH_ADDITIONS_KEY or SPARGE_ADDITIONS_KEY), in recipe order, each by its label; None when it has none. The
+        rest of its additions there - rice hulls, a fining - are left out (reminded)."""
         basic = self.basic_data if isinstance(self.basic_data, dict) else {}
         items = basic.get(key)
         labels = []
         for item in items if isinstance(items, list) else []:
-            if not isinstance(item, dict):
+            if not isinstance(item, dict) or not self.reminded(item):
                 continue
             label = str(item.get("label") or item.get("name") or "").strip()
             if label:
@@ -2361,10 +2387,11 @@ class StepController:
         return ", ".join(labels) or None
 
     def dough_in_words(self, step_id, again=False):
-        """What the question for the malt adds for the loaded recipe's mash additions: "Add to the mash: 5.00 g
-        Gypsum, 3.00 g Calcium Chloride." - asked by the dough-in's MashInStep only: the first that doesn't hold the
-        strike water for the brewer (holds_water_for_brewer: one on the HLT), else the first, so a recipe with a
-        second never asks twice. None for any other step, or a recipe with none (MashInStep._ask_for_malt).
+        """What the question for the malt adds for the loaded recipe's water salts and acids for the mash: "Add to the
+        mash: 5.00 g Gypsum, 3.00 g Calcium Chloride." - asked by the dough-in's MashInStep only: the first that
+        doesn't hold the strike water for the brewer (holds_water_for_brewer: one on the HLT), else the first, so a
+        recipe with a second never asks twice. None for any other step, or a recipe with none (MashInStep.
+        _ask_for_malt).
 
         `again`: the step has asked for the malt before and asks again - started after a Stop, after a restart, or
         at a new strike temperature - when they may be in already: "If you haven't yet, add to the mash: ...", so
@@ -2379,9 +2406,10 @@ class StepController:
         return ("If you haven't yet, add to the mash: {}." if again else "Add to the mash: {}.").format(words)
 
     def _sparge_additions_at_runoff(self, step):
-        """Ask for the sparge water's additions as the runoff starts, beside the first-wort hops
+        """Ask for the sparge water's salts and acids as the runoff starts, beside the first-wort hops
         (_first_wort_at_runoff): "Add to the sparge water: 2.00 ml Lactic Acid." Once a brew (SPARGE_ASKED_PROP).
-        Kept for a page opened later, until answered or the step is done. Nothing for a recipe with none."""
+        Kept for a page opened later, until answered or the step is done. Nothing for a recipe with none, even one
+        with other sparge additions (_additions_words)."""
         try:
             if not self._collects_wort(step):
                 return
