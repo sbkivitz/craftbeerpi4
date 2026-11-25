@@ -2111,6 +2111,7 @@ class StepController:
                 self._held_step_id = None
             self._tell("step_started", step)
             self._first_wort_at_runoff(step)
+            self._sparge_additions_at_runoff(step)
         except Exception as e:
             self.cbpi.notify(
                 "Error",
@@ -2275,6 +2276,72 @@ class StepController:
             name = entry.get("name")
             found.append(dict(name=None if name in (None, "") else str(name), minutes=minutes))
         return found
+
+    #: In the basic data of a BeerXML import, beside its mash_numbers (UploadController reads them): what goes into
+    #: the mash and into the sparge water - the water agents and acids, and any other BeerXML MISC whose USE is Mash or
+    #: Sparge - each {"name", "type", "use", "amount", "label"}, the amount as BeerSmith shows it (DISPLAY_AMOUNT) and
+    #: the label the reminders name it by ("5.00 g Gypsum"); the pH of the recipe's mash profile, {"value", "from":
+    #: "mash_profile"}; and its yeasts. Part of the recipe, like its name: LOAD, SAVE TO BOOK and the book keep them,
+    #: and an UPDATE from BeerSmith brings them up to date (RecipeController.update_from_import, take_book_figures).
+    #: The dough-in's MashInStep names the mash's in its question for the malt (dough_in_words), and the runoff's start
+    #: the sparge water's (_sparge_additions_at_runoff).
+    MASH_ADDITIONS_KEY = "mash_additions"
+    SPARGE_ADDITIONS_KEY = "sparge_additions"
+    MASH_PH_KEY = "mash_ph"
+    YEASTS_KEY = "yeasts"
+    RECIPE_FACTS = (MASH_ADDITIONS_KEY, SPARGE_ADDITIONS_KEY, MASH_PH_KEY, YEASTS_KEY)
+
+    #: On the runoff step that asked for the sparge water's additions: asked once a brew, not again when that step or
+    #: another runoff step starts, nor after a restart. Underscored: cleared by a reset and never kept in a recipe.
+    SPARGE_ASKED_PROP = "_sparge_additions_asked"
+
+    def _additions_words(self, key):
+        """'5.00 g Gypsum, 3.00 g Calcium Chloride': the loaded recipe's additions under `key` (MASH_ADDITIONS_KEY or
+        SPARGE_ADDITIONS_KEY), in recipe order, each by its label; None when it has none."""
+        basic = self.basic_data if isinstance(self.basic_data, dict) else {}
+        items = basic.get(key)
+        labels = []
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("name") or "").strip()
+            if label:
+                labels.append(label)
+        return ", ".join(labels) or None
+
+    def dough_in_words(self, step_id):
+        """What the question for the malt adds for the loaded recipe's mash additions: "Add to the mash: 5.00 g
+        Gypsum, 3.00 g Calcium Chloride." - asked by the dough-in's MashInStep only: the first that doesn't hold the
+        strike water for the brewer (holds_water_for_brewer: one on the HLT), else the first, so a recipe with a
+        second never asks twice. None for any other step, or a recipe with none (MashInStep._ask_for_malt)."""
+        mashins = [s for s in getattr(self, "profile", None) or [] if s.type == "MashInStep"]
+        first = next((s for s in mashins if not self.holds_water_for_brewer(s)), mashins[0] if mashins else None)
+        if first is None or first.id != step_id:
+            return None
+        words = self._additions_words(self.MASH_ADDITIONS_KEY)
+        return "Add to the mash: {}.".format(words) if words else None
+
+    def _sparge_additions_at_runoff(self, step):
+        """Ask for the sparge water's additions as the runoff starts, beside the first-wort hops
+        (_first_wort_at_runoff): "Add to the sparge water: 2.00 ml Lactic Acid." Once a brew (SPARGE_ASKED_PROP).
+        Kept for a page opened later, until answered or the step is done. Nothing for a recipe with none."""
+        try:
+            if not self._collects_wort(step):
+                return
+            words = self._additions_words(self.SPARGE_ADDITIONS_KEY)
+            if not words:
+                return
+            if any((s.props or {}).get(self.SPARGE_ASKED_PROP) for s in self.profile):
+                return
+            step.props[self.SPARGE_ASKED_PROP] = True
+            self._ask_kept(
+                "sparge-additions", step, lambda runoff: runoff.status != StepState.DONE,
+                "Sparge water", "Add to the sparge water: {}.".format(words),
+                NotificationType.WARNING, action=[NotificationAction("Added")],
+            )
+        except Exception as e:  # noqa: BLE001 - a reminder never stops the brew
+            logging.warning("Could not ask for the sparge water's additions at '%s': %s",
+                            getattr(step, "name", "?"), e)
 
     #: Where an import came from, in a recipe the book keeps for it - as
     #: RecipeController.IMPORTED_FROM. Not part of a recipe the brewer saves.
@@ -2457,11 +2524,14 @@ class StepController:
     #: The mash figures of a BeerXML import, in the basic data (UploadController.MASH_NUMBERS_KEY).
     MASH_NUMBERS_KEY = "mash_numbers"
 
-    async def take_book_figures(self, book_file, numbers, source, modified=None):
+    async def take_book_figures(self, book_file, numbers, source, modified=None, facts=None):
         """UPDATE from an import (UploadController.import_recipe) of the book recipe the brew steps were loaded from
         (BOOK_FILE_KEY is `book_file`): the steps take its mash figures `numbers` and its BeerXML file `source`
         ({source_xml, source_xml_recipe}, SOURCE_KEYS) into their basic data at once, nothing loaded again. No step,
         its status or its settings change, so it works while a step runs or BrewStart waits.
+
+        `facts`, {key: value} for RECIPE_FACTS: the import's mash and sparge additions, mash pH and yeasts, each
+        taken as the import has it, or dropped where it has none; None leaves them as they are.
 
         `modified`, (the book file's modified time before the update, after it): when the steps were as the book had
         them (BOOK_MODIFIED_KEY not older than before), they are counted as the book's copy after it too, so a page
@@ -2471,6 +2541,12 @@ class StepController:
             return False
         if numbers:
             basic[self.MASH_NUMBERS_KEY] = copy.deepcopy(numbers)
+        if isinstance(facts, dict):
+            for key in self.RECIPE_FACTS:
+                if facts.get(key):
+                    basic[key] = copy.deepcopy(facts[key])
+                else:
+                    basic.pop(key, None)
         for key in self.SOURCE_KEYS:
             basic.pop(key, None)
         basic.update({key: source[key] for key in self.SOURCE_KEYS if isinstance(source, dict) and key in source})

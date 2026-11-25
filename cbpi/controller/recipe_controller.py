@@ -42,6 +42,10 @@ class RecipeController:
     #: In the basic data of a BeerXML import: BeerSmith's mash figures (UploadController.MASH_NUMBERS_KEY), which
     #: UPDATE adds to a recipe the brewer changed (update_from_import).
     MASH_NUMBERS = "mash_numbers"
+    #: And what goes into the mash and the sparge water, the mash profile's pH and the yeasts
+    #: (StepController.RECIPE_FACTS), which UPDATE brings to a recipe the brewer changed as the import has them: taken
+    #: where it has them, dropped where it hasn't, as BeerSmith now has the recipe.
+    RECIPE_FACTS = ("mash_additions", "sparge_additions", "mash_ph", "yeasts")
     #: Why UPDATE changed nothing, in the brewer's words.
     UPDATE_GONE = "That recipe is no longer in the Recipe Book: it may have been deleted on another screen."
     UPDATE_UNREADABLE = "CraftBeerPi couldn't read {} in the Recipe Book, so it wasn't updated."
@@ -244,12 +248,13 @@ class RecipeController:
           replaces one: the brewer changed nothing in it, so its steps become the file's.
         - Any other - changed in the book, kept with SAVE TO BOOK, copied, or written by hand - keeps its steps,
           name, author and notes, and gains the import's mash figures (MASH_NUMBERS) and BeerXML file
-          (SOURCE_KEYS). It stays the brewer's own, so a later import of the name never overwrites it.
+          (SOURCE_KEYS), and its mash and sparge additions, mash pH and yeasts as the import has them
+          (RECIPE_FACTS). It stays the brewer's own, so a later import of the name never overwrites it.
 
         Written in one step, as keep_import writes. Returns {"steps": "kept" or "file", "same_steps": whether the
-        book's steps are as they were, "basic": the basic data written, "was": the book file's modified time before,
-        "modified": after}. Raises UpdateRefused, with nothing changed, when `file_id` isn't a book recipe, can't be
-        read, or isn't the import's name (by beerxml.name_key)."""
+        book's steps are as they were, "basic": the basic data written, "book_steps": the steps written, "was": the
+        book file's modified time before, "modified": after}. Raises UpdateRefused, with nothing changed, when
+        `file_id` isn't a book recipe, can't be read, or isn't the import's name (by beerxml.name_key)."""
         if not (isinstance(file_id, str) and self.SOURCE_ID.fullmatch(file_id)):
             raise UpdateRefused(self.UPDATE_GONE)
         path = self.cbpi.config_folder.get_recipe_file_by_id(file_id)
@@ -279,12 +284,18 @@ class RecipeController:
             figures = (data.get("basic") or {}).get(self.MASH_NUMBERS)
             if figures:
                 basic[self.MASH_NUMBERS] = copy.deepcopy(figures)
+            for key in self.RECIPE_FACTS:
+                fact = (data.get("basic") or {}).get(key)
+                if fact:
+                    basic[key] = copy.deepcopy(fact)
+                else:
+                    basic.pop(key, None)
             kept = "kept"
         for key in self.SOURCE_KEYS:
             basic.pop(key, None)
         self._write_with_source(file_id, updated, source_xml)
         return {"steps": kept, "same_steps": updated.get("steps") == entry.get("steps"), "basic": basic, "was": was,
-                "modified": os.path.getmtime(path)}
+                "modified": os.path.getmtime(path), "book_steps": updated.get("steps")}
 
     async def get_recipes(self):
         path = self.cbpi.config_folder.get_file_path("recipes")

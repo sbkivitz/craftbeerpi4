@@ -131,7 +131,8 @@ class RecipeHttpEndpoints:
         description: "LOAD: make the recipe with this file name in the Recipe Book the brew steps. Their basic data
           then has book_file (this file), loaded_at (when, on CraftBeerPi's clock) and book_modified (the file's
           modified time as GET /recipe/ gives it); and, for a recipe imported from BeerXML, source_xml (the BeerXML
-          file the book keeps for it, relative to the config folder) and source_xml_recipe (the recipe's NAME in it)"
+          file the book keeps for it, relative to the config folder) and source_xml_recipe (the recipe's NAME in it),
+          and the recipe's mash_numbers, mash_additions, sparge_additions, mash_ph and yeasts as the import kept them"
         tags:
         - Recipe
         parameters:

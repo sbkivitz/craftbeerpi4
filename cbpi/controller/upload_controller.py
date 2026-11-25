@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import html
 import json
 import logging
 import math
@@ -149,9 +150,12 @@ class UploadController:
         adds nothing, and is reported to the caller. The boil additions the
         boil step had no reminder for go in the same write, with the recipe's
         name (StepController.NO_REMINDER_KEY), and so do a BeerXML recipe's
-        mash numbers (MASH_NUMBERS_KEY) and the BeerXML file kept for it
-        (_kept_recipe, RecipeController.keep_import). A recipe that needs more
-        than a vessel holds is imported with a warning for it (too_full).
+        mash numbers (MASH_NUMBERS_KEY), its mash and sparge additions, mash pH
+        and yeasts (StepController.RECIPE_FACTS), and the BeerXML file kept for
+        it (_kept_recipe, RecipeController.keep_import). A recipe that needs more
+        than a vessel holds is imported with a warning for it (too_full), and one
+        with additions no step reminds of with a warning naming them
+        (_additions_warnings).
 
         Refused before anything is read when the settings would put the boil
         on the wrong vessel - see _import_problem. Never for a running step:
@@ -198,6 +202,9 @@ class UploadController:
                 basic[StepController.NO_REMINDER_KEY] = staged["without_reminder"]
             if staged.get("mash_numbers"):
                 basic[self.MASH_NUMBERS_KEY] = staged["mash_numbers"]
+            for key in StepController.RECIPE_FACTS:
+                if staged.get(key):
+                    basic[key] = staged[key]
             capacity = self.too_full(staged.get("mash_numbers"))
             held.extend(capacity)
             # As the book keeps a recipe: each step's name, kind, settings, and waiting.
@@ -205,6 +212,7 @@ class UploadController:
                      for s in staged["steps"]]
             if update is not None:
                 return await self._update_book(update, dict(basic=basic, steps=steps), label, staged, held, capacity)
+            held.extend(self._additions_warnings(staged, steps))
             try:
                 file_id, replaced = await self.cbpi.recipe.keep_import(dict(basic=basic, steps=steps), label,
                                                                        source_xml=staged.get("source_xml"),
@@ -224,8 +232,8 @@ class UploadController:
 
     async def _update_book(self, file_id, data, label, staged, held, capacity):
         """import_recipe's UPDATE of the book recipe `file_id` with the import `data`, and of the brew steps loaded
-        from it. Where the book's steps are kept, only the warnings about the recipe's figures (`capacity`) apply:
-        the others are about the file's steps."""
+        from it. Where the book's steps are kept, only the warnings about the recipe's figures (`capacity`) and its
+        additions (_additions_warnings, for the book's steps) apply: the others are about the file's steps."""
         try:
             done = await self.cbpi.recipe.update_from_import(file_id, data, label,
                                                              source_xml=staged.get("source_xml"))
@@ -236,13 +244,16 @@ class UploadController:
             return self._not_updated("{} couldn't be updated in the Recipe Book: {}.".format(staged["name"], e))
         kept = done["steps"] == "kept"
         warnings = list(capacity) if kept else list(held)
+        warnings.extend(self._additions_warnings(staged, done.get("book_steps") if kept else data["steps"]))
         loaded = False
         take = getattr(self.cbpi.step, "take_book_figures", None)
         if callable(take):
             source = {key: done["basic"][key] for key in StepController.SOURCE_KEYS if key in done["basic"]}
+            facts = {key: data["basic"].get(key) for key in StepController.RECIPE_FACTS}
             try:
                 loaded = bool(await take(file_id, data["basic"].get(self.MASH_NUMBERS_KEY), source,
-                                         modified=(done["was"], done["modified"]) if done["same_steps"] else None))
+                                         modified=(done["was"], done["modified"]) if done["same_steps"] else None,
+                                         facts=facts))
             except Exception:  # noqa: BLE001 - the book is updated; LOAD brings the figures
                 logging.exception("the brew steps could not take the updated recipe's mash figures")
         said = ("Updated in your Recipe Book with BeerSmith's mash figures and its file. Your steps are as they were."
@@ -1436,6 +1447,12 @@ class UploadController:
                 if self._staging and self._staged is not None:
                     self._staged["mash_numbers"] = self.getMashNumbers(recipe)
                     self._staged["source_xml"] = self._kept_recipe(self.path, Recipe_ID, name)
+                    mash_additions, sparge_additions, not_placed = self.getMashSpargeAdditions(recipe)
+                    self._staged[StepController.MASH_ADDITIONS_KEY] = mash_additions
+                    self._staged[StepController.SPARGE_ADDITIONS_KEY] = sparge_additions
+                    self._staged[StepController.MASH_PH_KEY] = self.getMashPh(recipe)
+                    self._staged[StepController.YEASTS_KEY] = self.getYeasts(recipe)
+                    self._staged["not_placed"] = not_placed
                 # Mash Steps -> first step is different as it heats up to defined temp and stops with notification to add malt
                 # AutoMode is yes to start and stop automatic mode or each step
                 MashIn_Flag = True
@@ -2407,6 +2424,163 @@ class UploadController:
         names = (("grain", "grain_kg"), ("water", "infuse_l"), ("tun", "tun_kg"), ("infuse_temp", "infuse_temp_c"),
                  ("grain_temp", "grain_temp_c"), ("tun_temp", "tun_temp_c"))
         found["lacks"] = [name for name, key in names if key not in found]
+        return found
+
+    #: Where a BeerXML MISC goes, by its USE, read without regard to case: into the mash, or into the sparge water.
+    #: "Boil" is the boil step's (getBoilAlerts); any other USE - Primary, Secondary, Bottling - has no step here.
+    ADDITION_PLACES = {"mash": StepController.MASH_ADDITIONS_KEY, "sparge": StepController.SPARGE_ADDITIONS_KEY}
+
+    def _addition_amount(self, misc):
+        """How much of a mash or sparge MISC, as BeerSmith shows it (DISPLAY_AMOUNT, "5.00 g", "1.00 tsp", "2.00
+        ml"), or None. Without DISPLAY_AMOUNT, from AMOUNT: a water agent in grams when a weight, else in ml, as
+        AMOUNT is then litres; any other MISC by weight only, as _xml_misc_amount has it."""
+        shown = (misc.findtext("DISPLAY_AMOUNT") or "").strip()
+        if shown:
+            return shown
+        amount = self._xml_number(misc, "AMOUNT")
+        if amount is None or amount <= 0:
+            return None
+        weight = (misc.findtext("AMOUNT_IS_WEIGHT") or "").strip().upper() == "TRUE"
+        if (misc.findtext("TYPE") or "").strip().lower() == "water agent":
+            return "{:.2f} {}".format(amount * 1000.0, "g" if weight else "ml")
+        return self._xml_amount(misc) if weight else None
+
+    def _addition(self, misc):
+        """One MISC as the basic data keeps it: {"name", "type", "use", "amount", "label"}. The label is what a
+        reminder names it by, amount first, a count as a plain number ("2 Campden Tablets"), as a boil addition's
+        (_xml_misc_label); None when the MISC has no name."""
+        name = (misc.findtext("NAME") or "").strip()
+        if not name:
+            return None
+        amount = self._addition_amount(misc)
+        said = self._xml_misc_amount(misc) if (misc.findtext("DISPLAY_AMOUNT") or "").strip() else amount
+        return {"name": name, "type": (misc.findtext("TYPE") or "").strip() or None,
+                "use": (misc.findtext("USE") or "").strip() or None, "amount": amount,
+                "label": "{} {}".format(said, name) if said else name}
+
+    def getMashSpargeAdditions(self, recipe):
+        """A BeerXML recipe's MISCs for the mash and for the sparge water - BeerSmith's water agents and acids (TYPE
+        "Water Agent", USE "Mash" or "Sparge"), and anything else it adds there - in recipe order, and those no step
+        here reminds of: ([mash], [sparge], [not placed]), each as _addition has it. The boil's ("Boil") are the boil
+        step's, and in none of them. Never raises: a recipe that can't be read has none."""
+        mash, sparge, not_placed = [], [], []
+        try:
+            for misc in recipe.findall("MISCS/MISC"):
+                use = (misc.findtext("USE") or "").strip()
+                if use == "Boil":
+                    continue
+                entry = self._addition(misc)
+                if entry is None:
+                    continue
+                place = self.ADDITION_PLACES.get(use.lower())
+                if place == StepController.MASH_ADDITIONS_KEY:
+                    mash.append(entry)
+                elif place == StepController.SPARGE_ADDITIONS_KEY:
+                    sparge.append(entry)
+                else:
+                    not_placed.append(entry)
+        except Exception as e:  # noqa: BLE001 - the recipe still imports, without them
+            logging.warning("Could not read the recipe's mash and sparge additions: %s", e)
+            return [], [], []
+        return mash, sparge, not_placed
+
+    def getMashPh(self, recipe):
+        """BeerXML's MASH PH, {"value": 5.4, "from": "mash_profile"}, or None when the file has none from 0 to 14.
+
+        BeerXML 1.0 calls it the "PH of the sparge" and no more. BeerSmith 2 writes there the pH of the recipe's mash
+        profile (its F_MH_PH, 5.4 in its stock profiles), not the recipe's target mash pH (F_R_TARGET_PH) nor its
+        estimate (F_R_MASH_PH), which no BeerXML export carries. So it is kept as the mash profile's, never as a
+        target: Brew Day's pH box shows a recipe target only from mash_ph_target in the recipe's basic data, which
+        BrewScribe reads and this never writes."""
+        value = self._xml_number(recipe.find("MASH"), "PH") if recipe is not None else None
+        if value is None or not 0 < value <= 14:
+            return None
+        return {"value": round(value, 2), "from": "mash_profile"}
+
+    #: The most of a yeast's NOTES kept, in characters: enough for a plugin's notes, not the lab's whole sheet.
+    YEAST_NOTES_MAX = 280
+
+    @staticmethod
+    def _short(text, most):
+        """`text` on one line, cut at a word to at most `most` characters, "…" ending what was cut; None if blank."""
+        words = " ".join(str(text or "").split())
+        if not words:
+            return None
+        if len(words) <= most:
+            return words
+        cut = words[:most - 1].rsplit(" ", 1)[0] or words[:most - 1]
+        return cut.rstrip(" ,;:.") + "…"
+
+    def getYeasts(self, recipe):
+        """A BeerXML recipe's yeasts, in recipe order, for a plugin's notes (BrewScribe): each {"name", "laboratory",
+        "product_id", "type", "form", "amount", "amount_value", "amount_is_weight", "attenuation", "min_temp",
+        "max_temp", "temp_unit", "add_to_secondary", "notes"}. amount is as BeerSmith shows it (DISPLAY_AMOUNT), else
+        from AMOUNT; amount_value is AMOUNT, in kg when amount_is_weight, else in litres; the temperatures are in the
+        brewery's TEMP_UNIT, from BeerXML's C; notes is the start of NOTES (YEAST_NOTES_MAX), with the HTML entities
+        BeerSmith's yeast notes carry (&ldquo;) read as the characters they stand for. What the file doesn't
+        say is None. Never raises: a recipe that can't be read has none."""
+        unit = "F" if str(getattr(self, "TEMP_UNIT", "C")).upper().startswith("F") else "C"
+        found = []
+        try:
+            for yeast in recipe.findall("YEASTS/YEAST"):
+                name = (yeast.findtext("NAME") or "").strip()
+                if not name:
+                    continue
+
+                def text(tag, yeast=yeast):
+                    return (yeast.findtext(tag) or "").strip() or None
+
+                weight = (yeast.findtext("AMOUNT_IS_WEIGHT") or "").strip().upper() == "TRUE"
+                value = self._xml_number(yeast, "AMOUNT")
+                value = value if value is not None and value > 0 else None
+                amount = text("DISPLAY_AMOUNT")
+                if amount is None and value is not None:
+                    amount = "{:.1f} {}".format(value * 1000.0, "g" if weight else "ml")
+                temps = []
+                for tag in ("MIN_TEMPERATURE", "MAX_TEMPERATURE"):
+                    c = self._xml_number(yeast, tag)
+                    temps.append(None if c is None else round(c * 1.8 + 32 if unit == "F" else c, 1))
+                found.append({
+                    "name": name, "laboratory": text("LABORATORY"), "product_id": text("PRODUCT_ID"),
+                    "type": text("TYPE"), "form": text("FORM"), "amount": amount, "amount_value": value,
+                    "amount_is_weight": weight, "attenuation": self._xml_number(yeast, "ATTENUATION"),
+                    "min_temp": temps[0], "max_temp": temps[1], "temp_unit": unit,
+                    "add_to_secondary": (yeast.findtext("ADD_TO_SECONDARY") or "").strip().upper() == "TRUE",
+                    "notes": self._short(html.unescape(yeast.findtext("NOTES") or ""), self.YEAST_NOTES_MAX),
+                })
+        except Exception as e:  # noqa: BLE001 - the recipe still imports, without them
+            logging.warning("Could not read the recipe's yeasts: %s", e)
+            return []
+        return found
+
+    def _additions_warnings(self, staged, steps):
+        """The import's warnings about its mash and sparge additions, for a recipe kept with `steps` (the book's
+        dicts): [(title, text)]. A MISC no step reminds of (getMashSpargeAdditions' not placed) is named as not
+        imported; mash additions with no MashInStep to ask for them at the dough-in, or sparge additions with no
+        runoff step (StepController._collects_wort), are named as without a reminder. [] for a recipe with none."""
+        found = []
+        not_placed = [entry for entry in staged.get("not_placed") or [] if isinstance(entry, dict)]
+        if not_placed:
+            found.append(("Additions not imported", "Not imported, as CraftBeerPi reminds you only of what goes into "
+                          "the mash, the sparge water and the boil: {}. Add them yourself.".format(", ".join(
+                              "{} ({})".format(entry["label"], entry.get("use") or "no use given")
+                              for entry in not_placed))))
+        steps = [s for s in steps or [] if isinstance(s, dict)]
+
+        def words(key):
+            return ", ".join(entry["label"] for entry in staged.get(key) or [] if isinstance(entry, dict))
+
+        mash = words(StepController.MASH_ADDITIONS_KEY)
+        if mash and not any(s.get("type") == "MashInStep" for s in steps):
+            found.append(("Mash additions without a reminder", "This recipe has no MashInStep to ask for the malt, so "
+                          "nothing will remind you to add {} to the mash.".format(mash)))
+        sparge = words(StepController.SPARGE_ADDITIONS_KEY)
+        if sparge:
+            from types import SimpleNamespace
+            if not any(StepController._collects_wort(SimpleNamespace(name=s.get("name"), type=s.get("type")))
+                       for s in steps):
+                found.append(("Sparge additions without a reminder", "This recipe has no sparge step, so nothing "
+                              "will remind you to add {} to the sparge water.".format(sparge)))
         return found
 
     def getFirstWort(self, hops, recipe_type):

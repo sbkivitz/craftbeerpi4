@@ -248,13 +248,30 @@ class MashInStep(CBPiStep):
         # ends. Started again, it asks again (_resume_waiting_for_malt).
         _kept_for(self, self.cbpi.notify(
             self.name,
-            self.props.get(
-                "Notification",
-                "Target Temp reached. Please add malt and click next to move on.",
-            ),
+            self._malt_question(),
             action=[NotificationAction("Next Step", self.NextStep)],
             **_keep(self.cbpi),
         ), "malt")
+
+    def _malt_question(self):
+        """The step's Notification, and after it what the recipe adds to the mash, when this is the recipe's dough-in
+        and its import had some (StepController.dough_in_words): "Target temperature reached. Please add malt. Add
+        to the mash: 5.00 g Gypsum, 3.00 g Calcium Chloride." Said at the dough-in, where the brewer is, never by
+        BrewStart, which runs while nobody is."""
+        text = self.props.get(
+            "Notification",
+            "Target Temp reached. Please add malt and click next to move on.",
+        )
+        words = None
+        said = getattr(getattr(self.cbpi, "step", None), "dough_in_words", None)
+        if callable(said):
+            try:
+                words = said(self.id)
+            except Exception as e:  # noqa: BLE001 - the question is asked all the same
+                logging.warning("Could not name the mash additions for %s: %s", self.name, e)
+        if not words or words in str(text or ""):
+            return text
+        return "{} {}".format(str(text).strip(), words) if str(text or "").strip() else words
 
     async def change_target(self, temp):
         """Heat or hold to `temp` from now on, while the step runs.
