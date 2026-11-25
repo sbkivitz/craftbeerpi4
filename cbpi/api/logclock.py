@@ -16,11 +16,79 @@ was right, and every row is kept.
 
 Left out rather than restamped: their true time is known only to about a reading interval, and a chart missing two
 minutes is honest where one with two guessed minutes is not.
+
+A simulator's clock is moved on purpose: a change of SIM_TIME_SCALE sets it back to the computer's time
+(CraftBeerPi.brewing_clock), hours back after an accelerated run. Its rows are not misstamped, they are on the clock
+as it was. So the move is written into each log as a row of its own, "<time>,clock moved <seconds>" (moved_row), its
+time the moved clock's, and whatever reads the log moves every row written before it by as much (moved_after): the
+readings already taken keep their places in the brew, and the ones after the move carry on from them, as one line.
+The files keep what was written, the move's row included. Nothing on a rig moves its clock that way, so its logs have
+no such row.
 """
+
+import calendar
+import math
+import time
 
 import numpy as np
 
-__all__ = ["BACK_TOLERANCE_S", "FIX_WITHIN_S", "misstamped"]
+__all__ = ["BACK_TOLERANCE_S", "FIX_WITHIN_S", "MOVED", "MOVED_BYTES", "misstamped", "moved_row", "moved_by",
+           "moved_after", "shift_naive"]
+
+#: The value of a log row that says CraftBeerPi's clock moved there, by the seconds after it: "clock moved -35400.123".
+MOVED = "clock moved"
+#: The same, as the bytes of a log file: a file without it has no move to read.
+MOVED_BYTES = MOVED.encode("ascii")
+
+
+def moved_row(stamp, seconds):
+    """A log row saying the clock moved by `seconds` (negative: back), at `stamp`: the moved clock's time, as the logs
+    write times."""
+    return "{},{} {:+.3f}".format(stamp, MOVED, float(seconds))
+
+
+def moved_by(value):
+    """The seconds a log row's value says the clock moved by, or None for a reading."""
+    text = str(value).strip()
+    if not text.startswith(MOVED):
+        return None
+    try:
+        seconds = float(text[len(MOVED):])
+    except ValueError:
+        return None
+    return seconds if math.isfinite(seconds) else None
+
+
+def moved_after(moves):
+    """Seconds to add to each row's time to put it on the clock as it is now: the sum of the moves written after it.
+    `moves` are the rows' moves in the order written, 0 or NaN for a reading."""
+    m = np.nan_to_num(np.asarray(moves, dtype=float))
+    if not len(m):
+        return m
+    total = np.cumsum(m)
+    return total[-1] - total
+
+
+def _offsets(seconds, written):
+    """Each time's offset from UTC in seconds, worked out once for each hour the times fall in. `written`: the times
+    are local times read as UTC, as the logs write them; else seconds since the epoch."""
+    hours = np.floor(seconds / 3600.0).astype(np.int64)
+    unique, inverse = np.unique(hours, return_inverse=True)
+    if written:
+        found = [h * 3600 - time.mktime(time.gmtime(int(h) * 3600)[:8] + (-1,)) for h in unique.tolist()]
+    else:
+        found = [calendar.timegm(time.localtime(int(h) * 3600)) - int(h) * 3600 for h in unique.tolist()]
+    return np.asarray(found, dtype=float)[inverse]
+
+
+def shift_naive(naive, shift):
+    """Local times as the logs write them (seconds, read as UTC) moved by `shift` seconds of the clock, daylight saving
+    and all."""
+    naive = np.asarray(naive, dtype=float)
+    if not len(naive):
+        return naive
+    moved = naive - _offsets(naive, True) + np.asarray(shift, dtype=float)
+    return moved + _offsets(moved, False)
 
 #: A step back in a log's timestamps bigger than this is the clock being changed, not two readings racing each other.
 BACK_TOLERANCE_S = 2.0

@@ -6,7 +6,7 @@ import io
 import logging
 import math
 import os
-import time
+import re
 import zipfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -23,6 +23,22 @@ from cbpi.api.base import CBPiBase
 from cbpi.api.config import ConfigType
 from urllib3 import PoolManager, Timeout
 
+#: The column _read_log_file adds, for a log with a row saying CraftBeerPi's clock moved: each row's move, in seconds,
+#: NaN for a reading.
+MOVED_COLUMN = "(clock moved)"
+
+
+class LogStamp(str):
+    """A reading's time as the logs write it, handed to every log target (_emit), with the brewing clock's seconds it
+    was taken at (`when`) and how many times the clock had moved by then (`moves`, LogController.clock_moved), so a
+    reading written after a move can be put on the moved clock. Any other target takes it as the text it is."""
+
+    def __new__(cls, text, when, moves):
+        stamp = super().__new__(cls, text)
+        stamp.when = when
+        stamp.moves = moves
+        return stamp
+
 
 class LogController:
 
@@ -38,8 +54,8 @@ class LogController:
         self.logsFolderPath = self.cbpi.config_folder.logsFolderPath
         self.logger.info("Log folder path  : " + self.logsFolderPath)
         self.sensor_data_listeners = {}
-        # The archived logs being zipped (archive_logs_ahead), while that runs.
-        self.archive_zipping = None
+        # How far CraftBeerPi's clock was moved, in seconds, each time since the server started (clock_moved).
+        self.clock_moves = []
 
     def add_sensor_data_listener(self, method):
         listener_id = shortuuid.uuid()
@@ -147,10 +163,84 @@ class LogController:
                 when = None
         if when is None:
             when = sim_clock.now()
-        formatted_time = datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        formatted_time = LogStamp(datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3], when,
+                                  len(self.clock_moves))
         asyncio.create_task(
             self._call_sensor_data_listeners(id, value, formatted_time, name)
         )
+
+    @staticmethod
+    def stamp(when):
+        """A time on the brewing clock as the logs write it: "2026-11-24 22:10:00.123" (_emit)."""
+        return datetime.fromtimestamp(when).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    #: Seconds: a move of the clock shorter than this leaves the logs as they are. A change of speed while the clock
+    #: is where the computer's is, at 1x, moves it by a few milliseconds.
+    CLOCK_MOVE_MIN_S = 1.0
+
+    def clock_moved(self, seconds):
+        """CraftBeerPi's clock has just jumped by `seconds` (CraftBeerPi.brewing_clock: a simulator's change of speed,
+        back to the computer's time). Each sensor log gets a row saying so, after the rows written so far, and
+        whatever reads the logs moves those rows by as much (cbpi.api.logclock): the graphs keep the readings already
+        taken, where they were in the brew, and the readings from now on carry on from them as one line. A reading
+        taken before the jump and written after it is moved as it is written (SensorLogTarget_CSV). The files keep
+        every row as written; nothing is moved or deleted.
+
+        Called with nothing else running between the jump and here, so no reading on the moved clock is written yet.
+        Returns the names of the logs marked."""
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return []
+        if not math.isfinite(seconds) or abs(seconds) < self.CLOCK_MOVE_MIN_S:
+            return []
+        self.clock_moves.append(seconds)
+        row = logclock.moved_row(self.stamp(sim_clock.now()), seconds)
+        folder = self.logsFolderPath
+        names = set(self.datalogger)
+        if folder and os.path.isdir(folder):
+            for path in glob.glob(os.path.join(glob.escape(folder), "sensor_*.log*")):
+                found = re.fullmatch(r"sensor_(.+)\.log(\.\d+)?", os.path.basename(path))
+                if found:
+                    names.add(found.group(1))
+        marked = []
+        for name in sorted(names):
+            try:
+                if self._mark_clock_moved(name, row):
+                    marked.append(name)
+            except Exception as e:  # noqa: BLE001 - one log never keeps the others from being marked
+                self.logger.warning("Could not mark the clock's move in the log %s: %s", name, e)
+        return marked
+
+    def _mark_clock_moved(self, name, row):
+        """The clock's move `row` written to `name`'s log, after its rows so far: through its open handler, which
+        writes what it holds first, or else at the end of its newest file. Whether it was written."""
+        data_logger = self.datalogger.get(name)
+        handlers = list(data_logger.handlers) if data_logger is not None else []
+        told = [h for h in handlers if callable(getattr(h, "clock_moved", None))]
+        if told:
+            for handler in told:
+                handler.clock_moved(row, len(self.clock_moves))
+            return True
+        for handler in handlers:
+            handler.flush()
+        path = os.path.join(self.logsFolderPath, "sensor_{}.log".format(name))
+        if not os.path.exists(path) and not self._log_files_oldest_first(name):
+            return False
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(row + "\n")
+        return True
+
+    def restamped(self, line, when, since, upto=None):
+        """A log row of a reading taken at `when`, after `since` moves of the clock, put on the clock as it was after
+        `upto` moves (all of them, by default): "time,value" with its time moved by the moves between."""
+        try:
+            moved = sum(self.clock_moves[int(since):None if upto is None else int(upto)])
+            if not moved:
+                return line
+            return "{},{}".format(self.stamp(float(when) + moved), line.split(",", 1)[1])
+        except Exception:  # noqa: BLE001 - a row is never lost over its time
+            return line
 
     async def _flush_datalogger(self, name):
         """Push any buffered readings to disk before something reads the files.
@@ -272,8 +362,24 @@ class LogController:
         # format="mixed" so logs written before timestamps gained milliseconds
         # still parse alongside new ones.
         df["DateTime"] = pd.to_datetime(df["DateTime"], format="mixed", errors="coerce")
+        if logclock.MOVED_BYTES in raw:
+            # A row saying CraftBeerPi's clock moved there (clock_moved): how far, for _read_sensor_log.
+            df[MOVED_COLUMN] = pd.to_numeric(df[column].map(logclock.moved_by), errors="coerce")
         df[column] = pd.to_numeric(df[column], errors="coerce")
         return df
+
+    @staticmethod
+    def _on_clock_now(df):
+        """A log's rows, in the order written, each moved by the clock's moves written after it (clock_moved), so
+        every row is on the clock as it is now; the rows saying the clock moved left out."""
+        moves = df.pop(MOVED_COLUMN).to_numpy(dtype=float)
+        shift = logclock.moved_after(moves)
+        moved = df["DateTime"].notna().to_numpy() & (shift != 0)
+        if moved.any():
+            written = df.loc[moved, "DateTime"].to_numpy(dtype="datetime64[ns]").astype("int64") / 1e9
+            now = np.round(logclock.shift_naive(written, shift[moved]) * 1000).astype("int64") * 1_000_000
+            df.loc[moved, "DateTime"] = now.astype("datetime64[ns]")
+        return df[np.isnan(moves)]
 
     def _misstamped(self, times):
         """Which rows were stamped by a clock that went back and was then put right.
@@ -311,8 +417,8 @@ class LogController:
         return logclock.misstamped(s, self.CLOCK_BACK_TOLERANCE_S, self.CLOCK_FIX_WITHIN_S)
 
     def _read_sensor_log(self, name, column):
-        """Every reading in a sensor's logs, indexed by time and sorted, with
-        the rows a power cut misstamped left out (see _misstamped)."""
+        """Every reading in a sensor's logs, on the clock as it is now (_on_clock_now), indexed by time and sorted,
+        with the rows a power cut misstamped left out (see _misstamped)."""
         frames = [self._read_log_file(path, column)
                   for path in self._log_files_oldest_first(name)]
         frames = [f for f in frames if not f.empty]
@@ -320,6 +426,8 @@ class LogController:
             return pd.DataFrame({column: pd.Series(dtype="float64")},
                                 index=pd.DatetimeIndex([], name="DateTime"))
         df = pd.concat(frames, ignore_index=True)
+        if MOVED_COLUMN in df:
+            df = self._on_clock_now(df)
         df = df.dropna(subset=["DateTime"])
         misstamped = self._misstamped(df["DateTime"])
         if misstamped.any():
@@ -541,122 +649,6 @@ class LogController:
                 handler.close()
             except Exception as e:
                 logging.warning("Could not close log handler for %s: %s", name, e)
-
-    #: How far past the clock a log's newest row must be to have been stamped by
-    #: a clock that has since been set back (archive_logs_ahead).
-    AHEAD_MARGIN_S = 5.0
-
-    @staticmethod
-    def _newest_row_time(path):
-        """The time of a log file's last row, as epoch seconds; None if it has none."""
-        try:
-            with open(path, "rb") as f:
-                f.seek(0, os.SEEK_END)
-                f.seek(max(0, f.tell() - 4096))
-                tail = f.read().replace(b"\x00", b"").decode("utf-8", "replace")
-        except OSError:
-            return None
-        for line in reversed(tail.splitlines()):
-            stamp = line.split(",", 1)[0].strip()
-            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
-                try:
-                    return datetime.strptime(stamp, fmt).timestamp()
-                except ValueError:
-                    continue
-        return None
-
-    #: How often, and how far apart in seconds, a move refused for a file held open is tried (_replace).
-    REPLACE_TRIES = 20
-    REPLACE_PAUSE_S = 0.05
-
-    @classmethod
-    def _replace(cls, source, target):
-        """os.replace, tried again for a moment while it is refused. On Windows another program - a virus
-        scanner, the search indexer - can hold a log open briefly after it was written, and a move fails
-        meanwhile; left where it is, the archived run's rows would stay in the log the next readings go into."""
-        for attempt in range(cls.REPLACE_TRIES):
-            try:
-                os.replace(source, target)
-                return
-            except PermissionError:
-                if attempt == cls.REPLACE_TRIES - 1:
-                    raise
-                time.sleep(cls.REPLACE_PAUSE_S)
-
-    def archive_logs_ahead(self, now):
-        """Archive each log that has rows stamped later than `now`.
-
-        For the brewing clock set back to the computer's time while the server
-        runs (CraftBeerPi.brewing_clock): the rows an accelerated run wrote are
-        ahead of it, and the rows written from now on would go in behind them,
-        into the same files, so a graph would go back in time. As a simulator
-        does with the logs of an earlier accelerated run as it starts: each such
-        log's files are moved, unchanged, into <logs>/archive/<time>-simulation/,
-        and zipped into the logs folder as "<time>-sensor-<id>.zip", listed and
-        downloadable as any. Nothing is deleted.
-
-        Every log's batch is written first, so rows still held in memory count.
-        A log archived is closed; the next reading starts a new file. The series
-        logged only when they change - a kettle's target and AUTO, a switch's
-        level - are logged again at their next look, so a graph has them from
-        the start. The files are moved here, at once; they are zipped in a
-        thread of their own afterwards (archive_zipping, while it runs).
-
-        Returns None when no log is ahead, else {"sensors": [ids], "latest": the
-        newest row's time, "folder": the archive folder, "zips": [file names]}.
-        """
-        folder = self.logsFolderPath
-        if not folder or not os.path.isdir(folder):
-            return None
-        for data_logger in list(self.datalogger.values()):
-            for handler in list(data_logger.handlers):
-                try:
-                    handler.flush()
-                except Exception as e:  # noqa: BLE001 - its file is still judged by what it has
-                    logging.warning("Could not write a sensor log's batch: %s", e)
-        ahead = []
-        for path in glob.glob(os.path.join(glob.escape(folder), "sensor_*.log")):
-            name = os.path.basename(path)[len("sensor_"):-len(".log")]
-            stamps = [self._newest_row_time(f) for f in self._log_files_oldest_first(name)]
-            stamps = [s for s in stamps if s is not None]
-            if stamps and max(stamps) > now + self.AHEAD_MARGIN_S:
-                ahead.append((name, max(stamps)))
-        if not ahead:
-            return None
-        stamp = datetime.fromtimestamp(now)
-        archive = os.path.join(folder, "archive", stamp.strftime("%Y%m%d-%H%M%S") + "-simulation")
-        os.makedirs(archive, exist_ok=True)
-        moved = {}
-        last = getattr(self, "_last_change", None) or {}
-        for name, _ in ahead:
-            self._close_datalogger(name)
-            files = []
-            for f in self._log_files_oldest_first(name):
-                target = os.path.join(archive, os.path.basename(f))
-                try:
-                    self._replace(f, target)
-                    files.append(target)
-                except OSError as e:
-                    self.logger.warning("Could not archive %s: %s", f, e)
-            if files:
-                moved["{}-sensor-{}.zip".format(stamp.strftime("%Y-%m-%d-%H_%M_%S"), name)] = files
-            last.pop(name, None)
-
-        def zip_them():
-            for zip_name, files in moved.items():
-                try:
-                    with zipfile.ZipFile(os.path.join(folder, zip_name), "w", zipfile.ZIP_DEFLATED) as z:
-                        for f in files:
-                            z.write(f, os.path.basename(f))
-                except Exception as e:  # noqa: BLE001 - the move already separated the runs
-                    self.logger.warning("Could not zip %s: %s", zip_name, e)
-
-        try:
-            self.archive_zipping = asyncio.get_running_loop().run_in_executor(None, zip_them)
-        except RuntimeError:
-            zip_them()
-        return {"sensors": [name for name, _ in ahead], "latest": max(newest for _, newest in ahead),
-                "folder": archive, "zips": list(moved)}
 
     def get_all_zip_file_names(self, name: str) -> list:
         """

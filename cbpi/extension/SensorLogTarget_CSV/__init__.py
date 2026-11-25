@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import base64
+import functools
 import logging
 import os
 try:
@@ -51,6 +52,10 @@ class BatchingRotatingFileHandler(RotatingFileHandler):
         self._last_flush = time.monotonic()
         self.flush_seconds = max(0.0, float(flush_seconds))
         self.max_records = max(1, int(max_records))
+        # The LogController whose clock moves this log follows, and how many of them its file has a row for
+        # (clock_moved).
+        self.clock_log = None
+        self.clock_moves_seen = 0
 
     def emit(self, record):
         # Closed - the log cleared or archived - it writes nothing. A reading
@@ -59,13 +64,31 @@ class BatchingRotatingFileHandler(RotatingFileHandler):
         if getattr(self, "_closed", False):
             return
         try:
-            self._pending.append(self.format(record))
+            line = self.format(record)
+            # A reading taken before CraftBeerPi's clock moved, reaching here after the file says it moved: on the
+            # moved clock, as the rows around it are.
+            moves = getattr(record, "clock_moves", None)
+            if self.clock_log is not None and moves is not None and moves < self.clock_moves_seen:
+                line = self.clock_log.restamped(line, record.clock_when, moves, self.clock_moves_seen)
+            self._pending.append(line)
         except Exception:  # noqa: BLE001 - never let logging break a brew day
             self.handleError(record)
             return
         due = time.monotonic() - self._last_flush >= self.flush_seconds
         if self.flush_seconds <= 0 or due or len(self._pending) >= self.max_records:
             self.flush()
+
+    def clock_moved(self, row, moves):
+        """CraftBeerPi's clock moved (LogController.clock_moved): what this log holds written, then `row`, which says
+        the clock moved, the `moves`-th time. A reading taken before and reaching here after is put on the moved clock
+        (emit)."""
+        self.acquire()
+        try:
+            self._pending.append(row)
+            self.clock_moves_seen = max(self.clock_moves_seen, int(moves))
+            self.flush()
+        finally:
+            self.release()
 
     def flush(self):
         """Write everything buffered as a single append."""
@@ -196,6 +219,10 @@ class SensorLogTargetCSV(CBPiExtension):
                     logger.warning("Could not close old log handler: %s", e)
 
             data_logger.addHandler(handler)
+            # Rows of readings taken before a move of CraftBeerPi's clock are put on the moved clock as they are
+            # written (emit); this new file already follows every move so far.
+            handler.clock_log = self.cbpi.log
+            handler.clock_moves_seen = len(getattr(self.cbpi.log, "clock_moves", None) or ())
             self.cbpi.log.datalogger[id] = data_logger
 
         # Hand the write to a worker thread.
@@ -211,11 +238,14 @@ class SensorLogTargetCSV(CBPiExtension):
         # Buffering makes this rare; running it off the loop makes it harmless.
         entry = "%s,%s" % (formatted_time, str(value))
         target = self.cbpi.log.datalogger[id]
+        # When the reading was taken, and after how many moves of CraftBeerPi's clock (LogController.LogStamp).
+        extra = {"clock_when": getattr(formatted_time, "when", None),
+                 "clock_moves": getattr(formatted_time, "moves", None)}
         try:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, target.info, entry)
+            await loop.run_in_executor(None, functools.partial(target.info, entry, extra=extra))
         except RuntimeError:
-            target.info(entry)
+            target.info(entry, extra=extra)
 
 
 def setup(cbpi):

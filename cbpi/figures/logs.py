@@ -30,7 +30,7 @@ SIMULATION_SUFFIX = "-simulation"
 LIVE = "now"
 
 _EMPTY = (np.zeros(0), np.zeros(0))
-_EMPTY_FILE = (np.zeros(0), np.zeros(0), np.zeros(0))
+_EMPTY_FILE = (np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0))
 
 
 def log_files(folder, name):
@@ -107,10 +107,11 @@ def _local_seconds(naive):
 
 
 def _parse(raw):
-    """(stamps, times, values) from one log file's bytes, in the order written: the stamps as written (seconds, read
-    as UTC), the times they mean, and the values, NaN for one that can't be read - its stamp still says something
-    about the clock. Rows whose time can't be read are left out, as are the NUL bytes a power cut leaves where the
-    file had grown but the data never reached the card."""
+    """(stamps, times, values, moves) from one log file's bytes, in the order written: the stamps as written (seconds,
+    read as UTC), the times they mean, the values, NaN for one that can't be read - its stamp still says something
+    about the clock - and, for a row saying CraftBeerPi's clock moved there (cbpi.api.logclock.MOVED), how far, NaN for
+    the others. Rows whose time can't be read are left out, as are the NUL bytes a power cut leaves where the file had
+    grown but the data never reached the card."""
     raw = raw.replace(b"\x00", b"")
     if not raw.strip():
         return _EMPTY_FILE
@@ -120,11 +121,15 @@ def _parse(raw):
         return _EMPTY_FILE
     stamps = pd.to_datetime(df["t"], format="ISO8601", errors="coerce")
     values = pd.to_numeric(df["v"], errors="coerce").to_numpy(dtype=float)
+    if logclock.MOVED_BYTES in raw:
+        moves = pd.to_numeric(df["v"].map(logclock.moved_by), errors="coerce").to_numpy(dtype=float)
+    else:
+        moves = np.full(len(values), np.nan)
     ok = (~stamps.isna()).to_numpy()
     if not ok.any():
         return _EMPTY_FILE
     naive = stamps[ok].dt.as_unit("ns").to_numpy().astype(np.int64) / 1e9
-    return naive, _local_seconds(naive), values[ok]
+    return naive, _local_seconds(naive), values[ok], moves[ok]
 
 
 def read_file(path, cache=None):
@@ -149,9 +154,10 @@ def read_file(path, cache=None):
 
 
 def read_series(folder, name, cache=None):
-    """Every reading of `name`'s logs in `folder`, sorted by time: (times, values) as numpy arrays. The rows a clock
-    that went back and was put right stamped are left out, judged in the order the files were written, as the charts
-    judge them; then the values that can't be read."""
+    """Every reading of `name`'s logs in `folder`, sorted by time: (times, values) as numpy arrays. Each on the clock
+    as it is now: moved by every move of CraftBeerPi's clock written after it (cbpi.api.logclock.moved_after), as
+    the charts read them. The rows a clock that went back and was put right stamped are left out, judged in the order
+    the files were written, as the charts judge them; then the values that can't be read."""
     parts = [read_file(path, cache) for path in log_files(folder, name)]
     parts = [p for p in parts if len(p[0])]
     if not parts:
@@ -159,6 +165,10 @@ def read_series(folder, name, cache=None):
     stamps = np.concatenate([p[0] for p in parts])
     t = np.concatenate([p[1] for p in parts])
     v = np.concatenate([p[2] for p in parts])
+    moves = np.concatenate([p[3] for p in parts])
+    if np.isfinite(moves).any():
+        t = t + logclock.moved_after(moves)
+        stamps = t
     keep = ~logclock.misstamped(stamps) & np.isfinite(v)
     t, v = t[keep], v[keep]
     order = np.argsort(t, kind="stable")

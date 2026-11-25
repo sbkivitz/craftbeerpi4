@@ -22,17 +22,17 @@ countdown with as long to go:
   clock_moved;
 - each running kettle logic with a clock_moved of its own. One without is
   stopped and started again, as AUTO off and on would
-  (KettleController.restart_after_clock_reset).
+  (KettleController.restart_after_clock_reset);
+- the sensor logs: each gets a row saying the clock moved, and whatever reads
+  them moves the rows before it by as much, so the graphs keep the readings
+  already taken, where they were in the brew, and carry on from them as one
+  line on the clock as it now is - LogController.clock_moved.
 
 BrewStart plans again from its settings, as START does, Today and Tomorrow
 counted from the clock as it now is (StepController.replan_after_clock_reset).
 
 A jump shorter than QUIET_S - a change of speed while the clock was where the
 computer's is, at 1x - moves those times, and starts nothing again.
-
-The sensor logs with rows stamped ahead of the clock as it now is are archived,
-as a simulator does at start-up with an earlier accelerated run's, so no graph
-goes back in time (LogController.archive_logs_ahead).
 
 Every screen is told at once, on the websocket: {"topic": "clock", "data":
 {"now", "scale", "was": {"now", "scale"}, "moved"}} - the clock's seconds now and
@@ -74,8 +74,9 @@ class ClockController:
     TITLE = "Clock"
     #: Seconds: a jump shorter than this starts no kettle logic, and no BrewStart, again.
     QUIET_S = 1.0
-    #: The controllers told clock_moved(seconds), when they have it: what they keep on now().
-    CONTROLLERS = ("step", "timers", "resttimer", "strike")
+    #: The controllers told clock_moved(seconds), when they have it: what they keep on now(). The sensor logs ("log")
+    #: are marked where the clock moved.
+    CONTROLLERS = ("step", "timers", "resttimer", "strike", "log")
 
     def __init__(self, cbpi):
         self.cbpi = cbpi
@@ -84,8 +85,7 @@ class ClockController:
     async def reset(self, rate):
         """Set the brewing clock back to the computer's date and time, running at
         `rate`, and everything that keeps a time on it with it (see the module's
-        notes). Returns what every screen was told, with "archived": the logs
-        archived (LogController.archive_logs_ahead) or None, and "restarted": the
+        notes). Returns what every screen was told, with "restarted": the
         kettles whose logic started again; or None, changing nothing, when `rate`
         is not a usable speed."""
         async with self._lock:
@@ -101,18 +101,13 @@ class ClockController:
                 restarted = await self._restart_logics(restart)
                 await self._replan()
             await self._save_steps()
-            # Readings stamped before the reset reach their log through two tasks: let them get there, so none
-            # lands in a log started afresh below.
-            for _ in range(3):
-                await asyncio.sleep(0)
-            archived = self._archive(reset_at)
             state = dict(now=clock.now(), scale=clock.scale(), was=was, moved=moved)
             try:
                 self.cbpi.ws.send(dict(topic=self.TOPIC, data=state))
             except Exception as e:  # noqa: BLE001 - a screen resyncs within its minute anyway
                 logger.warning("Could not tell the screens the clock was reset: %s", e)
-            self._tell(dict(state, now=reset_at), archived)
-            return dict(state, archived=archived, restarted=restarted)
+            self._tell(dict(state, now=reset_at))
+            return dict(state, restarted=restarted)
 
     def _move(self, moved):
         """Everything that keeps a time on now(), moved by `moved` seconds. No
@@ -170,24 +165,11 @@ class ClockController:
         except Exception as e:  # noqa: BLE001
             logger.warning("Could not save the brew steps' times after the clock was reset: %s", e)
 
-    def _archive(self, now):
-        archive = getattr(getattr(self.cbpi, "log", None), "archive_logs_ahead", None)
-        if not callable(archive):
-            return None
-        try:
-            return archive(now)
-        except Exception as e:  # noqa: BLE001 - never what stops the clock being reset
-            logger.warning("Could not archive the sensor logs written ahead of the clock: %s", e)
-            return None
-
-    def _tell(self, state, archived):
+    def _tell(self, state):
         message = "CraftBeerPi's clock is back to this computer's time, {}, now running {} (was {}).".format(
             clock_time(state["now"], self.cbpi), speed(state["scale"]), speed(state["was"]["scale"]))
-        if archived:
-            message += (" The sensor logs written ahead of it, up to {}, were archived so the graphs start again "
-                        "from now - zipped ({}) and moved to {}.".format(
-                            clock_time(archived["latest"], self.cbpi), ", ".join(archived["zips"]) or "no zip",
-                            archived["folder"]))
+        if abs(state["moved"]) >= self.QUIET_S:
+            message += " The graphs keep the readings so far, moved with the clock, and carry on from them."
         logger.info("%s The clock moved %+.1f s.", message, state["moved"])
         try:
             self.cbpi.notify(self.TITLE, message, NotificationType.INFO)
