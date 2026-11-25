@@ -1182,6 +1182,30 @@ class ConfigUpdate(CBPiExtension):
             except Exception:
                 logging.warning("Unable to update database")
 
+        # The liquid in each vessel on the brew-day screen's drawing (design/brewday LEVELS.md). Added when missing,
+        # as Yes; its description and choices are brought up to date with each version, the saved value kept.
+        levels_entry = self.cbpi.config.cache.get("BREWDAY_LEVELS")
+        levels_now = getattr(levels_entry, "value", None)
+        if levels_entry is None or CONFIG_STATUS is None or CONFIG_STATUS != self.version:
+            if levels_entry is None:
+                logging.info("INIT BREWDAY_LEVELS")
+            try:
+                await self.cbpi.config.add(
+                    "BREWDAY_LEVELS",
+                    levels_now if levels_now in ("Yes", "No") else "Yes",
+                    type=ConfigType.SELECT,
+                    description="Brew-day screen: show the liquid in each vessel, a faint tint in the drawing worked "
+                                "out from the recipe and its steps, or a volume typed into BrewScribe, marked READ. "
+                                "No draws nothing for it and doesn't ask BrewScribe for the volumes. (default: Yes)",
+                    source="craftbeerpi",
+                    options=[
+                        {"label": "Yes", "value": "Yes"},
+                        {"label": "No", "value": "No"},
+                    ],
+                )
+            except Exception:
+                logging.warning("Unable to update database")
+
         if ActorInterlock is None:
             logging.info("INIT ACTOR_INTERLOCK_GROUPS")
             try:
