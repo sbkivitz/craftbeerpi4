@@ -840,12 +840,14 @@ class UploadController:
 
                 # if mashin_temp is not available, create a mashin step with the temp of the first mash step if addmashin is set to yes
                 step_temp_old = 0
+                first_rest = True
                 for row in c.execute(
                     "SELECT Name, TempRast, DauerRast FROM Maischplan WHERE Typ <> 0 AND SudID = ?",
                     (Recipe_ID,),
                 ):
                     step_temp = (float(row[1]))
-                    if mashin_temp is None and self.addmashin == "Yes":
+                    # Only before the first rest: a later rest is never a mash-in.
+                    if first_rest and mashin_temp is None and self.addmashin == "Yes":
                         step_type = self.mashin if self.mashin != "" else "MashInStep"
                         step_string = {
                             "name": "MashIn",
@@ -866,7 +868,8 @@ class UploadController:
                             "type": step_type,
                         }
                         await self.create_step(step_string)
-                    
+                    first_rest = False
+
                     try:
                         if float(step_temp) < float(step_temp_old):
                             step_string = {
@@ -1929,7 +1932,7 @@ class UploadController:
                         "status": "I",
                         "type": self.mashout,
                     }
-                await self.create_step(step_string)
+                    await self.create_step(step_string)
 
                 # Boil step including hop alarms and alarm for first wort hops -> Automode is set tu yes
                 Hops, Whirlpool = self.getBoilAlerts(hops, miscs, "bf")
