@@ -5,8 +5,9 @@ StrikeController starts it with `python -m cbpi.strike.worker` and talks to it i
 its stdin, answers on its stdout. Each message is an object with a "kind" and an "id":
 
 - "plan": work USE out for a job (job_from), then send what it has in parts, each {"id", "part", ...}:
-  "use" (USE, the cases the planner found, and a forecast without a search of its own for each strike asked for and
-  for USE), "searched" (the same forecasts with their own searches), "levers" (how far USE would rise with each
+  "use" (USE, the cases the planner found, a forecast without a search of its own for each strike asked for and
+  for USE, and level_f, the strike that lands the mash on the rest in the central case: the check's), "searched"
+  (the same forecasts with their own searches), "levers" (how far USE would rise with each
   number known, and USE with all of them known), then "done". A part that fails is sent with "error" instead; one
   that fails at "use" ends the job.
 - "forecast": one forecast without a search, for the cases given, answered at once as {"id", "forecast"}, even in
@@ -111,7 +112,8 @@ def _number(x):
 
 def forecast_out(fc, roles):
     return {"strike_f": fc.strike_f, "for": list(roles), "searched": fc.searched, "low_f": fc.low_f,
-            "high_f": fc.high_f, "highest_f": fc.highest_f, "reads_f": _number(fc.reads_f), "sims": fc.sims}
+            "high_f": fc.high_f, "highest_f": fc.highest_f, "reads_f": _number(fc.reads_f), "sims": fc.sims,
+            "central_f": None if fc.central_f is None else _number(fc.central_f)}
 
 
 def landing_curves(record, tick=None, tun=None):
@@ -268,9 +270,18 @@ class Worker:
             except Exception as e:  # noqa: BLE001
                 self.send({"id": ident, "part": "use", "error": _said(e)})
                 return
+        # The check's own strike: the one that lands the mash on the rest with every number at its central guess.
+        level_f = None
+        try:
+            level = model.level_strike(brew, rig, box, dt=dt, grid=grid, tick=self.tick)
+            level_f, sims = level["strike_f"], sims + level["sims"]
+        except Superseded:
+            raise
+        except Exception:  # noqa: BLE001 - USE stands without it; the check offers none
+            level_f = None
         self.send({"id": ident, "part": "use", "use_f": use_f, "use_exact_f": planned.use_exact_f,
                    "far": too_far, "sims": sims, "found": found, "cautious": planned.cautious,
-                   "cases": cases, "forecasts": forecasts})
+                   "cases": cases, "forecasts": forecasts, "level_f": level_f})
         if too_far:
             self.send({"id": ident, "part": "done"})
             return

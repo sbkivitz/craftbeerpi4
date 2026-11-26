@@ -18,10 +18,12 @@ THE FLOW, as the steps and PID_HERMS run it (t = 0: the strike water is in the t
   2. The HLT pump sends the strike water through the coil to the tun, whose steel is at the room's temperature,
      losing a little on the way. The sparge water stays in the HLT at the strike temperature.
   3. MashIn on the Mash Tun starts PID_HERMS with the tun marked as water only, so its outer loop's band is
-     MashIn_DeltaTemp, and the wort pump runs once the HLT is within MashIn_Pump_Within of the target. Once the mash
-     probe reads within CraftBeerPi's "target reached" tolerance of the rest, MashIn's one-second timer asks for the
-     malt: the tun is marked as holding grain, so the band drops to DeltaTemp, and the wort pump is held
-     (Stop_Pump_At_Strike), which also holds the HLT's setpoint at the rest.
+     MashIn_DeltaTemp, and the wort pump runs once the HLT is within MashIn_Pump_Within of the target. Its target is
+     its pre-heat (mashin_target_f): the rest, or for a strike that already paid to warm the tun's steel (BeerSmith's),
+     where that strike water settles once it has warmed that steel. Once the mash probe reads within CraftBeerPi's
+     "target reached" tolerance of it, MashIn's one-second timer asks for the malt: the target drops to the rest, the
+     tun is marked as holding grain, so the band drops to DeltaTemp, and the wort pump is held (Stop_Pump_At_Strike),
+     which also holds the HLT's setpoint at the rest.
   4. The grain goes in, never before the ask, and some minutes later the brewer presses Next.
   5. Next stops PID_HERMS and the next step starts a new one, which carries the old one's integral if it is young
      enough (INTEGRAL_CARRY_MAX_AGE) and runs the wort pump without rests. The HLT, still hotter than the mash, feeds
@@ -338,7 +340,11 @@ class Brew:
     a recipe without one, which leaves the tun's steel out and can only make USE cooler. hlt_total_gal: all the water
     in the HLT before the strike water moves. garage_f: the room, which both vessels lose heat to and the empty tun
     sits at. grain_given_f: the grain's temperature when given, else None and the grain is at the room's. probe:
-    where the mash probe sits, "coil" (the coil's outlet) or "tun" (the tun's)."""
+    where the mash probe sits, "coil" (the coil's outlet) or "tun" (the tun's). steel_counted_kg, steel_from_f: the
+    dough-in MashIn's pre-heat (cbpi.api.strike.dough_in_temperature): the tun's steel its strike already paid to
+    warm, as kg of water, and the temperature that steel started at (None: the room's); MashIn heats the moved water
+    to where the strike water settles once it has warmed that steel (mashin_target_f) and asks for the malt there.
+    None: MashIn heats to the rest and asks there."""
     grain_kg: float
     strike_gal: float
     rest_f: float
@@ -348,6 +354,8 @@ class Brew:
     garage_f: float
     grain_given_f: float = None
     probe: str = "coil"
+    steel_counted_kg: float = None
+    steel_from_f: float = None
 
     def __post_init__(self):
         if not usable_f(self.garage_f):
@@ -368,6 +376,12 @@ class Brew:
         if not self.hlt_total_gal >= self.strike_gal:
             raise ValueError("the HLT holds %.2f gal, less than the %.2f gal of strike water"
                              % (self.hlt_total_gal, self.strike_gal))
+        if self.steel_counted_kg is not None:
+            if not (math.isfinite(self.steel_counted_kg) and self.steel_counted_kg >= 0):
+                raise ValueError("steel_counted_kg can't be under 0")
+            if self.steel_from_f is not None and not (isinstance(self.steel_from_f, (int, float))
+                                                      and math.isfinite(self.steel_from_f)):
+                raise ValueError("steel_from_f must be a number, or None for the room's")
 
     @property
     def hlt_left_gal(self):
@@ -376,6 +390,21 @@ class Brew:
     @property
     def grain_f(self):
         return self.garage_f if self.grain_given_f is None else self.grain_given_f
+
+
+def mashin_target_f(brew, strike_f):
+    """What the dough-in MashIn heats the moved water to before it asks for the malt, F: the rest without a pre-heat
+    (steel_counted_kg None); else where strike water at strike_f settles once it has warmed the steel its strike paid
+    for, (W S + Cs Tt) / (W + Cs), W the strike water's kg, never under the rest, at most MAX_STRIKE_RISE_F over it and
+    never over MAX_STRIKE_F - cbpi.api.strike.dough_in_temperature's figure, before its rounding to 0.1."""
+    rest = brew.rest_f
+    steel = brew.steel_counted_kg
+    if steel is None:
+        return rest
+    water = brew.strike_gal * L_PER_GAL
+    start = brew.garage_f if brew.steel_from_f is None else brew.steel_from_f
+    settled = (water * strike_f + steel * start) / (water + steel)
+    return max(rest, min(settled, rest + MAX_STRIKE_RISE_F, MAX_STRIKE_F))
 
 
 def ranges(brew, plant):
@@ -502,6 +531,12 @@ class Run:
     ledger: dict
 
 
+class NeverAsked(RuntimeError):
+    """A replay in which MashIn never asks for the malt: its probe never reaches its target (its pre-heat, a strike
+    the HERMS can't bring the moved water up to) in four hours. The planner takes such a strike as unusable in that
+    case; a forecast leaves the case out."""
+
+
 def simulate(brew, strike_f, params, rig, dt=STEP_S, losses=True, controller=True):
     """One dough-in at strike_f with one set of the numbers not measured yet (params: a value for each name in the
     box).
@@ -519,6 +554,8 @@ def simulate(brew, strike_f, params, rig, dt=STEP_S, losses=True, controller=Tru
     if sample % dt:
         raise ValueError("the step must divide PID_HERMS's SampleTime")
     rest = brew.rest_f
+    # MashIn's target until it asks for the malt (its pre-heat), then the rest.
+    goal = mashin_target_f(brew, strike_f)
     garage = c_of(brew.garage_f)
     tolerance = herms.tolerance_f
 
@@ -618,14 +655,15 @@ def simulate(brew, strike_f, params, rig, dt=STEP_S, losses=True, controller=Tru
         if end_at is not None and t >= end_at:
             break
         if ask_at is None and t > limit:
-            raise RuntimeError("MashIn never asked for the malt at %.1f F: the probe never reached %.1f F"
-                               % (strike_f, rest - tolerance))
+            raise NeverAsked("MashIn never asked for the malt at %.1f F: the probe never reached %.1f F"
+                             % (strike_f, goal - tolerance))
 
         # --- PID_HERMS: the pump every second, the cascade every SampleTime ---
-        pumping = logic.pump_wanted(hlt_reading, rest)
+        target = rest if ask_at is not None and t >= ask_at else goal
+        pumping = logic.pump_wanted(hlt_reading, target)
         if (t - logic_start) % sample == 0:
             if controller:
-                heat, _ = logic.decide(mash_reading, hlt_reading, rest, pumping)
+                heat, _ = logic.decide(mash_reading, hlt_reading, target, pumping)
             else:
                 heat = 0.0
         watts = measured.watts * max(0.0, heat) / 100.0
@@ -653,8 +691,8 @@ def simulate(brew, strike_f, params, rig, dt=STEP_S, losses=True, controller=Tru
         hlt_reading += (f_of(hlt) - hlt_reading) * lag_hlt
         t += dt
 
-        # --- MashInStep.run: arrival, then its one-second timer ---
-        if reached_at is None and mash_reading >= rest - tolerance:
+        # --- MashInStep.run: arrival at its pre-heat, then its one-second timer ---
+        if reached_at is None and mash_reading >= goal - tolerance:
             reached_at = t
             ask_at = int(math.ceil((t + 1.0) / dt)) * dt
 
@@ -717,11 +755,17 @@ class Judge:
         self.seen = {}
         self.sims = 0
 
-    def _simulate(self, strike_f, params):
+    def _simulate(self, strike_f, params, never=False):
+        """One replay; with `never`, None where MashIn never asks for the malt (NeverAsked)."""
         if self.tick is not None:
             self.tick()
         self.sims += 1
-        return simulate(self.brew, strike_f, params, self.rig, dt=self.dt)
+        try:
+            return simulate(self.brew, strike_f, params, self.rig, dt=self.dt)
+        except NeverAsked:
+            if never:
+                return None
+            raise
 
     def allowance(self, params):
         """How far this case goes over the planner's aim with the water at the rest; 0 by the rule "rest"."""
@@ -737,8 +781,9 @@ class Judge:
         """(the run, its score: its peak less its allowance). A case already run at this strike isn't run again."""
         key = (strike_f, tuple(sorted(params.items())))
         if key not in self.seen:
-            run = self._simulate(strike_f, params)
-            self.seen[key] = (run, run.peak_f - self.allowance(params))
+            # A strike at which MashIn never asks for the malt in this case is past any line: (None, inf).
+            run = self._simulate(strike_f, params, never=True)
+            self.seen[key] = (run, math.inf if run is None else run.peak_f - self.allowance(params))
         return self.seen[key]
 
     def passes(self, strike_f, params):
@@ -869,7 +914,7 @@ def plan(brew, rig, box=None, rule="no worse", dt=STEP_S, grid=Grid(), tick=None
         worst, run = cautious_case(brew, at, box, judge, starts=found)
         if use is None:
             break
-        if not over_line(run.peak_f - judge.allowance(worst), aim):
+        if run is not None and not over_line(run.peak_f - judge.allowance(worst), aim):
             confirmed = True
             break
         found.append(worst)
@@ -912,7 +957,8 @@ class Forecast:
     """The mash at one strike across the cases. low_f, high_f: its lowest and highest at each minute from the grain
     going in, 0 to 60, minute 0 where it lands. highest_f: the highest any case reaches from the grain going in to an
     hour after Next. reads_f: the Mash Tun probe's highest reading from the ask for the malt to Next. searched: the
-    cases include this strike's own worst, searched for."""
+    cases include this strike's own worst, searched for. central_f: where the mash lands in the case named
+    "central" (every number at its central guess), None without one."""
     strike_f: float
     low_f: list
     high_f: list
@@ -920,21 +966,68 @@ class Forecast:
     reads_f: float
     searched: bool
     sims: int
+    central_f: float = None
 
 
 def forecast(brew, strike_f, rig, cases, dt=STEP_S, searched=False, tick=None):
     """The mash at strike_f across `cases` ({name: params}), each replayed once."""
     runs = []
-    for params in cases.values():
+    central_f = None
+    for name, params in cases.items():
         if tick is not None:
             tick()
-        runs.append(simulate(brew, strike_f, params, rig, dt=dt))
+        try:
+            run = simulate(brew, strike_f, params, rig, dt=dt)
+        except NeverAsked:
+            # MashIn would wait for its pre-heat for ever in this case: no landing to show for it.
+            continue
+        runs.append(run)
+        if name == "central":
+            central_f = run.landing_f
+    if not runs:
+        raise NeverAsked("MashIn never asks for the malt at %.1f F in any case" % strike_f)
     return Forecast(strike_f=strike_f,
                     low_f=[min(run.tun_minutes[m] for run in runs) for m in range(61)],
                     high_f=[max(run.tun_minutes[m] for run in runs) for m in range(61)],
                     highest_f=max(run.peak_f for run in runs),
                     reads_f=max(run.probe_doughin_max_f for run in runs),
-                    searched=searched, sims=len(runs))
+                    searched=searched, sims=len(runs), central_f=central_f)
+
+
+def level_strike(brew, rig, box, dt=STEP_S, grid=Grid(), tick=None, resolution_f=0.01):
+    """The strike that lands the mash on the rest with every number at its central guess, to the nearest step of
+    `grid`, F, within MashInStep's limits: the rest where even the rest lands it over, the top of the limits where
+    even that lands it under. ({"strike_f", "sims"})."""
+    params = central(box)
+    top = min(brew.rest_f + MAX_STRIKE_RISE_F, MAX_STRIKE_F)
+    sims = [0]
+
+    def lands(strike):
+        if tick is not None:
+            tick()
+        sims[0] += 1
+        try:
+            return simulate(brew, strike, params, rig, dt=dt).landing_f
+        except NeverAsked:
+            # MashIn never asks for the malt at this strike: no landing to aim with, so it counts as too hot.
+            return math.inf
+
+    lo, hi = brew.rest_f, top
+    if lands(lo) >= brew.rest_f:
+        return {"strike_f": lo, "sims": sims[0]}
+    if lands(hi) <= brew.rest_f:
+        return {"strike_f": hi, "sims": sims[0]}
+    while hi - lo > resolution_f:
+        mid = (lo + hi) / 2.0
+        if lands(mid) < brew.rest_f:
+            lo = mid
+        else:
+            hi = mid
+    exact = (lo + hi) / 2.0
+    down = grid.down(exact)
+    up = grid.up(down)
+    nearest = up if abs(up - exact) < abs(exact - down) else down
+    return {"strike_f": max(brew.rest_f, min(top, nearest)), "sims": sims[0]}
 
 
 def searched_forecast(brew, strike_f, rig, box, found, cases, dt=STEP_S, tick=None):
@@ -981,9 +1074,10 @@ def energy_in_closed_form(brew, strike_f, params, rig):
 
 
 __all__ = [
-    "Brew", "Flow", "Forecast", "Grid", "Herms", "Hlt", "Plan", "Plant", "Ranged", "Rig", "Run", "BOX_ORDER",
+    "Brew", "Flow", "Forecast", "Grid", "Herms", "Hlt", "NeverAsked", "Plan", "Plant", "Ranged", "Rig", "Run",
+    "BOX_ORDER",
     "SCREEN_ORDER", "STEP_S", "WOBBLE_F", "SEARCH_MARGIN_F", "MAX_STRIKE_RISE_F", "MAX_STRIKE_C", "MAX_STRIKE_F",
-    "READING_RANGE_F", "c_of", "f_of", "step_for", "beyond_limits",
+    "READING_RANGE_F", "c_of", "f_of", "step_for", "beyond_limits", "mashin_target_f", "level_strike",
     "default_guesses", "ranges", "central", "hot_corner", "long_hold_corner", "cold_corner", "known", "simulate",
     "plan", "quick_cases", "forecast", "searched_forecast", "levers", "usable_f", "energy_in_closed_form",
 ]

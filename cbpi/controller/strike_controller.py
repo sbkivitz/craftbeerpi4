@@ -47,6 +47,8 @@ import yaml
 from cbpi.api import clock, readings
 from cbpi.api.persist import atomic_write_json
 from cbpi.api.step import StepState
+from cbpi.api.strike import (BEERSMITH_MALT_HEAT, beersmith_strike, dough_in_limits, dough_in_temperature,
+                             steel_counted)
 from cbpi.controller.step_controller import StepController
 from cbpi.extension.hltpump import kettle_roles
 from cbpi.strike import landings, model, vessels
@@ -348,6 +350,12 @@ class StrikeController:
     FIT_RETRY_S = 600.0
     #: Real seconds a fit may take before it is set going again.
     FIT_TIMEOUT_S = 3600.0
+    #: The strikes the brew day keeps, each {"value", "unit"}: the last figure USE wrote (checked, for the strike's
+    #: "check"), a strike set once the water has moved (after, which moves only MashIn's pre-heat), and by hand the
+    #: HLT's target last seen before the move (hand).
+    DAY_STRIKES = ("checked", "after", "hand")
+    #: How far the check's landing may be from the rest before it says so (state check.note), by unit.
+    CHECK_WITHIN = {"F": 1.0, "C": 0.5}
     #: Why no landing was kept as the malt went in, as the log says it.
     NOT_LANDED = {"no_answer": "the box had no forecast for the strike water in force",
                   "no_strike": "the strike water in force isn't known"}
@@ -355,7 +363,8 @@ class StrikeController:
     def __init__(self, cbpi, watch=True):
         self.cbpi = cbpi
         self.watch = watch
-        self.day = {"steps": None, "vol": None, "grain": None, "room": None, "was": None, "used": None, "landed": None}
+        self.day = {"steps": None, "vol": None, "grain": None, "room": None, "was": None, "used": None, "landed": None,
+                    "checked": None, "after": None, "hand": None}
         self.answer = None
         self.job = None
         self.failed = None
@@ -427,7 +436,7 @@ class StrikeController:
         if not isinstance(data, dict) or not _id_list(data.get("steps")):
             return
         self.day = {"steps": data["steps"]}
-        for key in ("vol", "grain", "room", "was"):
+        for key in ("vol", "grain", "room", "was") + self.DAY_STRIKES:
             value = data.get(key)
             self.day[key] = value if isinstance(value, dict) and _number(value.get("value")) is not None else None
         used = data.get("used")
@@ -654,6 +663,110 @@ class StrikeController:
         except Exception:  # noqa: BLE001
             return None
 
+    def _day_figure(self, key, look, kind="temp"):
+        """A figure the brew day keeps ({"value", "unit"}) for these steps, in the brewery's unit, to 0.1, or None."""
+        kept = self.day.get(key) if self.day.get("steps") == look.ids else None
+        if not isinstance(kept, dict):
+            return None
+        value = self._to_unit(_number(kept.get("value")), kept.get("unit"), look.unit, kind)
+        return None if value is None else round(value, 1)
+
+    @staticmethod
+    def _waiting_for_malt(mi):
+        """Whether the dough-in MashIn `mi` has asked for the malt: it waits for it, or is done."""
+        if mi is None:
+            return False
+        if mi.status == StepState.DONE:
+            return True
+        instance = getattr(mi, "instance", None)
+        key = getattr(type(instance), "WAITING_FOR_MALT_PROP", None) or "_waiting_for_malt"
+        return bool(_prop(mi, key)) or bool(getattr(instance, "_waiting_for_malt", False))
+
+    def _strike_value(self, L):
+        """The strike in use, in the brewery's unit: the strike water step's figure (BrewStart's Ready_Temp, or a
+        MashIn on the HLT's Temp), or by hand the HLT's target for the day; once the water has moved, a strike set
+        since (the day's "after"), and by hand the HLT's target last seen before the move (the day's "hand"), as
+        PID_HERMS has the HLT's target by then. None while the helper is off for any reason but the malt in."""
+        if L.off is not None and L.off != "malt_in":
+            return None
+        moved = L.phase == "moved" or L.off == "malt_in"
+        if moved:
+            after = self._day_figure("after", L)
+            if after is not None:
+                return after
+        if L.si is not None:
+            return L.inputs["planned"]
+        if moved:
+            hand = self._day_figure("hand", L)
+            if hand is not None:
+                return hand
+        return L.inputs["planned"]
+
+    def _strike_found(self, L, numbers, rest, room, mt_figure, typed_figures, infuse_l, grain_kg):
+        """(the state's strike, the steel the model's dough-in MashIn counts: (kg of water or None, its temperature
+        in the brewery's unit or None for the room's)).
+
+        strike: {"value", "from", "beersmith", "stale", "mashin", "asked", "stall", "range", "balance"}. from is
+        "beersmith" (BeerSmith's figure, to 0.1), "rest" (no BeerSmith figure, and the first rest), "check" (what USE
+        wrote, still there) or "yours". mashin, the dough-in MashIn's pre-heat for it (dough_in_temperature): with
+        BeerSmith's strike, BeerSmith's strike water settled after warming the steel BeerSmith counted; without it,
+        the strike less the Hardware page's whole mash tun at the room's temperature, only where that is over the
+        rest; None where MashIn heats to its own Temp (or its Grain_Sensor strike)."""
+        unit = L.unit
+        value = self._strike_value(L)
+        bs = beersmith_strike(numbers, unit) if numbers else None
+        checked = self._day_figure("checked", L)
+        if value is None:
+            source = None
+        elif bs is not None and abs(value - bs) < 0.05:
+            source = "beersmith"
+        elif bs is None and rest is not None and abs(value - rest) < 0.05:
+            source = "rest"
+        elif checked is not None and abs(value - checked) < 0.05:
+            source = "check"
+        else:
+            source = "yours"
+        mi = L.mi
+        water_l = infuse_l
+        if water_l is None and mi is not None:
+            own = _number(_prop(mi, "Mash_Water"))
+            water_l = own if own is not None and own > 0 else None
+        has_bs = numbers is not None and _number(numbers.get("infuse_temp_c")) is not None
+        whole = None if mt_figure is None else mt_figure["kg"] * mt_figure["specific_heat"]
+        if has_bs:
+            counted = steel_counted(numbers)
+            tun_t = _number(numbers.get("tun_temp_c"))
+            if counted is not None and counted > 0 and tun_t is None:
+                counted = None
+            steel = (counted, None if tun_t is None else (model.f_of(tun_t) if unit == "F" else tun_t))
+        else:
+            steel = (whole, None)
+        mashin = None
+        if value is not None and mi is not None and rest is not None:
+            tun = None if has_bs or whole is None or room is None else (whole, room)
+            mashin = dough_in_temperature(value, numbers, unit, rest, water_l=water_l, tun=tun)
+            if mashin is not None and not has_bs and mashin < rest + 0.05:
+                # Without BeerSmith's figures nothing over the rest: MashIn heats to its own Temp, as before.
+                mashin = None
+        limits = dough_in_limits(rest, unit)
+        asked = self._waiting_for_malt(mi)
+        stall = None
+        instance = getattr(mi, "instance", None) if mi is not None else None
+        found = getattr(instance, "preheat_stall", None)
+        if isinstance(found, dict) and not asked and mi.status == StepState.ACTIVE:
+            stall = dict(short=round(float(found.get("short", 0.0)), 1), min=int(found.get("min", 0)))
+        grain_heat = None if grain_kg is None else round(BEERSMITH_MALT_HEAT * grain_kg, 3)
+        tun_shown = steel[1] if has_bs else room
+        balance = dict(water=None if water_l is None else round(water_l, 3),
+                       steel=None if steel[0] is None else round(steel[0], 3),
+                       tun=None if tun_shown is None else round(tun_shown, 1), grain=grain_heat,
+                       rest=rest, top=None if limits is None else round(limits[1], 1))
+        shown = dict(value=value, **{"from": source}, beersmith=bs,
+                     stale=source == "beersmith" and bool({"water", "grain"} & set(typed_figures)),
+                     mashin=mashin, asked=asked, stall=stall,
+                     range=None if limits is None else [round(limits[0], 1), round(limits[1], 1)], balance=balance)
+        return shown, steel
+
     def _look(self):
         """Everything worked out from what CraftBeerPi holds now, for the state, the decisions and the commands."""
         cbpi = self.cbpi
@@ -838,6 +951,9 @@ class StrikeController:
             # Less HLT water than the mash water: said in place of hlt_low, which it also is.
             L.warnings = ["hlt_under"]
 
+        # The strike in use, where it came from, and what the dough-in MashIn heats the moved water to for it.
+        L.strike, L.steel = self._strike_found(L, numbers, rest, room, mt_figure, typed_figures, infuse_l, grain_kg)
+
         L.rig = dict(through_coil=setup["through_coil"], still_probe=setup["still_probe"])
         L.guesses = None
         if L.miss is None and L.off is None:
@@ -847,6 +963,8 @@ class StrikeController:
                         hlt_total_gal=max(gal(vol), infuse_l / model.L_PER_GAL),
                         tun_kg=L.tun_now[0] if L.tun_now else 0.0,
                         tun_cal_g_c=L.tun_now[1] if L.tun_now else 0.0,
+                        steel_counted_kg=L.steel[0],
+                        steel_from_f=None if L.steel[1] is None else to_f(L.steel[1]),
                         garage_f=to_f(room), grain_given_f=None if typed is None else to_f(typed),
                         probe=setup["probe"])
             flow = dict(stop_pump_at_strike=str(_prop(L.mi, "Stop_Pump_At_Strike") or "Yes") != "No",
@@ -956,6 +1074,12 @@ class StrikeController:
             # By hand the strike water in force is the HLT's target, which PID_HERMS has taken over by the time the
             # malt is in: the last one seen before then stands for it.
             self._planned_seen = (list(look.ids), look.inputs["planned"])
+            if look.by == "hand" and look.phase != "moved":
+                # Kept with the brew day too, for the strike in use and MashIn's pre-heat after the move.
+                hand = {"value": look.inputs["planned"], "unit": look.unit}
+                if self.day.get("hand") != hand:
+                    self.day["hand"] = hand
+                    self._save_day()
         if look.off is not None or look.miss is not None:
             self._stop_job()
         else:
@@ -986,7 +1110,7 @@ class StrikeController:
     def _new_day(self, ids):
         self._stop_job()
         self.day = {"steps": list(ids), "vol": None, "grain": None, "room": None, "was": None, "used": None,
-                    "landed": None}
+                    "landed": None, "checked": None, "after": None, "hand": None}
         self.answer = None
         self.failed = None
         self._save_day()
@@ -1019,13 +1143,15 @@ class StrikeController:
         self.client.send({"kind": "plan", "id": self._ids, "job": job})
 
     def _strikes(self, look):
-        """The strikes the screen shows besides USE, each once, in F: the one planned, BACK TO's, the rest and
-        BeerSmith's."""
+        """The strikes the screen shows besides USE, each once, in F: the one planned, BACK TO's, the rest,
+        BeerSmith's and the strike in use where it isn't the one planned (set after the move)."""
         to_f = (lambda t: t) if look.unit == "F" else model.f_of
         rest = look.inputs["rest"]
         wanted = []
+        in_use = (look.strike or {}).get("value")
         for role, temp in (("planned", look.inputs["planned"]), ("back", self._back_to(look)), ("rest", rest),
-                           ("beersmith", (look.recipe.get("beersmith") or {}).get("strike") if look.recipe else None)):
+                           ("beersmith", (look.recipe.get("beersmith") or {}).get("strike") if look.recipe else None),
+                           ("strike", in_use if in_use != look.inputs["planned"] else None)):
             if temp is None:
                 continue
             same = next((w for w in wanted if abs(w["shown"] - round(temp, 1)) < 1e-6), None)
@@ -1129,10 +1255,12 @@ class StrikeController:
         for fc in message.get("forecasts") or []:
             forecasts[self._key(unit, fc["strike_f"])] = self._forecast_shown(unit, fc)
         took = clock.monotonic() - job["started"]
+        level_f = message.get("level_f")
+        level = None if level_f is None else round(level_f if unit == "F" else model.c_of(level_f), 1)
         self.answer = dict(plan=job["plan"], at=round(clock.now(), 3), took=round(max(0.0, took), 1),
                            runs=int(message.get("sims") or 0), rule=self.RULE, numbers=job["numbers"], use=use,
                            use_f=use_f, far=too_far, rest_peak=None, forecasts=forecasts, levers=None,
-                           levers_status="far" if too_far else "working", unit=unit, _job=job["job"],
+                           levers_status="far" if too_far else "working", unit=unit, level=level, _job=job["job"],
                            _cases=message.get("cases") or {})
         self._fill_rest_peak()
         if job["quiet"]:
@@ -1158,7 +1286,7 @@ class StrikeController:
 
         return dict(strike=temp(fc["strike_f"], 1), searched=bool(fc.get("searched")), peak=temp(fc["highest_f"]),
                     reads=temp(fc.get("reads_f")), lo=[temp(x) for x in fc["low_f"]],
-                    hi=[temp(x) for x in fc["high_f"]])
+                    hi=[temp(x) for x in fc["high_f"]], lands=temp(fc.get("central_f")))
 
     @staticmethod
     def _levers_shown(unit, message):
@@ -1226,6 +1354,25 @@ class StrikeController:
             return "far"
         return None
 
+    def strike_in_use(self):
+        """The strike in use and where it came from: {"value", "from"}, as the state's strike has them."""
+        look = self._look()
+        return {"value": look.strike["value"], "from": look.strike["from"]}
+
+    def preheat_for(self, step_id):
+        """For MashInStep: what the dough-in MashIn `step_id` heats the moved strike water to before it asks for the
+        malt - dough_in_temperature for the strike in use, within MashInStep's limits - or None where it heats to its
+        own Temp (or its Grain_Sensor strike) as before: another MashIn than the recipe's dough-in on the mash tun,
+        figures that give none, or the strike water helper off. Never raises."""
+        try:
+            look = self._look()
+        except Exception as e:  # noqa: BLE001 - MashIn heats as before
+            logger.warning("Strike water: no pre-heat for MashIn: %s", e)
+            return None
+        if look.off is not None or look.mi is None or look.mi.id != step_id:
+            return None
+        return look.strike["mashin"]
+
     def get_state(self, look=None):
         look = look or self._look()
         unit = look.unit
@@ -1251,8 +1398,27 @@ class StrikeController:
             miss=miss, misses=list(look.misses) or ([miss] if miss else []), warnings=list(look.warnings),
             was=was, working=working,
             failed=None if self.failed is None else dict(at=self.failed["at"], detail=self.failed["detail"]),
-            answer=self._answer_shown(look, was))
+            answer=self._answer_shown(look, was), strike=dict(look.strike), check=self._check_shown(look))
         return state
+
+    def _check_shown(self, look):
+        """CraftBeerPi's forecast as a check on the strike in use: {"landing": where the mash lands in the central
+        case, to 0.1, or None while that forecast comes, "note": whether that is more than `within` off the rest,
+        "within", "use": the strike that lands it on the rest (the answer's level), only with the note and before
+        the water moves}; None without an answer in the brewery's unit or a strike in use. It never blocks
+        anything: START, NEXT and every command take no notice of it."""
+        answer = self.answer
+        value = (look.strike or {}).get("value")
+        if answer is None or answer.get("unit") != look.unit or value is None:
+            return None
+        within = self.CHECK_WITHIN[look.unit]
+        fc = answer["forecasts"].get("%.1f" % value)
+        landing = None if fc is None or fc.get("lands") is None else round(fc["lands"], 1)
+        rest = look.inputs["rest"]
+        note = landing is not None and rest is not None and abs(landing - rest) > within + 1e-9
+        level = answer.get("level")
+        use = level if note and look.phase != "moved" and level is not None and abs(level - value) >= 0.05 else None
+        return dict(landing=landing, note=note, within=within, use=use)
 
     def _answer_shown(self, look, was):
         answer = self.answer
@@ -1261,8 +1427,9 @@ class StrikeController:
         rest, planned = look.inputs["rest"], look.inputs["planned"]
         back = was if was is not None else rest
         bs = (look.recipe or {}).get("beersmith") or {}
+        in_use = (look.strike or {}).get("value")
         roles = (("planned", planned), ("use", answer["use"]), ("back", back), ("rest", rest),
-                 ("beersmith", bs.get("strike")))
+                 ("beersmith", bs.get("strike")), ("strike", in_use if in_use != planned else None))
         forecasts = []
         for key in sorted(answer["forecasts"], key=float):
             fc = answer["forecasts"][key]
@@ -1307,15 +1474,24 @@ class StrikeController:
                     numbers={k: v for k, v in answer["numbers"].items() if k != "key"} if answer else None)
 
     async def strike(self, body):
-        """USE or BACK TO (POST /step2/strike). Returns {"applied", "strike"}; raises StrikeRefused."""
+        """The strike in use (POST /step2/strike): USE or BACK TO, or the brewer's own strike (set) and BeerSmith's
+        again (beersmith). Returns {"applied", "strike"}; raises StrikeRefused.
+
+        USE takes the old box's USE (any figure from the rest to it) or the check's (check.use, the strike that lands
+        the mash on the rest in the central case), and is tagged "check" while it holds. set and beersmith write as
+        USE does before the water moves; once it has moved they are kept for the brew day, and only the dough-in
+        MashIn's pre-heat moves (set_preheat). From the ask for the malt on they are refused, 409 asked."""
         if not isinstance(body, dict):
             raise StrikeRefused(400, "bad_body", detail="Send a JSON object: {\"do\", \"temp\", \"steps\"}.")
         do, temp, steps = body.get("do"), _number(body.get("temp")), body.get("steps")
-        if do not in ("use", "back") or temp is None or not _id_list(steps) \
-                or (do == "use" and not isinstance(body.get("plan"), str)):
-            raise StrikeRefused(400, "bad_body", detail="do must be use or back, temp a number, steps the recipe's "
-                                                        "step ids, and for USE plan its plan id.")
+        if do not in ("use", "back", "set", "beersmith") or (temp is None and do != "beersmith") \
+                or not _id_list(steps) or (do == "use" and not isinstance(body.get("plan"), str)):
+            raise StrikeRefused(400, "bad_body", detail="do must be use, back, set or beersmith, temp a number (but "
+                                                        "for beersmith), steps the recipe's step ids, and for USE "
+                                                        "plan its plan id.")
         look = self.update()
+        if do in ("set", "beersmith"):
+            return await self._set_strike(look, do, temp, steps)
         ceiling = self.ceiling(look.unit)
         if round(temp, 1) > ceiling + 1e-9:
             # MashInStep's own ceiling, whatever a plan says: no strike water is heated past it from here.
@@ -1332,8 +1508,9 @@ class StrikeController:
             working = self.job is not None and not self.job["quiet"]
             if working or self.answer is None:
                 raise StrikeRefused(409, "plan_changed", strike=self.get_state(look), **self._plan_said(True))
-            use, rest = self.answer["use"], look.inputs["rest"]
-            if use is None or temp > use + 0.05 or temp < rest - 0.05:
+            use, rest, level = self.answer["use"], look.inputs["rest"], self.answer.get("level")
+            the_check = level is not None and abs(temp - level) <= 0.05
+            if not the_check and (use is None or temp > use + 0.05 or temp < rest - 0.05):
                 raise StrikeRefused(409, "plan_changed", strike=self.get_state(look), **self._plan_said(False))
         else:
             target = self._back_to(look)
@@ -1341,6 +1518,53 @@ class StrikeController:
                 raise StrikeRefused(409, "back_changed", to=target, strike=self.get_state(look))
         applied = await self._apply_strike(look, do, round(temp, 1))
         return dict(applied=applied, strike=self.get_state(self.update()))
+
+    async def _set_strike(self, look, do, temp, steps):
+        """set and beersmith (strike): the brewer's own strike, or BeerSmith's again, from the rest to MashInStep's
+        limits over it."""
+        self._same_recipe(look, steps)
+        shown = look.strike
+        if shown["asked"] or look.off == "malt_in":
+            raise StrikeRefused(409, "asked", strike=self.get_state(look))
+        if look.off is not None:
+            raise StrikeRefused(409, "off", why=look.off, strike=self.get_state(look))
+        if do == "beersmith":
+            to = shown["beersmith"]
+            if to is None:
+                raise StrikeRefused(409, "no_beersmith", strike=self.get_state(look))
+        else:
+            to = round(temp, 1)
+        low, high = shown["range"] if shown["range"] else (None, self.ceiling(look.unit))
+        if (low is not None and to < low - 1e-9) or to > high + 1e-9:
+            raise StrikeRefused(400, "out_of_range", low=low, high=high)
+        if look.phase == "moved":
+            applied = await self._strike_after_move(look, do, to)
+        else:
+            applied = await self._apply_strike(look, do, to)
+        after = self.update()
+        applied["mashin"] = after.strike["mashin"]
+        return dict(applied=applied, strike=self.get_state(after))
+
+    async def _strike_after_move(self, look, do, to):
+        """set or beersmith once the strike water has moved: kept for the brew day, and the dough-in MashIn's
+        pre-heat moved to the one for it while it heats. Nothing else changes: no step's figure, no HLT target."""
+        unit, before = look.unit, look.strike["value"]
+        self.day["after"] = {"value": to, "unit": unit}
+        self.day["checked"] = None
+        self._save_day()
+        now = self._look()
+        mashin = now.strike["mashin"]
+        changed = []
+        mi = look.mi
+        setter = getattr(getattr(mi, "instance", None), "set_preheat", None)
+        if mi is not None and mi.status == StepState.ACTIVE and callable(setter):
+            if await setter(mashin):
+                changed.append("mashin")
+        u = "°" + unit
+        said = ("Strike back to BeerSmith's %.1f %s" % (to, u) if do == "beersmith"
+                else "Strike set to %.1f %s%s" % (to, u, "" if before is None else ", was %.1f %s" % (before, u)))
+        logger.info("%s · MashIn heats to %s", said, "the rest" if mashin is None else "%.1f %s" % (mashin, u))
+        return dict(do=do, to=to, **{"from": before}, by=look.by, changed=changed)
 
     def _forget_wait(self, si):
         """A strike water step stopped, or failed, after it asked for the water to be moved keeps that wait with it,
@@ -1401,12 +1625,20 @@ class StrikeController:
             # (recipe_temps). A figure an earlier USE wrote where this one didn't stays recorded.
             kept = [u for u in self.day.get("used") or [] if (u["step"], u["prop"]) not in wrote]
             self.day["used"] = kept + [dict(step=sid, prop=prop, value=to, unit=unit) for sid, prop in wrote] or None
-        else:
+            self.day["checked"] = {"value": to, "unit": unit}
+        elif do == "back":
             self.day["was"] = None
             self.day["used"] = None
+            self.day["checked"] = None
+        else:
+            # The brewer's own, or BeerSmith's: BACK TO and the Recipe Book's record of USE stay as they were.
+            self.day["checked"] = None
         self._save_day()
         u = "°" + unit
-        if si is not None:
+        if do in ("set", "beersmith"):
+            said = ("Strike back to BeerSmith's %.1f %s" % (to, u) if do == "beersmith"
+                    else "Strike set to %.1f %s%s" % (to, u, "" if before is None else ", was %.1f %s" % (before, u)))
+        elif si is not None:
             said = ("Strike water set to %.1f %s, was %.1f %s" % (to, u, before, u) if do == "use" and before is not None
                     else "Strike water set to %.1f %s" % (to, u) if do == "use"
                     else "Strike water set back to %.1f %s" % (to, u))
@@ -1655,17 +1887,17 @@ class StrikeController:
         if callable(push):
             push(complete=True)
         after = self.update().recipe or {}
+        # The strike water card's words, wherever the figure was changed (Brew Day or the recipe editor): "Mash water
+        # set to 7.00 gal, was 8.26 gal", "Mash water back to BeerSmith's 8.26 gal", "Grain weight set to 18.0 lb,
+        # was 20.0 lb".
         for key in list(given) + back:
             what = "Grain weight" if key == "grain" else "Mash water"
-            was = "" if before[key] is None else ", was %s %s" % (before[key], units[key])
+            shown = (lambda value: "– –" if value is None else "%s %s" % (_figure(value, places[key]), units[key]))
             if key in back or key in restored:
-                logger.info("%s back to BeerSmith's %s %s for the strike water forecast%s", what, after.get(key),
-                            units[key], was)
+                logger.info("%s back to BeerSmith's %s", what, shown(after.get(key)))
             else:
-                logger.info("%s set to %s %s for the strike water forecast, %s%s", what, round(given[key], 2),
-                            units[key], "changed from BeerSmith's in the recipe editor"
-                            if key in after.get("changed", {}) else "given on Brew Day" if not edit
-                            else "given in the recipe editor", was)
+                logger.info("%s set to %s%s", what, shown(given[key]),
+                            "" if before[key] is None else ", was %s" % shown(before[key]))
         applied = {key: round(value, 2) for key, value in given.items() if key not in restored}
         applied.update({key: after.get(key) for key in back + restored})
         if back or restored:

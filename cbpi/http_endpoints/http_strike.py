@@ -39,7 +39,7 @@ class StrikeHttpEndpoints:
     async def http_strike_state(self, request):
         """
         ---
-        description: The strike water helper - USE for the loaded recipe, the numbers it is worked out from and where each comes from, the forecasts for the strikes the brew-day screen shows, and whether CraftBeerPi is working USE out again. The same object as the websocket topic strike. See the strike water API contract for every field.
+        description: The strike water helper - USE for the loaded recipe, the numbers it is worked out from and where each comes from, the forecasts for the strikes the brew-day screen shows, and whether CraftBeerPi is working USE out again; the strike in use (strike - value, from beersmith, yours, check or rest, BeerSmith's figure, the dough-in MashIn's pre-heat, whether the malt has been asked for, a pre-heat stalled short, the range set takes and the heat balance's figures) and CraftBeerPi's forecast as a check on it (check - landing, note, within, use). The same object as the websocket topic strike. See the strike water API contract for every field.
         tags:
         - Step
         responses:
@@ -52,7 +52,7 @@ class StrikeHttpEndpoints:
     async def http_strike_use(self, request):
         """
         ---
-        description: USE or BACK TO. USE sets the strike water step's Temp, BrewStart's Ready_Temp while it hasn't handed on, and the HLT's target while the strike water step heats it - by hand, the HLT's target - and keeps the strike water before the first USE for BACK TO, which puts it back. A BrewStart that heats the HLT itself (BrewStart 1.3.0 on: Ready by, and from 1.3.0.post7 Start at and a blank Timing too) is the strike water step when the recipe has no other, its Ready_Temp the strike water's temperature.
+        description: USE, BACK TO, the brewer's own strike (set) or BeerSmith's again (beersmith). USE sets the strike water step's Temp, BrewStart's Ready_Temp while it hasn't handed on, and the HLT's target while the strike water step heats it - by hand, the HLT's target - and keeps the strike water before the first USE for BACK TO, which puts it back. USE takes the old box's USE (from the rest up to it) or the check's (the state's check.use), and the strike is tagged check while it holds. set (temp, from the rest to MashInStep's limits over it, the state's strike.range) and beersmith (no temp) write as USE does until the strike water has moved; after that they are kept for the brew day and move only the dough-in MashIn's pre-heat (strike.mashin); from the ask for the malt on they are refused. A BrewStart that heats the HLT itself (BrewStart 1.3.0 on: Ready by, and from 1.3.0.post7 Start at and a blank Timing too) is the strike water step when the recipe has no other, its Ready_Temp the strike water's temperature.
         tags:
         - Step
         parameters:
@@ -74,11 +74,11 @@ class StrikeHttpEndpoints:
                   type: string
         responses:
             "200":
-                description: what was applied, and the state
+                description: what was applied ({do, to, from, by, changed}, and for set and beersmith mashin, the pre-heat now), and the state
             "400":
-                description: bad_body
+                description: bad_body, too_hot (USE, BACK TO) or out_of_range (set, beersmith; with low and high)
             "409":
-                description: recipe_changed, off, moved, missing, plan_changed or back_changed - nothing changed
+                description: recipe_changed, off, moved (USE, BACK TO), missing, plan_changed, back_changed, asked (set, beersmith, once the malt has been asked for) or no_beersmith - nothing changed
         """
         body = await self._strike_body(request)
         return await self._strike_do(self.cbpi.strike.strike, body)

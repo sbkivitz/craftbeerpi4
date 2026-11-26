@@ -8,9 +8,11 @@ from os.path import isfile, join
 
 import shortuuid
 import yaml
+from cbpi.api import readings
 from cbpi.api.beerxml import name_key
 from cbpi.api.dataclasses import NotificationType
 from cbpi.api.persist import atomic_write_bytes, atomic_write_text
+from cbpi.api.strike import follows_beersmith
 
 from ..api.step import StepMove, StepResult, StepState
 
@@ -283,6 +285,7 @@ class RecipeController:
             basic = updated["basic"]
             figures = (data.get("basic") or {}).get(self.MASH_NUMBERS)
             if figures:
+                self.strike_follows_update(updated.get("steps"), basic.get(self.MASH_NUMBERS), figures)
                 basic[self.MASH_NUMBERS] = copy.deepcopy(figures)
             for key in self.RECIPE_FACTS:
                 fact = (data.get("basic") or {}).get(key)
@@ -296,6 +299,30 @@ class RecipeController:
         self._write_with_source(file_id, updated, source_xml)
         return {"steps": kept, "same_steps": updated.get("steps") == entry.get("steps"), "basic": basic, "was": was,
                 "modified": os.path.getmtime(path), "book_steps": updated.get("steps")}
+
+    def strike_follows_update(self, steps, old_numbers, new_numbers):
+        """UPDATE's new BeerSmith strike for each BrewStart in `steps` (book step dicts, or the brew steps) whose
+        Ready_Temp still holds the old one, to 0.1 in the brewery's unit; one not yet begun, for brew steps. A
+        Ready_Temp of the brewer's own is left as it is. -> how many changed."""
+        try:
+            unit = readings.temp_unit(self.cbpi)
+        except Exception:  # noqa: BLE001
+            unit = "C"
+        changed = 0
+        for step in steps or []:
+            kind = step.get("type") if isinstance(step, dict) else getattr(step, "type", None)
+            props = step.get("props") if isinstance(step, dict) else getattr(step, "props", None)
+            status = step.get("status", "I") if isinstance(step, dict) else getattr(step, "status", None)
+            if kind != "BrewStart" or props is None or str(getattr(status, "value", status)) != "I":
+                continue
+            new = follows_beersmith(props.get("Ready_Temp"), old_numbers, new_numbers, unit)
+            if new is not None:
+                logging.info("UPDATE: %s's water temperature follows BeerSmith's strike, %s, was %s",
+                             step.get("name") if isinstance(step, dict) else getattr(step, "name", "BrewStart"), new,
+                             props.get("Ready_Temp"))
+                props["Ready_Temp"] = new
+                changed += 1
+        return changed
 
     async def get_recipes(self):
         path = self.cbpi.config_folder.get_file_path("recipes")

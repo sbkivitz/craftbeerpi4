@@ -2618,8 +2618,10 @@ class StepController(PumpStarts):
     async def take_book_figures(self, book_file, numbers, source, modified=None, facts=None):
         """UPDATE from an import (UploadController.import_recipe) of the book recipe the brew steps were loaded from
         (BOOK_FILE_KEY is `book_file`): the steps take its mash figures `numbers` and its BeerXML file `source`
-        ({source_xml, source_xml_recipe}, SOURCE_KEYS) into their basic data at once, nothing loaded again. No step,
-        its status or its settings change, so it works while a step runs or BrewStart waits.
+        ({source_xml, source_xml_recipe}, SOURCE_KEYS) into their basic data at once, nothing loaded again. No step's
+        status changes, so it works while a step runs or BrewStart waits; the one setting that does is a BrewStart
+        not begun whose Ready_Temp still holds BeerSmith's old strike, which takes the new one
+        (RecipeController.strike_follows_update).
 
         `facts`, {key: value} for RECIPE_FACTS: the import's mash and sparge additions, mash pH and yeasts, each
         taken as the import has it, or dropped where it has none; None leaves them as they are.
@@ -2631,6 +2633,12 @@ class StepController(PumpStarts):
         if basic is None or not isinstance(book_file, str) or not book_file or basic.get(self.BOOK_FILE_KEY) != book_file:
             return False
         if numbers:
+            follow = getattr(getattr(self.cbpi, "recipe", None), "strike_follows_update", None)
+            if callable(follow):
+                try:
+                    follow(self.profile, basic.get(self.MASH_NUMBERS_KEY), numbers)
+                except Exception as e:  # noqa: BLE001 - the figures are taken all the same
+                    logging.warning("UPDATE: BrewStart's water temperature could not follow BeerSmith's: %s", e)
             basic[self.MASH_NUMBERS_KEY] = copy.deepcopy(numbers)
         if isinstance(facts, dict):
             for key in self.RECIPE_FACTS:

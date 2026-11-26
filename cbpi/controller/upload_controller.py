@@ -2367,6 +2367,9 @@ class UploadController:
           its DISPLAY_TUN_WEIGHT, or its TUN_WEIGHT, which BeerSmith writes in ounces;
         - infuse_temp_c, grain_temp_c, tun_temp_c: BeerSmith's own strike (INFUSE_TEMP) and the grain and tun
           temperatures it was worked out for (GRAIN_TEMP, TUN_TEMP);
+        - rest_c: the first infusion's STEP_TEMP, the rest BeerSmith's strike was worked out for, and equip_adjust:
+          the MASH's EQUIP_ADJUST ("Adjust Temp for Equip"), True or False - with BeerSmith's strike, the share of the
+          tun's steel it counted (cbpi.api.strike.steel_counted);
         - lacks: those the recipe doesn't have, of grain, water, tun, infuse_temp, grain_temp and tun_temp.
 
         A figure the file doesn't have is left out. Never raises: a recipe that can't be read lacks them all.
@@ -2407,6 +2410,12 @@ class UploadController:
                 infuse = self._display_celsius(infusion.findtext("INFUSE_TEMP"))
                 if infuse is not None:
                     found["infuse_temp_c"] = round(infuse, 4)
+                rest = self._xml_number(infusion, "STEP_TEMP")
+                if rest is not None:
+                    found["rest_c"] = round(rest, 4)
+            adjust = (mash.findtext("EQUIP_ADJUST") or "").strip().upper() if mash is not None else ""
+            if adjust in ("TRUE", "FALSE"):
+                found["equip_adjust"] = adjust == "TRUE"
             equipment = recipe.find("EQUIPMENT")
             boil = self._xml_number(recipe, "BOIL_SIZE") or self._xml_number(equipment, "BOIL_SIZE")
             if boil and boil > 0:

@@ -140,7 +140,7 @@ class NotificationStep(CBPiStep):
         ),
         Property.Sensor(
             label="Grain_Sensor",
-            description="Ambient sensor. Grain sits at room temperature, so this is its temperature. Required for strike calculation.",
+            description="Ambient sensor. Grain sits at room temperature, so this is its temperature. Required for strike calculation. Not used where the recipe's dough-in MashIn has a pre-heat from BeerSmith's strike temperature: it then heats the moved water to that strike less the tun's steel BeerSmith counted.",
         ),
         Property.Number(
             label="Mash_Water",
@@ -178,6 +178,15 @@ class MashInStep(CBPiStep):
     #: mash additions may be in already, so the question says "If you haven't
     #: yet, add to the mash: ..." (StepController.dough_in_words).
     MALT_ASKED_PROP = "_malt_asked"
+
+    #: A pre-heat that stops this close under its figure, and climbs less than
+    #: PREHEAT_STALL_RISE in PREHEAT_STALL_WINDOW seconds of brewing time, is
+    #: said to have stalled (preheat_stall), by unit. Above the band the stall
+    #: watch (note_heat_progress) looks after it; in the band it stays quiet,
+    #: as a vessel held near its target isn't rising.
+    PREHEAT_STALL_WITHIN = {"F": 1.0, "C": 0.5}
+    PREHEAT_STALL_RISE = {"F": 0.1, "C": 0.05}
+    PREHEAT_STALL_WINDOW = 600
 
     async def NextStep(self, **kwargs):
         step = self.cbpi.step.find_by_id(self.id)
@@ -232,6 +241,9 @@ class MashInStep(CBPiStep):
             self.kettle.target_temp = getattr(self, "rest_temp", None) or self._float_prop(
                 "Temp", 0
             )
+        # The pre-heat is over: from here the target is the rest.
+        self._preheating = False
+        self._reset_preheat_stall()
         # Strike temperature is reached, so the brewer is about to dough in.
         # From here the tun must be assumed to contain grain - the flag goes
         # back before the first handful goes in, not after the step ends.
@@ -302,6 +314,8 @@ class MashInStep(CBPiStep):
         self.props["Temp"] = temp
         self.rest_temp = temp
         self.strike_temp = temp
+        self._preheating = False
+        self._reset_preheat_stall()
         # The stall watch starts afresh from here. It doesn't look while the step waits for the water to be moved,
         # so what it saw last is as old as that wait, and its first look at a new, higher target would call the
         # whole wait a stall.
@@ -331,6 +345,114 @@ class MashInStep(CBPiStep):
         await self.push_update()
         return asked
 
+    def _limited(self, temp):
+        """`temp` within MashIn's limits for water heated before the malt: never under the rest, at most
+        MAX_STRIKE_RISE_C over it and never over MAX_STRIKE_ABS_C, in the brewery's unit. None for no number."""
+        try:
+            value = float(temp)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        fahrenheit = self.get_config_value("TEMP_UNIT", "C") != "C"
+        rest = getattr(self, "rest_temp", None) or self._float_prop("Temp", 0)
+        top = min(rest + self.MAX_STRIKE_RISE_C * (1.8 if fahrenheit else 1.0),
+                  (self.MAX_STRIKE_ABS_C * 1.8 + 32) if fahrenheit else self.MAX_STRIKE_ABS_C)
+        return round(max(rest, min(top, value)), 1)
+
+    def _preheat(self):
+        """The pre-heat for this step from the strike water helper (StrikeController.preheat_for), within MashIn's
+        limits, or None: it isn't the recipe's dough-in MashIn on the mash tun, or the figures give none."""
+        strike = getattr(self.cbpi, "strike", None)
+        find = getattr(strike, "preheat_for", None)
+        if not callable(find):
+            return None
+        try:
+            found = find(self.id)
+        except Exception as e:  # noqa: BLE001 - MashIn heats as before
+            logging.warning("MashIn: no pre-heat from the strike water: %s", e)
+            return None
+        return None if found is None else self._limited(found)
+
+    async def set_preheat(self, temp):
+        """Move a running pre-heat to `temp` without touching Temp: for the strike changed once the water has moved
+        (StrikeController), so only what MashIn heats the moved water to before the malt follows it. None: back to the
+        rest. Within MashIn's limits. Does nothing once the malt has been asked for, as the target is the rest by
+        then. Switches nothing: the kettle's target moves, and its logic, on or off, is left as it is. Returns True
+        when the target moved."""
+        if not self.running or getattr(self, "_waiting_for_malt", False):
+            return False
+        target = self._limited(temp if temp is not None else getattr(self, "rest_temp", None))
+        if target is None:
+            return False
+        self.strike_temp = target
+        self._preheating = temp is not None
+        self.reset_heat_watch()
+        self._reset_preheat_stall()
+        # Its one-second timer, already counting for the old figure, waits for the new one instead.
+        timer = getattr(self, "timer", None)
+        if timer is not None and getattr(timer, "is_running", False) is True:
+            await timer.stop()
+            self.timer = Timer(1, on_update=self.on_timer_update, on_done=self.on_timer_done)
+        kettle = getattr(self, "kettle", None)
+        if kettle is not None:
+            try:
+                await self.cbpi.kettle.set_target_temp(kettle.id, target)
+            except Exception as e:  # noqa: BLE001 - the step's own target still moves
+                logging.warning("Could not set %s's target: %s", getattr(kettle, "name", "the kettle"), e)
+                kettle.target_temp = target
+        logging.info("MashIn: the pre-heat is now %s", target)
+        await self.push_update()
+        return True
+
+    #: The pre-heat stopped short (_watch_preheat): {"short": degrees under its figure, "min": whole minutes it has
+    #: not climbed}, or None. Read by the strike water helper for MashIn's row; it switches nothing.
+    preheat_stall = None
+
+    def _reset_preheat_stall(self):
+        self.preheat_stall = None
+        self._preheat_anchor = None
+
+    def _watch_preheat(self, sensor_value, target):
+        """Say so, on MashIn's row only (preheat_stall, and the log), when the pre-heat has stopped climbing within
+        PREHEAT_STALL_WITHIN under its figure for PREHEAT_STALL_WINDOW: a HERMS that can only match the losses there
+        would wait for the malt question for ever, as the stall watch is quiet so near the target. It switches
+        nothing."""
+        if not getattr(self, "_preheating", False):
+            self._reset_preheat_stall()
+            return
+        try:
+            value, goal = float(sensor_value), float(target)
+        except (TypeError, ValueError):
+            return
+        if not (math.isfinite(value) and math.isfinite(goal)):
+            return
+        unit = "F" if self.get_config_value("TEMP_UNIT", "C") != "C" else "C"
+        short = goal - value
+        if short <= 0 or short > self.PREHEAT_STALL_WITHIN[unit]:
+            self._reset_preheat_stall()
+            return
+        now = clock.now()
+        anchor = getattr(self, "_preheat_anchor", None)
+        if anchor is None or value >= anchor[0] + self.PREHEAT_STALL_RISE[unit]:
+            self._preheat_anchor = (value, now)
+            self.preheat_stall = None
+            return
+        waited = now - anchor[1]
+        if waited < self.PREHEAT_STALL_WINDOW:
+            return
+        was = self.preheat_stall
+        self.preheat_stall = {"short": round(short, 1), "min": int(waited // 60)}
+        if was is None:
+            logging.warning("MashIn: the pre-heat has stopped %.1f short of %s for %d minutes", short, goal,
+                            int(waited // 60))
+
+    def clock_moved(self, seconds):
+        super().clock_moved(seconds)
+        anchor = getattr(self, "_preheat_anchor", None)
+        if anchor is not None:
+            self._preheat_anchor = (anchor[0], anchor[1] + seconds)
+
     async def on_timer_update(self, timer, seconds):
         await self.push_update()
 
@@ -339,10 +461,19 @@ class MashInStep(CBPiStep):
         self.kettle = self.get_kettle(self.props.get("Kettle", None))
         self.rest_temp = self._float_prop("Temp", 0)
         self._waiting_for_malt = bool(self.props.get(self.WAITING_FOR_MALT_PROP, False))
+        self._reset_preheat_stall()
         if self._waiting_for_malt:
             await self._resume_waiting_for_malt()
             return
-        self.strike_temp = self._strike_target(self.rest_temp)
+        # The recipe's dough-in MashIn heats the moved water to its pre-heat for the strike in use (BeerSmith's,
+        # less the tun's steel it already paid for), ahead of its own Grain_Sensor strike, never added to it.
+        preheat = self._preheat()
+        self._preheating = preheat is not None
+        if preheat is not None:
+            self.strike_temp = preheat
+            logging.info("MashIn: heating the strike water to %s before the malt, for the strike in use", preheat)
+        else:
+            self.strike_temp = self._strike_target(self.rest_temp)
         if self.kettle is not None:
             self.kettle.target_temp = self.strike_temp
         # Tell the kettle logic the tun holds only water.
@@ -568,6 +699,7 @@ class MashInStep(CBPiStep):
                 target = self._float_prop("Temp", 0)
             if self.timer.is_running is not True:
                 self.note_heat_progress(sensor_value, target)
+                self._watch_preheat(sensor_value, target)
             if self.target_reached(sensor_value, target) and self.timer.is_running is not True:
                 self.timer.start()
                 self.timer.is_running = True
