@@ -146,8 +146,8 @@ In the owner's words where he gave them.
 - **The defect list**: `DEFECTS.md` in the bench. Every fault found, with an M or D
   number, how it was found, the fix and the test that would catch it again.
 - **Rig updates** rev 66 to 71: RELEASES.md has the history. Rev 69 is on the rig; rev 70
-  was published on 25 Nov and hasn't been reported installed; rev 71, prepared the same
-  evening, replaces it and brings everything built since rev 69.
+  was published on 25 Nov and hasn't been reported installed; rev 71, published on 26 Nov,
+  replaces it and brings everything built since rev 69.
 - **Fermenter work** was stopped on 19 Oct 2026. Don't touch it until he reopens it.
 
 ## 4. Who does what
@@ -276,11 +276,11 @@ rig. The only difference is the address.
 
 ## 8. Still open
 
-- Rig update rev 71, prepared on 25 Nov: everything on the simulators since rev 69 (core
-  4.7.7.post95 on `master`, web interface post79, PIDHerms post12, BrewStart
+- Rig update rev 71, published on 26 Nov: everything on the simulators since rev 69 (core
+  4.7.7.post95 on `master`, web interface post80, PIDHerms post12, BrewStart
   1.3.0.post11, BoilPower post14, phone alerts 0.0.10.post4, BrewScribe dev61,
   FIGURES, the recipe pages, 12-hour times, pumps that ask, the strike water card, liquid
-  levels). It waits for his word.
+  levels). Posted to the rig side; not yet reported installed.
 - Step 11 of rev 69, the supervised water test, was put off and hasn't been done. Rev 71
   carries it.
 - The rig logs "This channel is already in use" for its pins; the cause is unknown. Read-

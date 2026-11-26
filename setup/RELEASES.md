@@ -10,7 +10,7 @@ says what the rig is.
   (`C:\src\personal\cbpi-testbench\rig-update.html`). Step-by-step commands to run on the
   Pi, generated from the repositories by `build_rig_page.py`, never typed by hand.
 - **Rev**: the page's revision number. It goes up by one every time the page is built.
-  Rev 71, prepared on 25 Nov 2026, is the newest. The rig runs rev 69, installed on
+  Rev 71, published on 26 Nov 2026, is the newest. The rig runs rev 69, installed on
   21–22 Nov 2026; rev 70, published on 25 Nov, hasn't been reported installed, and rev 71
   replaces it.
 - **Version**: each package's own number. The forks of other people's plugins add
@@ -190,7 +190,7 @@ way would be:
 | 68 | 18 Nov | core post47, web interface post24, PIDBoil post4, PIDHerms post9, BoilPower post12, AutoTune post4: Hardware page, timers kept through a restart, pre-brew check, empty-setting defaults | Not installed; replaced |
 | 69 | 19 Nov | core post48, web interface post25, PIDBoil post5, AutoTune post6, BrewStart 1.2.0.post7, BrewScribe dev48 (new on the rig) | Installed 21–22 Nov. The water test (step 11) was put off by the owner and hasn't been done |
 | 70 | 25 Nov | core post86, web interface post69, PIDHerms post10, BoilPower post14, BrewStart 1.3.0.post8, phone alerts 0.0.10.post3 (new on the rig), BrewScribe dev60; every install line at a commit; BrewStart's Start at fault fixed. A first rev 70, prepared on 22 Nov, was never published | Posted to the rig side on 25 Nov; not reported installed. Replaced by rev 71 |
-| 71 | prepared 25 Nov | core post95, web interface post79, PIDHerms post12, BrewStart 1.3.0.post11, phone alerts 0.0.10.post4, BrewScribe dev61: no pump starts by itself, BeerSmith's strike drives BrewStart and MashIn, the strike water card, liquid levels, typed figures warn and never refuse | Waits for the owner's word. Carries rev 69's water test (step 11), still not done |
+| 71 | 26 Nov | core post95, web interface post80, PIDHerms post12, BrewStart 1.3.0.post11, phone alerts 0.0.10.post4, BrewScribe dev61: no pump starts by itself, BeerSmith's strike drives BrewStart and MashIn, the strike water card, MashIn's row says HEATING while it heats to its pre-heat, liquid levels, typed figures warn and never refuse | Posted to the rig side on 26 Nov; not yet reported installed. Carries rev 69's water test (step 11), still not done |
 
 Before rev 65 the rig's last install was on 11 Oct (core 4.7.7.post1). The bench's git log
 for `rig-update.html` has every rev.

@@ -136,7 +136,7 @@ speeds up every timer. Never copy a settings folder from the workstation to the 
 
 ## 2. What the rig is to run: rig update rev 71
 
-These are the versions rig update rev 71 recommends, prepared on 25 Nov 2026. The rig
+These are the versions rig update rev 71 recommends, published on 26 Nov 2026. The rig
 installed rev 69's on 21–22 Nov 2026 and reported them back: cbpi4 4.7.7.post48, cbpi4gui
 0.5.1a3.post25, cbpi4-PIDHerms 0.0.9.post9, cbpi4-boilpower 0.0.3.post12,
 cbpi4_BrewStart 1.2.0.post7 and cbpi4-BrewScribe 0.1.0.dev48, with PIDBoil and AutoTune as
@@ -146,7 +146,7 @@ it. Until the rig reports rev 71 installed, it runs rev 69's versions.
 ```text
 RECOMMENDED VERSIONS rig-update.html rev 71
 cbpi4==4.7.7.post95
-cbpi4gui==0.5.1a3.post79
+cbpi4gui==0.5.1a3.post80
 cbpi4-PIDHerms==0.0.9.post12
 cbpi4-boilpower==0.0.3.post14
 cbpi4-PIDBoil==0.0.9.post5
@@ -269,7 +269,7 @@ Pi**, where a ready-built package might make them unnecessary. They do no harm.
 2. Install each plugin into the same environment:
 
    ```bash
-   pipx inject cbpi4 --force git+https://github.com/sbkivitz/craftbeerpi4-ui.git@3f7a3aae6f2d7a2bca552ac98a20d81b1b6624eb
+   pipx inject cbpi4 --force git+https://github.com/sbkivitz/craftbeerpi4-ui.git@8fbcedc824c2bbeabfa4578c5b48b9c5d1e88c99
    pipx inject cbpi4 --force git+https://github.com/sbkivitz/cbpi4-PIDHerms.git@76ef759d5fbcca040f1deb898f8fba9981fd316d
    pipx inject cbpi4 --force git+https://github.com/sbkivitz/cbpi4-boilpower.git@a8743906f9971da1e2e7d44a7938d3bda1fffc46
    pipx inject cbpi4 --force git+https://github.com/sbkivitz/cbpi4-PIDBoil.git@b15f07ffea65d9932f7e59da9644e9e5b9f3d5da
@@ -302,8 +302,7 @@ Pi**, where a ready-built package might make them unnecessary. They do no harm.
 
 **Tested on Linux** on 23 Nov 2026 with rev 69's branches: the install and all six
 injects worked, `pipx list` showed exactly rev 69's versions, and step 5's check printed
-seventeen `True`s. **Not tested** the same way with rev 71's commits, which reach GitHub
-only when rev 71 is published.
+seventeen `True`s. **Not tested** the same way with rev 71's commits.
 
 Never use plain `pip3` or `python3` for any of this. They are the system's Python, not the
 one CraftBeerPi runs in, and they would install into or check the wrong place
