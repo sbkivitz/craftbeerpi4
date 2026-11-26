@@ -55,7 +55,8 @@ In the owner's words where he gave them.
   here. I don't want a crude representation of what I currently see." Since then: up to
   four named timers, an event line, section cues, the timers beside the drawing (layout
   D), the brewery's name, the version in small type ("somewhere inconspicuous"), and
-  12-hour times.
+  12-hour times. A timer's time is set as on a phone: presets "5 min" to "60 min", one
+  large m:ss, then "− min +" and "− sec +".
 - **Boil control.** The boil waits for him: it "should require a manual advance to boil
   step instead of auto-advance". The boil power can be changed at any time, mid-recipe
   included. KEEP BOILING: "choose keep at boil temp or let the boil power fully drive the
@@ -71,14 +72,17 @@ In the owner's words where he gave them.
 - **BrewStart** (Ready by): works out when to start heating so the water is hot by a set
   time. Since 1.3.0 it heats the HLT itself and then asks to move the strike water,
   because handing over to the mash tun's mash-in step had started the wort pump with an
-  empty tun.
+  empty tun. It heats to BeerSmith's strike temperature (the strike water card, below);
+  once the water is hot, its row says "Hot at 157.7 °F. Move it to the Mash Tun, connect
+  the hoses, then NEXT."
 - **Pumps.** During mash-in the wort pump waits until the HLT is close: "only run the pump
-  when the temp is approaching the target". No pump rests: "I don't want pump rest!" Any
+  when the temp is approaching the target". No pump rests: "I don't want pump rest!"
+  (PID_HERMS's `Pump_Rest` is No; left blank it counts as Yes). Any
   pump is off whenever its hoses or valves change: "Any time I need to change hoses or
   "valves" that respective pump should be off". Switching the HLT element on by hand must
   not start the HLT pump: "when I switch on the HLT element manually, the pump should not
-  come on automatically. What if it isn't primed or the hoses are not in place, etc." (a
-  fix was being built on 23 Nov; until it reaches the rig, the rig has
+  come on automatically. What if it isn't primed or the hoses are not in place, etc." (the
+  fix is on the simulators; until it reaches the rig, the rig has
   `HLT_PUMP_WITH_HEAT` set to No). And no pump starts by itself: "some steps auto start
   the pumps and some do not. It should be more consistent, leaning towards manual starting
   via a prompt except for the brewstart case running the hlt pump" (25 Nov). A step that
@@ -101,7 +105,8 @@ In the owner's words where he gave them.
   settings page would be part of the update too?"
 - **Alarms and sound**: "The alert sound is kinda weak," so there are louder choices.
   Pressing any button is silent. Sound only for a timer that runs out (it repeats) and two
-  beeps when a hop alert, a question or an error appears.
+  beeps when a hop alert, a question or an error appears. A hop alert names the addition
+  alone ("Please add 1.50 oz Citra"), never its place in the boil step's list.
 - **Heating by hand**: an alert when an element heats by hand past its target or the boil,
   because an element switched on by hand keeps heating whatever the target says.
 - **The check START makes** (pre-brew check): the probes agree, the clock is right, every
@@ -109,9 +114,26 @@ In the owner's words where he gave them.
 - **Phone alerts**: everything that beeps also goes to his iPhone. "I don't like paying for
   things that are otherwise available for free. Let's build out ntfy." They are a second
   signal: "I don't really plan on leaving the brewery on a brew day".
-- **The strike water helper**: works out the strike temperature from the water, the grain
-  and the kettles, and shows a forecast. He taps USE; it never sets the HLT by itself. It
-  errs low until the rig is measured.
+- **The strike water card** on Brew Day: "Calculating the strike water temperature is done
+  by BeerSmith - I need to hone the process of importing it and then being able to
+  override it easily." BrewStart heats the HLT to BeerSmith's strike (157.7 °F for Test
+  Recipe v6c); the recipe's MashIn heats the moved water to a little less (155.7 °F)
+  before asking for the malt, because BeerSmith's figure already pays for warming a cold
+  tun and the HERMS warms it again. On the simulator v6c landed at 151.1 °F against its
+  152 °F rest, where heating both steps to the rest landed it at 147.7 °F. The card shows
+  MASH WATER, STRIKE and HLT WATER, each tagged BEERSMITH, YOURS, CHECK or REST; a tap
+  changes one, BEERSMITH'S puts it back, and ✕, Escape or a tap outside closes it
+  changing nothing: "I need to be able to get out of this screen", "give me the option to
+  set the mash water too". CHECK is CraftBeerPi's own forecast in one line, offering USE
+  only when it expects the mash more than 1 °F off the rest. Nothing asks where the grain
+  spent the night: the boil kettle's probe stands for it unless he types GRAIN TEMP. The
+  mash water's ratio is the mash water in force, less BeerSmith's water under the false
+  bottom, against the grain, everywhere it shows.
+- **Liquid levels** in Brew Day's drawing: a faint fill in each vessel, blue for water and
+  gold for wort, worked out from the recipe and its steps ("≈"), or a volume typed into
+  BrewScribe, marked READ until liquid next moves; MIN at each kettle's least water.
+  Settings → Timers and alerts → "Show liquid levels on Brew Day" (`BREWDAY_LEVELS`), Yes
+  by default.
 - **FIGURES** (replaced Analytics): the brewery's own figures learned from past brews, as a
   ledger. USE applies a learned figure once two brews agree.
 - **Vessel measurements** (capacity, empty weight, material) on the Hardware page, all
@@ -204,6 +226,19 @@ These are the owner's standing rules. Follow each one; the reason is given where
     WAI forms guidance, before choosing a layout.
 17. **"If it ain't broke, don't fix it"** once something is stable. Don't list steps he
     doesn't need to run right now. Production quality, not prototypes.
+18. **A check on a figure he types warns; it never refuses.** HLT water, mash water, the
+    strike: a figure that looks wrong is taken, with one short line said once ("Leaves
+    0.5 gal in the HLT, under its 3.0 gal minimum.", "Less than the 19.5 gal of mash
+    water."), and SET always works. Only a figure CraftBeerPi can't take at all (blank, or
+    out of its range) keeps SET greyed. Nothing switches on a typed figure, so a refusal
+    protects nothing, and it left him stuck: "I need to be able to get out of this screen
+    and it doesn't seem like I can without hitting cancel."
+19. **BeerSmith's strike temperature drives BrewStart and MashIn.** BrewStart heats the HLT
+    to it; the recipe's MashIn heats the moved water to a little less, worked out from
+    BeerSmith's own figures, so the tun's steel isn't paid for twice. CraftBeerPi's own
+    forecast is only a check: it offers USE when it expects the mash more than 1 °F off
+    the rest, and never sets or blocks anything by itself. Every figure he changes has
+    BEERSMITH'S as its way back.
 
 ## 6. Rig safety
 
@@ -238,24 +273,33 @@ rig. The only difference is the address.
 | The coordinator's session history | `coordination\history` in the bench: its checkpoint summaries, oldest first |
 | What the rig reported | `rig/` in `cbpi-rig-comms` |
 
-## 8. Open as of 23 Nov 2026
+## 8. Still open
 
-- The next rig update: everything on the simulators since rev 69 (core 4.7.7.post66 or
-  later on `master`, web interface post40, BrewStart 1.3.0, BoilPower post14, phone alerts,
-  BrewScribe dev55 or later, FIGURES, the recipe pages, 12-hour times). It waits for his
-  word.
+- The next rig update: everything on the simulators since rev 69 (core 4.7.7.post95 or
+  later on `master`, web interface post78 or later, PIDHerms post12, BrewStart
+  1.3.0.post11, BoilPower post14, phone alerts 0.0.10.post4, BrewScribe dev60 or later,
+  FIGURES, the recipe pages, 12-hour times, pumps that ask, the strike water card, liquid
+  levels). It waits for his word.
 - Step 11 of rev 69, the supervised water test, was put off and hasn't been done.
 - The rig logs "This channel is already in use" for its pins; the cause is unknown. Read-
   only checks to narrow it down were sent to the rig side on 22 Nov.
 - The probe offsets (mash tun +4.0, boil kettle +1.0 °F) are in question; nothing changes
   until they are checked against a trusted thermometer.
-- `HLT_PUMP_WITH_HEAT` is No on the rig until the manual-heat fix is installed; then he
-  decides whether it goes back to Yes.
+- `HLT_PUMP_WITH_HEAT` is No on the rig until the next update; then he decides whether it
+  goes back to Yes. With that update, Yes runs the HLT pump only while BrewStart heats the
+  strike water, and anything else heating the HLT asks for it.
 - The mash tun's `HLT_Kettle` and `MashIn_Pump_Within` aren't set on the rig; he deferred
   it.
 - The Pi's exact model isn't recorded, and there is no backup of the Pi off the Pi
   (REBUILD-THE-RIG.md, part 6).
-- The strike water model needs measurements from the rig (coil, flow, losses).
+- The strike water model needs measurements from the rig (coil, flow, losses), and the
+  HLT's overshoot in the 10 minutes after "Hot at": on the simulator, water moved at an
+  overshoot of about 2 °F landed the mash about 1 °F high.
+- Recipes in the Recipe Book imported before BeerSmith's strike drove MashIn have no
+  MashIn pre-heat until their BeerSmith file is imported again with UPDATE. A BrewStart
+  saved with an older temperature shows YOURS and takes one BEERSMITH'S tap.
+- Changing the strike in the recipe editor (BrewStart's water temperature with its tag and
+  BEERSMITH'S, MashIn's pre-heat line) is being designed, not built.
 
 ## 9. Keeping this file current
 

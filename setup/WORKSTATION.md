@@ -337,7 +337,7 @@ $env:PYTHONPATH = "$files\wmi-bypass"
 & C:\src\personal\sims-venv\Scripts\python.exe "$files\verify-sims.py" <BrewScribe version> 8000 8012
 ```
 
-For example `0.1.0.dev58`. It checks the web interface, BrewScribe's page and API, the
+For example `0.1.0.dev60`. It checks the web interface, BrewScribe's page and API, the
 websocket, the logs, and that both simulators have the same switch behind each of Brew
 Day's buttons. It ends `N/N passed`.
 

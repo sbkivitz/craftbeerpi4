@@ -102,7 +102,8 @@ saved in `cbpi-rig-comms`, `rig/2026-11-22.md`):
 - **Mash Tun, PID_HERMS:** HLT_Sensor `Temp_HLT`, DeltaTemp 5.4, MashIn_DeltaTemp 12,
   P 2, I .005, D 0, HLT_P 15, HLT_I .004167, HLT_D 0, SampleTime 2, Max_Pump_Temp 207,
   Max_Output 100, Max_Boil_Output 85, Max_Boil_Temp 208.4, Max_PID_Temp 190.4,
-  Sensor_Stale_Seconds 600, Rest_Interval 600, Rest_Time 60, Pump_Rest No.
+  Sensor_Stale_Seconds 600, Rest_Interval 600, Rest_Time 60, Pump_Rest No (left blank it
+  counts as Yes and rests the pump, so keep it No).
   The rig update page also recommends HLT_Kettle = the HLT and MashIn_Pump_Within 10;
   the rig doesn't have those two set yet, and the owner deferred the decision.
 - **Boil Kettle, BoilPower:** Boil_Threshold 210, Boil_Power 53, Max_Output 100, P, I
@@ -121,13 +122,14 @@ From the Settings page. Checked on the rig on 22 Nov unless marked.
 | Temperature unit (`TEMP_UNIT`) | F | Everything the rig reports is in °F. Not read back by name |
 | Boil temperature (`steps_boil_temp`) | 210 | The rig boils at 211.3–211.9 °F; at 212 a boil step's timer may never start |
 | Switch with a hand override (`BREWDAY_OVERRIDE_ACTOR`) | `Recirc_PUMP` | The HLT pump is the one with the physical override |
-| Start the HLT pump when AUTO or the HERMS heats the HLT (`HLT_PUMP_WITH_HEAT`) | No, for now | Set to No on 22 Nov because switching the HLT element on by hand also started the pump. A fix is being built; the owner decides when it goes back to Yes |
+| Start the HLT pump when AUTO or the HERMS heats the HLT (`HLT_PUMP_WITH_HEAT`) | No, for now | Set to No on 22 Nov because switching the HLT element on by hand also started the pump. The fix comes with the next update: then Yes runs the HLT pump only while BrewStart heats the strike water, and anything else heating the HLT asks for it. The owner decides when it goes back to Yes |
 | Save readings to log files (`CSVLOGFILES`) | Yes | BrewScribe copies a finished brew's temperatures from these logs |
 | Largest log file (`SENSOR_LOG_MAX_BYTES`) | 500000 | About a day of readings per probe |
 | Old log files kept (`SENSOR_LOG_BACKUP_COUNT`) | 5 | |
 | Whirlpool temperature (`steps_whirlpool_temp`) | 170 | The owner's choice for every recipe. Not read back from the rig |
 | Sparge step type (`steps_sparge`) | SpargeStep | Recommended by the rig update page, step 9. Not read back from the rig |
 | Add a mash out if the recipe has none (`AddMashOutStep`) | Yes | Recommended by the rig update page, step 9. Not read back from the rig |
+| Show liquid levels on Brew Day (`BREWDAY_LEVELS`) | Yes | The setting comes with the next update, Yes by default: the brew-day drawing shows the liquid in each vessel. Not on the rig yet |
 
 `SIM_TIME_SCALE` must not exist on the rig. Only the simulator plugin adds it, and it
 speeds up every timer. Never copy a settings folder from the workstation to the Pi.

@@ -11,7 +11,8 @@ here stops matching reality.
 2. **The install lines** in REBUILD-THE-RIG.md, part 4: they must name the same
    repositories and branches as the new page's step 4 and step 11b.
 3. **Kettles and settings** in REBUILD-THE-RIG.md, part 1: copy any value the rig reported
-   changing (its kettle settings files, the Settings it read back).
+   changing (its kettle settings files, the Settings it read back). A setting marked "Not
+   on the rig yet" that the update brought is on the rig now: say so, with its value.
 4. **What's open** in REBUILD-THE-RIG.md (backups, the Pi's model) and AI-SEED.md,
    section 8.
 5. **What was built, and why**: add it to AI-SEED.md, section 3.
