@@ -10,7 +10,9 @@ says what the rig is.
   (`C:\src\personal\cbpi-testbench\rig-update.html`). Step-by-step commands to run on the
   Pi, generated from the repositories by `build_rig_page.py`, never typed by hand.
 - **Rev**: the page's revision number. It goes up by one every time the page is built.
-  Rev 69 is the last one published; it went on the rig on 21–22 Nov 2026.
+  Rev 71, prepared on 25 Nov 2026, is the newest. The rig runs rev 69, installed on
+  21–22 Nov 2026; rev 70, published on 25 Nov, hasn't been reported installed, and rev 71
+  replaces it.
 - **Version**: each package's own number. The forks of other people's plugins add
   `.postN` to the original's number (`0.0.9.post9`), so the original number stays theirs.
   The owner's own boilpower plugin numbers its releases the same way (`0.0.3.post12`).
@@ -30,8 +32,8 @@ says what the rig is.
   | cbpi4-PIDBoil | `main` |
   | cbpi4-PID_AutoTune | `main` |
   | cbpi4_BrewStart | the branch ending `/wall-clock-and-i18n` |
-  | cbpi4-BrewScribe | `main` (Porter moves it) |
-  | cbpi4-PushOver | `phone-alerts`, once phone alerts join the rig |
+  | cbpi4-BrewScribe | `main` (Porter moves it); the page installs its version's tag, such as `v0.1.0.dev61` |
+  | cbpi4-PushOver | `phone-alerts`, on the rig's pages from rev 70 |
 
   Pushing one of these is what makes a change reachable by the rig. Nothing else on GitHub
   matters to the rig. Branches named `backup/...` are only copies.
@@ -68,6 +70,7 @@ builds behind. That is on purpose.
    git -C C:\src\personal\_cbpi_plugins\cbpi4-PIDBoil push fork main
    git -C C:\src\personal\_cbpi_plugins\cbpi4-PID_AutoTune push fork main
    git -C C:\src\personal\_cbpi_plugins\cbpi4_BrewStart push fork HEAD
+   git -C C:\src\personal\_cbpi_plugins\cbpi4-PushOver push fork phone-alerts
    ```
 
    The BrewStart line pushes the branch that folder has checked out: check it is the one
@@ -88,7 +91,10 @@ builds behind. That is on purpose.
    It prints `wrote ...rig-update.html (rev NN)`, writes `recommended-versions.txt`, and
    lists each package with its branch, its version, and how many commits are unpushed.
    Every line must say `0 unpushed` and none `DIRTY`. Read the page in a browser before
-   going on. The page's words about what changed come from constants near the top of
+   going on. Every install line names a commit: `PINS`, near the top of
+   `build_rig_page.py`, holds each package's, and the page reads each version at its
+   commit, so set them to the commits tried on the simulators. The page's words about
+   what changed come from constants near the top of
    `build_rig_page.py` (`RIG_INSTALL`, `LABELS_SINCE`, `LANDED`, the BrewScribe notes):
    update them when they no longer describe the rig.
 
@@ -183,7 +189,8 @@ way would be:
 | 67 | 16 Nov | core post40, web interface post14, PIDHerms post8, BoilPower post11: kettle settings files, boil additions warning, HLT pump off at recipe end | Not installed; replaced |
 | 68 | 18 Nov | core post47, web interface post24, PIDBoil post4, PIDHerms post9, BoilPower post12, AutoTune post4: Hardware page, timers kept through a restart, pre-brew check, empty-setting defaults | Not installed; replaced |
 | 69 | 19 Nov | core post48, web interface post25, PIDBoil post5, AutoTune post6, BrewStart 1.2.0.post7, BrewScribe dev48 (new on the rig) | Installed 21–22 Nov. The water test (step 11) was put off by the owner and hasn't been done |
-| 70 | prepared 22 Nov | core post58, web interface post33, BoilPower post13, BrewStart post9, BrewScribe dev51, phone alerts | **Never published**, by the owner's choice: the next update brings everything built since instead |
+| 70 | 25 Nov | core post86, web interface post69, PIDHerms post10, BoilPower post14, BrewStart 1.3.0.post8, phone alerts 0.0.10.post3 (new on the rig), BrewScribe dev60; every install line at a commit; BrewStart's Start at fault fixed. A first rev 70, prepared on 22 Nov, was never published | Posted to the rig side on 25 Nov; not reported installed. Replaced by rev 71 |
+| 71 | prepared 25 Nov | core post95, web interface post79, PIDHerms post12, BrewStart 1.3.0.post11, phone alerts 0.0.10.post4, BrewScribe dev61: no pump starts by itself, BeerSmith's strike drives BrewStart and MashIn, the strike water card, liquid levels, typed figures warn and never refuse | Waits for the owner's word. Carries rev 69's water test (step 11), still not done |
 
 Before rev 65 the rig's last install was on 11 Oct (core 4.7.7.post1). The bench's git log
 for `rig-update.html` has every rev.

@@ -50,3 +50,8 @@ here stops matching reality.
 
 A path that is a placeholder (it has `<`, `*` or `…` in it) isn't checked. Write a path
 that doesn't exist yet, such as a suggested new folder, without backticks.
+
+These files are brought to a new rev while its page is still waiting for the owner's word,
+before the bench's `recommended-versions.txt` and `rig-update.html` are rebuilt. To check
+them against that page, build it into a folder of its own and point the environment
+variable CBPI_RIG_PAGE_DIR at that folder: the check then reads both files from there.

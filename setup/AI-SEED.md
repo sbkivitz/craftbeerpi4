@@ -145,8 +145,9 @@ In the owner's words where he gave them.
   run.
 - **The defect list**: `DEFECTS.md` in the bench. Every fault found, with an M or D
   number, how it was found, the fix and the test that would catch it again.
-- **Rig updates** rev 66 to 69: RELEASES.md has the history. Rev 69 is on the rig; rev 70
-  was prepared and never published; the next update brings everything built since.
+- **Rig updates** rev 66 to 71: RELEASES.md has the history. Rev 69 is on the rig; rev 70
+  was published on 25 Nov and hasn't been reported installed; rev 71, prepared the same
+  evening, replaces it and brings everything built since rev 69.
 - **Fermenter work** was stopped on 19 Oct 2026. Don't touch it until he reopens it.
 
 ## 4. Who does what
@@ -275,18 +276,19 @@ rig. The only difference is the address.
 
 ## 8. Still open
 
-- The next rig update: everything on the simulators since rev 69 (core 4.7.7.post95 or
-  later on `master`, web interface post78 or later, PIDHerms post12, BrewStart
-  1.3.0.post11, BoilPower post14, phone alerts 0.0.10.post4, BrewScribe dev60 or later,
+- Rig update rev 71, prepared on 25 Nov: everything on the simulators since rev 69 (core
+  4.7.7.post95 on `master`, web interface post79, PIDHerms post12, BrewStart
+  1.3.0.post11, BoilPower post14, phone alerts 0.0.10.post4, BrewScribe dev61,
   FIGURES, the recipe pages, 12-hour times, pumps that ask, the strike water card, liquid
   levels). It waits for his word.
-- Step 11 of rev 69, the supervised water test, was put off and hasn't been done.
+- Step 11 of rev 69, the supervised water test, was put off and hasn't been done. Rev 71
+  carries it.
 - The rig logs "This channel is already in use" for its pins; the cause is unknown. Read-
   only checks to narrow it down were sent to the rig side on 22 Nov.
 - The probe offsets (mash tun +4.0, boil kettle +1.0 °F) are in question; nothing changes
   until they are checked against a trusted thermometer.
-- `HLT_PUMP_WITH_HEAT` is No on the rig until the next update; then he decides whether it
-  goes back to Yes. With that update, Yes runs the HLT pump only while BrewStart heats the
+- `HLT_PUMP_WITH_HEAT` is No on the rig until rev 71 is installed; then he decides whether
+  it goes back to Yes. With rev 71, Yes runs the HLT pump only while BrewStart heats the
   strike water, and anything else heating the HLT asks for it.
 - The mash tun's `HLT_Kettle` and `MashIn_Pump_Within` aren't set on the rig; he deferred
   it.

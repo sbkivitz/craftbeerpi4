@@ -37,7 +37,7 @@ Sign in to GitHub once, as the owner: `gh auth login`.
 | `_cbpi_plugins\cbpi4-PID_AutoTune` | https://github.com/sbkivitz/cbpi4-PID_AutoTune.git | `main` | Relay autotune |
 | `_cbpi_plugins\cbpi4-boilpower` | https://github.com/sbkivitz/cbpi4-boilpower.git | `master` | The boil kettle's logic (the owner's own plugin, not a fork) |
 | `_cbpi_plugins\cbpi4_BrewStart` | https://github.com/sbkivitz/cbpi4_BrewStart.git | the branch ending `/wall-clock-and-i18n` (the rig's); newer work on `next`, in the worktree `_cbpi_plugins\cbpi4_BrewStart-next` | Heats water by a set time |
-| `_cbpi_plugins\cbpi4-PushOver` | https://github.com/sbkivitz/cbpi4-PushOver.git | `phone-alerts` | Phone alerts (ntfy by default, or Pushover). Not on the rig yet |
+| `_cbpi_plugins\cbpi4-PushOver` | https://github.com/sbkivitz/cbpi4-PushOver.git | `phone-alerts` | Phone alerts (ntfy by default, or Pushover). Not on the rig yet: rig update rev 71 installs it |
 | `_cbpi_plugins\cbpi4-simvessel` | https://github.com/sbkivitz/cbpi4-simvessel.git (private) | `master` | The simulated kettles. Never goes on the rig |
 | `_cbpi_plugins\cbpi4-BrewScribe` | https://github.com/sbkivitz/cbpi4-BrewScribe.git (private) | `main` = released; `impeccable-redesign` = development builds, in the worktree `_cbpi_plugins\cbpi4-BrewScribe-impeccable` | The brew-day log. Porter's (AI-SEED.md) |
 | `_cbpi_plugins\cbpi4-BM_PID_SmartBoilWithPump` | https://github.com/sbkivitz/cbpi4-BM_PID_SmartBoilWithPump.git | `main` | Not used |
