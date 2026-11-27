@@ -122,31 +122,30 @@ From the Settings page. Checked on the rig on 22 Nov unless marked.
 | Temperature unit (`TEMP_UNIT`) | F | Everything the rig reports is in °F. Not read back by name |
 | Boil temperature (`steps_boil_temp`) | 210 | The rig boils at 211.3–211.9 °F; at 212 a boil step's timer may never start |
 | Switch with a hand override (`BREWDAY_OVERRIDE_ACTOR`) | `Recirc_PUMP` | The HLT pump is the one with the physical override |
-| Start the HLT pump when AUTO or the HERMS heats the HLT (`HLT_PUMP_WITH_HEAT`) | No, for now | Set to No on 22 Nov because switching the HLT element on by hand also started the pump. The fix comes with rig update rev 71 (cbpi4 4.7.7.post94): then Yes runs the HLT pump only while BrewStart heats the strike water, and anything else heating the HLT asks for it. The owner decides when it goes back to Yes |
+| Start the HLT pump when AUTO or the HERMS heats the HLT (`HLT_PUMP_WITH_HEAT`) | No, for now | Set to No on 22 Nov because switching the HLT element on by hand also started the pump. The fix came with rig update rev 71 (cbpi4 4.7.7.post94), on the rig since 26 Nov: Yes runs the HLT pump only while BrewStart heats the strike water, and anything else heating the HLT asks for it. The owner decides when it goes back to Yes |
 | Save readings to log files (`CSVLOGFILES`) | Yes | BrewScribe copies a finished brew's temperatures from these logs |
 | Largest log file (`SENSOR_LOG_MAX_BYTES`) | 500000 | About a day of readings per probe |
 | Old log files kept (`SENSOR_LOG_BACKUP_COUNT`) | 5 | |
 | Whirlpool temperature (`steps_whirlpool_temp`) | 170 | The owner's choice for every recipe. Not read back from the rig |
 | Sparge step type (`steps_sparge`) | SpargeStep | Recommended by the rig update page, step 9. Not read back from the rig |
 | Add a mash out if the recipe has none (`AddMashOutStep`) | Yes | Recommended by the rig update page, step 9. Not read back from the rig |
-| Show liquid levels on Brew Day (`BREWDAY_LEVELS`) | Yes | The setting comes with rig update rev 71 (cbpi4 4.7.7.post93), Yes by default: the brew-day drawing shows the liquid in each vessel. Not on the rig yet |
+| Show liquid levels on Brew Day (`BREWDAY_LEVELS`) | Yes | The setting comes with rig update rev 71 (cbpi4 4.7.7.post93), Yes by default: the brew-day drawing shows the liquid in each vessel. On the rig since 26 Nov |
 
 `SIM_TIME_SCALE` must not exist on the rig. Only the simulator plugin adds it, and it
 speeds up every timer. Never copy a settings folder from the workstation to the Pi.
 
-## 2. What the rig is to run: rig update rev 71
+## 2. What the rig is to run: rig update rev 72
 
-These are the versions rig update rev 71 recommends, published on 26 Nov 2026. The rig
-installed rev 69's on 21–22 Nov 2026 and reported them back: cbpi4 4.7.7.post48, cbpi4gui
-0.5.1a3.post25, cbpi4-PIDHerms 0.0.9.post9, cbpi4-boilpower 0.0.3.post12,
-cbpi4_BrewStart 1.2.0.post7 and cbpi4-BrewScribe 0.1.0.dev48, with PIDBoil and AutoTune as
-below. Rev 70, published on 25 Nov, hasn't been reported installed, and rev 71 replaces
-it. Until the rig reports rev 71 installed, it runs rev 69's versions.
+These are the versions rig update rev 72 recommends, published on 26 Nov 2026: rev 71's,
+with the web interface built again as 0.5.1a3.post81. The rig installed rev 71 on 26 Nov
+2026 and reported it back: all of the versions below but cbpi4gui, at 0.5.1a3.post80, and
+cbpi4-BrewScribe, left at 0.1.0.dev48 until the owner approved its move to 0.1.0.dev61 with
+rev 72. Until the rig reports rev 72 installed, it runs those.
 
 ```text
-RECOMMENDED VERSIONS rig-update.html rev 71
+RECOMMENDED VERSIONS rig-update.html rev 72
 cbpi4==4.7.7.post95
-cbpi4gui==0.5.1a3.post80
+cbpi4gui==0.5.1a3.post81
 cbpi4-PIDHerms==0.0.9.post12
 cbpi4-boilpower==0.0.3.post14
 cbpi4-PIDBoil==0.0.9.post5
@@ -169,7 +168,7 @@ END RECOMMENDED VERSIONS
 | cbpi4-PushOver | Phone alerts. Off until a topic is set, which is the owner's to do | `phone-alerts` |
 | cbpi4-BrewScribe | The brew-day log. Private repository | `main`, at its tag `v0.1.0.dev61` |
 
-Each install line in part 4 names the commit on its branch that rev 71's step 4 installs, so
+Each install line in part 4 names the commit on its branch that rev 72's step 4 installs, so
 what goes on the Pi is exactly what was tried on the simulators.
 
 Never on the rig:
@@ -269,7 +268,7 @@ Pi**, where a ready-built package might make them unnecessary. They do no harm.
 2. Install each plugin into the same environment:
 
    ```bash
-   pipx inject cbpi4 --force git+https://github.com/sbkivitz/craftbeerpi4-ui.git@8fbcedc824c2bbeabfa4578c5b48b9c5d1e88c99
+   pipx inject cbpi4 --force git+https://github.com/sbkivitz/craftbeerpi4-ui.git@5ec832c1502ee17901957779f70c1c166cf41f14
    pipx inject cbpi4 --force git+https://github.com/sbkivitz/cbpi4-PIDHerms.git@76ef759d5fbcca040f1deb898f8fba9981fd316d
    pipx inject cbpi4 --force git+https://github.com/sbkivitz/cbpi4-boilpower.git@a8743906f9971da1e2e7d44a7938d3bda1fffc46
    pipx inject cbpi4 --force git+https://github.com/sbkivitz/cbpi4-PIDBoil.git@b15f07ffea65d9932f7e59da9644e9e5b9f3d5da
@@ -278,7 +277,7 @@ Pi**, where a ready-built package might make them unnecessary. They do no harm.
    pipx inject cbpi4 --force git+https://github.com/sbkivitz/cbpi4-PushOver.git@f0ac7dc996e0532d2c847303cbd85ca6184a5ee6
    ```
 
-   Each line names the commit that rig update rev 71's step 4 installs, on the branch in
+   Each line names the commit that rig update rev 72's step 4 installs, on the branch in
    part 2. A newer rig update page's step 4 replaces them.
 
 3. Check what went in:
@@ -302,7 +301,7 @@ Pi**, where a ready-built package might make them unnecessary. They do no harm.
 
 **Tested on Linux** on 23 Nov 2026 with rev 69's branches: the install and all six
 injects worked, `pipx list` showed exactly rev 69's versions, and step 5's check printed
-seventeen `True`s. **Not tested** the same way with rev 71's commits.
+seventeen `True`s. **Not tested** the same way with rev 72's commits.
 
 Never use plain `pip3` or `python3` for any of this. They are the system's Python, not the
 one CraftBeerPi runs in, and they would install into or check the wrong place
@@ -602,7 +601,7 @@ backup in part 6 includes. BrewScribe 0.1.0.dev61 moves a database from 0.1.0.de
 version 5 on its first start, and 0.1.0.dev48 can't read version 5: going back means
 restoring the backup of `/home/pi/config/brewscribe` that step 11b takes first.
 
-**Not tested** here, as it needs the Pi's key. The line is rig update rev 71's step 11b's;
+**Not tested** here, as it needs the Pi's key. The line is rig update rev 72's step 11b's;
 the rig ran rev 69's, from `main`, on 22 Nov.
 
 ## 9. Check the result
